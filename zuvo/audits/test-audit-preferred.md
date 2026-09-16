@@ -16,13 +16,19 @@ Independence: **degraded:same-model**. The requested gpt-5.4 role failed to disp
 
 Critical gates Q7/Q11/Q13/Q15/Q17 are satisfied for the **changed behavior scope** in both files, by the branch mapping below. The initial reset-file AP2/AP15 findings were repaired by the parent and the changed tests were re-read. Neither remains in this snapshot.
 
-`[GATE: test-quality] WARN tiers=A,A below-A=none independence=degraded:same-model final-verification=pending`
+`[GATE: test-quality] WARN tiers=A,A below-A=none independence=degraded:same-model final-verification=verified`
 
-Runtime verification remains owned by the parent. Parent reported 697 earlier targeted tests and then 2255 passed / 3 skipped on a preceding full snapshot. Those predate the final test cleanup and are not represented as completed verification of this snapshot. Parent final full farm run 76176 and a later targeted rerun remain owned by the parent. No test, lint, build, package installation, credential operation, or additional suite was run by this reviewer. There is no matching completed mutation artifact, randomized-order result, or server-enforced patch coverage evidence in this review.
+Runtime verification is complete, reusing the parent’s farm receipts:
+
+- Full latest production snapshot: `rt` run `1789597951-96904-15433`, running `verification/check.sh` (Ruff, compileall, baseline-comparison mypy, then `python -m pytest -q`). Ruff and compileall passed; mypy reported upstream 122, current 122, introduced 0; pytest reported **2258 passed, 3 skipped in 89.93s**. Existing mypy diagnostics were not represented as a clean upstream baseline.
+- After the final test-only split/public-collector cleanup: `rt` targeted run `1789598117-45014-27840`, scoped to `tests/test_preferred_home.py tests/test_preferred_reset.py`, reported **46 passed in 3.33s**.
+- Parent confirmed the exact final source/test hashes in `zuvo/proofs/verified-snapshot.json`; they match this report. The full run covers the latest production, and the targeted rerun covers the later test-only cleanup. No redundant full rerun is inferred.
+
+These are parent-supplied completed receipts, not commands executed by this reviewer. No test, lint, build, package installation, credential operation, or additional suite was run here. There is no matching completed mutation artifact, randomized-order result, or server-enforced patch coverage evidence in this review. Independence remains `degraded:same-model`; completion of execution does not upgrade that claim.
 
 ## Evidence identity and scope
 
-The seven hashes below were measured directly after the parent’s final test cleanup. The preceding parent artifact is `zuvo/proofs/verified-snapshot.json`; this report records the later reset-test hash explicitly. Any subsequent source/test change requires relevant reassessment.
+The seven hashes below were measured directly after the parent’s final test cleanup and match the final parent artifact `zuvo/proofs/verified-snapshot.json`. Any subsequent source/test change requires relevant reassessment.
 
 | Input | SHA-256 |
 | --- | --- |

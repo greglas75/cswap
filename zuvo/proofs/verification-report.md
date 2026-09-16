@@ -93,3 +93,7 @@ rotation reduces that risk but does not guarantee avoiding it.
 Tatiana currently has a separate Fable limit through2026-09-19T05:59:59Z, even
 though its general weekly window is absent. Do not promise Fable recovery at
 the earlier five-hour reset.
+
+## Runtime activation
+
+LaunchAgent verified running on2026-09-16T22:37:05Z. First actual poll: active slot2, home slot1 exhausted; no-switch below-threshold. Third account remains pending login.

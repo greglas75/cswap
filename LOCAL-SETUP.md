@@ -136,3 +136,27 @@ then installs this package with `pip install --no-deps .`. No suite ran on the M
 against the pinned upstream sources, and the full pytest suite. Upstream has
 existing mypy diagnostics: this checks introduced diagnostics explicitly and
 does not claim the whole inherited repository is type-clean.
+
+
+## Installed service
+
+`cswap` is available at `/Users/greglas/.local/bin/cswap`. The LaunchAgent
+`gui/501/com.greglas.claude-account-switcher` is running (verified PID72812,
+one launch, no exit). It starts at user login and restarts after unexpected exit.
+Its first decision was a normal hold on greg.laski, with Tatiana unavailable.
+
+Keep using `claude` normally in Zed. This controls the shared default Claude
+login across terminals on this Mac; separately configured profiles do not follow
+it. View status with `cswap status` or `cswap list`.
+
+Stop the service:
+```sh
+launchctl bootout gui/501/com.greglas.claude-account-switcher
+```
+Start it again:
+```sh
+launchctl bootstrap gui/501 /Users/greglas/Library/LaunchAgents/com.greglas.claude-account-switcher.plist
+```
+Logs are in `/Users/greglas/Library/Logs/claude-account-switcher.log`.
+Third account remains pending email authorization. Model policy remains Fable
+until the user answers the model choice prompted after the real quota check.
