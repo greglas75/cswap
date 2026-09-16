@@ -819,6 +819,43 @@ class UsageStore:
 
         self._mutate(identities, plans.keys(), apply)
 
+    def request_reset_poll(
+        self,
+        identities: dict[str, Identity],
+        models: tuple[str, ...],
+        threshold: float,
+    ) -> None:
+        """Nominate one fresh observation after an exhausted window resets.
+
+        This only moves the poll deadline. Reservation still enforces backoff,
+        credential quarantine and in-flight claims; elapsed time is never quota.
+        A post-reset attempt prevents repeated acceleration of the same window.
+        """
+        now = self.clock()
+
+        def apply(_num: str, row: dict) -> None:
+            usage = row.get("lastGood")
+            fetched = _num_or_none(row.get("fetchedAt"))
+            attempted = _num_or_none(row.get("lastAttemptAt"))
+            if not isinstance(usage, dict) or fetched is None:
+                return
+            resets = [
+                reset
+                for _name, pct, stamp in oauth.relevant_windows(usage, models)
+                if pct >= threshold and (reset := parse_reset_ts(stamp)) is not None
+            ]
+            if not resets:
+                return
+            reset = max(resets)
+            if fetched >= reset or reset > now:
+                return
+            if attempted is not None and attempted >= reset:
+                return
+            planned = _num_or_none(row.get("nextPollAt"))
+            row["nextPollAt"] = now if planned is None else min(planned, now)
+
+        self._mutate(identities, identities.keys(), apply)
+
     def clear_dead_token(
         self, nums: Iterable[str], identities: dict[str, Identity]
     ) -> None:

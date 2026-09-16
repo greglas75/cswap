@@ -37,6 +37,7 @@ import os
 import random
 import threading
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -51,6 +52,7 @@ CREDENTIALS_STALENESS_S = 60.0
 # The config lock (~/.claude.json.lock) keeps the older proper-lockfile
 # defaults: stale after 10s, touched every 5s.
 CONFIG_STALENESS_S = 10.0
+STORAGE_STALENESS_S = 15.0
 # We touch a little faster than CC's 5s for margin.
 TOUCH_INTERVAL_S = 3.0
 # Claude Code holds the credentials lock for one token-endpoint round trip
@@ -200,4 +202,18 @@ def claude_credentials_lock(
 def claude_config_lock(*, timeout: float | None = None):
     """Hold Claude Code's global-config write lock (``~/.claude.json.lock``)."""
     with proper_lockfile(config_lock_dir(), timeout=timeout):
+        yield
+
+
+@contextmanager
+def claude_storage_lock(*, timeout: float | None = None) -> Iterator[None]:
+    """Serialize secure-store writes with Claude Code 2.1.273 MCP updates.
+
+    Acquire after the OAuth locks and before the global configuration lock.
+    """
+    with proper_lockfile(
+        get_claude_config_home() / ".storage-write.lock",
+        timeout=timeout,
+        staleness=STORAGE_STALENESS_S,
+    ):
         yield

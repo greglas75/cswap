@@ -1,0 +1,216 @@
+artifact_kind=adversarial-review
+created_at=2026-09-16T22:24:10Z
+status=ok
+mode=security
+output_format=text
+providers_used=cursor-agent, agy, claude
+provider_count=3
+providers_attempted=3
+provider_outcomes=cursor-agent:ok,agy:ok,claude:ok
+REVIEW BY: CURSOR-AGENT
+REVIEW BY: AGY
+REVIEW BY: CLAUDE
+reviewed_blob=bb7726e638c2cdbdf441e1e1b32825666ec5f618
+reviewed_blob=1774daa80a23958d675acd9afb8e94b5a7e65ede
+reviewed_blob=28895f7100caf57c00fb1c3631bb50898134003b
+reviewed_blob=1a433998e57de60141aa3d3c86a9ca404d94e2c8
+reviewed_blob=e9d8a39485f54c39410289f5bd9c5401a770b996
+reviewed_blob=ecb68f17e07239f47cd1f3370ac0027dc8128779
+reviewed_blob=ca802ce8a3faa9e75e12ff93de5266ff88e21c76
+reviewed_blob=2305e027f1dd180d6dec3cc6ec24f596e9bc8867
+reviewed_blob=fea9742b4e759745129dbf28ece70f905b56fd63
+reviewed_blob=84fbeabe68606d921003d3f162dc7529774f5507
+reviewed_blob=24a4fe7bf2b043c5c1f8602858a4e373a63f4241
+input_chars=25387
+input_chars_original=25387
+input_truncated=false
+total_findings=12
+critical=2
+warning=7
+info=3
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: cursor-agent, agy, claude (3 total)
+Mode: security
+Input size: 25387 chars
+Date: 2026-09-16T22:24:10Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CURSOR-AGENT
+###############################################################
+
+Adversarial review is limited to the supplied diff (no full repo). Findings below focus on races, lock semantics, and trust boundaries the feature review may under-weight.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/switcher.py:~4912  
+**ISSUE:** `request_usage_after_reset` mutates the usage store with no `FileLock` or Claude OAuth/storage/config lock stack.  
+**ATTACK VECTOR:** A concurrent account switch (or another process tick) can interleave `resolve_account` → `_usage_store.request_reset_poll` → `_mutate` with credential/config writes. Poll plans or identity-keyed rows can desync from the live account map, causing fetches or switches keyed to stale `(email, org_uuid)` and extra authenticated quota API traffic under the wrong identity binding.  
+**SUGGESTED FIX:** Run `request_reset_poll` under the same coordinator lock used for switches (at least `FileLock(self.lock_file)`), or document and enforce a single serialized mutation path for usage store + credential state.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/claude_locks.py:54,208  
+**ISSUE:** New `claude_storage_lock` uses `STORAGE_STALENESS_S = 15.0`, so `proper_lockfile` may treat a peer-held lock as stale and take it.  
+**ATTACK VECTOR:** If Claude Code holds `.storage-write.lock` longer than ~15s without refresh (long MCP secure-store write, hang, or debugger), this process can acquire the lock and write credentials/MCP OAuth while CC still believes it owns the store. Outcome is torn or merged `~/.claude/credentials` JSON—not remote exploit, but OAuth/MCP token integrity loss or cross-write corruption in production.  
+**SUGGESTED FIX:** Align staleness with CC’s documented lock heartbeat (or disable stale break-in for this lock if CC never touches it). Prefer failing closed (timeout + abort switch, as in tests) over stealing the lock unless CC’s stale semantics are verified.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/switcher.py:~2954,~6691  
+**ISSUE:** `claude_storage_lock` is added only on the two `with (...)` blocks shown in the diff; other credential or secure-store writers in the same class are not shown updated.  
+**ATTACK VECTOR:** Any remaining switch/add/remove/drift path that updates credentials or MCP OAuth without `claude_storage_lock` still races CC 2.1.273 storage writes—the scenario the lock was meant to fix—so MCP tokens or OAuth fields can be dropped or partially applied depending on call path.  
+**SUGGESTED FIX:** Audit every credentials/secure-store write and wrap with the same ordered lock chain (`FileLock` → credentials → storage → config), or centralize writes behind one helper that always acquires the full stack.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** low  
+**FILE:** src/claude_swap/usage_store.py:~822  
+**ISSUE:** `request_reset_poll` accelerates polling from local `lastGood` and provider-reported reset timestamps with no integrity check beyond row shape.  
+**ATTACK VECTOR:** Any local actor who can edit the usage cache (backup restore, sync tool, malware with user privileges) can forge reset times and force near-immediate quota API calls for bound identities—increasing authenticated API volume and surfacing account/quota metadata on a attacker-chosen schedule.  
+**SUGGESTED FIX:** Treat as same trust domain as credentials (restrict file permissions, optional HMAC/signed cache if threat model includes local tampering); rate-limit reset-driven `nextPollAt` clamping per window (partially covered by `lastAttemptAt >= reset` in the same method).
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** low  
+**FILE:** src/claude_swap/autoswitch.py:~2793  
+**ISSUE:** Proactive path calls `request_usage_after_reset(preferred, ...)` whenever `preferred in candidates`, before verifying `preferred_due`.  
+**ATTACK VECTOR:** Not direct privilege escalation; it adds repeated store mutations and can keep the preferred slot “hot” in the poll planner whenever it remains a candidate, amplifying lock/I/O contention with external CC processes under misconfiguration or a large fleet.  
+**SUGGESTED FIX:** Call `request_usage_after_reset` only when reset eligibility predicates match (same checks as inside `apply`), or gate on `preferred_due` / exhausted-window state to avoid noop `_mutate` every tick.
+
+---
+
+No CRITICAL findings in the artifact alone: no new network endpoints, no missing auth on remote input, and config `homeMode` is choice-validated in tests. The strongest gaps are **cross-process lock staleness** and **usage-store mutation outside the switch lock bundle**—the kinds of issues a feature-focused review often marks “acceptable” while integration testing misses concurrent CC + autoswitch behavior.
+
+
+###############################################################
+###   PROVIDER: AGY
+###############################################################
+
+SEVERITY: CRITICAL  
+CONFIDENCE: high  
+FILE: src/claude_swap/autoswitch.py:1770  
+ISSUE: Missing `active_headroom is None` handling in prefer mode permanently deadlocks autoswitch on broken/unauthenticated primary accounts  
+ATTACK VECTOR: When the primary account's credentials expire, get revoked (HTTP 401), hit rate limits without quota headers (HTTP 429), or encounter network failures, `active_headroom` is `None`. Lines 1770–1775 guard the deactivation of `pin_active` with `active_headroom is not None and 100.0 - active_headroom >= settings.threshold`, leaving `pin_active = True`. The engine then enters lines 1789–1798, resets `self._unhealthy_ticks = 0` and `self._home_unknown_since = None` (preventing timeouts or quarantine), emits a `NoSwitchEvent` falsely claiming `Account-{home} has quota and retains priority`, and unconditionally returns `TickOutcome.NO_ACTION`. The engine becomes permanently paralyzed on a non-functional primary account and never fails over to available backups.  
+SUGGESTED FIX: Ensure that in prefer mode, missing headroom does not retain the pin or claim valid quota:
+```python
+        if (
+            settings.home_mode == "prefer"
+            and current == home
+            and (active_headroom is None or 100.0 - active_headroom >= settings.threshold)
+        ):
+            pin_active = False
+```
+And only emit the priority retention `NoSwitchEvent` if `active_headroom is not None and 100.0 - active_headroom < settings.threshold`.
+
+---
+
+SEVERITY: CRITICAL  
+CONFIDENCE: high  
+FILE: src/claude_swap/usage_store.py:851  
+ISSUE: Conflating failed poll attempts with successful observations permanently suppresses reset-based quota recovery  
+ATTACK VECTOR: In `UsageStore.request_reset_poll`, line 851 checks `if attempted is not None and attempted >= reset: return`. When `now >= reset`, `nextPollAt` is moved to `now`. The engine attempts to poll the preferred account, which immediately sets `lastAttemptAt = now`. If this single attempt fails due to a transient issue (network glitch, socket timeout, HTTP 502/503/504, or HTTP 429 rate limit), `lastGood` and `fetchedAt` remain unupdated. On all subsequent ticks, `attempted >= reset` remains `True` forever. `request_reset_poll` permanently returns without ever accelerating polling again for that window, abandoning the account on fallbacks despite quota having recovered.  
+SUGGESTED FIX: Do not suppress poll scheduling based on failed attempts alone. Only suppress if an observation succeeded (`fetched >= reset`) or if the account is currently in active backoff:
+```python
+            if fetched >= reset or reset > now:
+                return
+            if row.get("backoffUntil") and now < _num_or_none(row.get("backoffUntil"), 0):
+                return
+```
+
+---
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: src/claude_swap/autoswitch.py:2809  
+ISSUE: Preferred candidate polling monopolizes candidate selection and starves all other accounts from usage checks  
+ATTACK VECTOR: In `AutoSwitchEngine._plan_polls`, only one candidate account is added to `plan` per tick via `pick = preferred if preferred_due else due_candidate(candidates, pre, now)`. When `preferred_due` is `True`, `due_candidate` is completely bypassed. If the preferred account remains due across multiple consecutive ticks (e.g. during retries or consecutive observations), no other fallback candidate can ever be scheduled. All other accounts in the rotation starve from quota polling, leading to stale usage state and missed failover candidates.  
+SUGGESTED FIX: Allow `due_candidate` to be evaluated and scheduled into `plan` alongside `preferred`:
+```python
+        if self._idle_hold_since is None:
+            pick = due_candidate(candidates, pre, now)
+            if pick is not None:
+                plan.add(pick)
+            if preferred_due:
+                plan.add(preferred)
+```
+
+---
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: src/claude_swap/claude_locks.py:210  
+ISSUE: Lock-order inversion between `claude_storage_lock` and `claude_config_lock` risks deadlocking with Claude Code  
+ATTACK VECTOR: In `switcher.py` (lines 2951 and 6688), the acquisition sequence is `claude_credentials_lock()` -> `claude_storage_lock()` -> `claude_config_lock()`, explicitly documented as acquiring storage lock before the global configuration lock. However, Claude Code CLI operations managing MCP configurations operate at the global config level (`~/.claude.json.lock`) first, and subsequently persist updated OAuth tokens into storage (`.storage-write.lock`). A concurrent execution of an account switch and a Claude Code MCP command can result in an ABBA lock deadlock, hanging both processes until lock timeouts elapse.  
+SUGGESTED FIX: Reverse the nesting order to acquire `claude_config_lock()` prior to `claude_storage_lock()`:
+```python
+        with (
+            FileLock(self.lock_file),
+            claude_credentials_lock(),
+            claude_config_lock(),
+            claude_storage_lock(),
+        ):
+```
+
+---
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: src/claude_swap/autoswitch.py:3008  
+ISSUE: Ungated `return-home` under load lacks cooldown and hysteresis, causing rapid account flapping and in-flight session disruption  
+ATTACK VECTOR: When `switch_under_load` is enabled in `prefer` mode, lines 3008 and 3208 bypass transcript silence gating (`self._session_quiet()`) for `"return-home"`. As verified by `test_reset_returns_to_primary_despite_recent_switch_and_live_traffic`, `return-home` also ignores `cooldown_seconds`. If the primary account recovers only a marginal sliver of quota (e.g., 0.1% below threshold) or experiences jitter near the limit, the switcher will immediately switch back mid-turn under active traffic, exhaust that sliver on the very next request, switch to fallback, and repeat in an oscillating loop, destroying prompt caches and terminating active agent executions.  
+SUGGESTED FIX: Require a minimum quota headroom buffer (hysteresis margin) or respect a minimum cooldown before executing an un-silenced `return-home` switch under load:
+```python
+        if (
+            self.settings.home_mode == "prefer"
+            and (100.0 - available >= (self.settings.threshold - 5.0) or not self._cooldown_passed(home))
+        ):
+            return None
+```
+
+---
+
+SEVERITY: INFO  
+CONFIDENCE: high  
+FILE: src/claude_swap/usage_store.py:844  
+ISSUE: Missing `NoneType` guard on window `pct` raises unhandled `TypeError`  
+ATTACK VECTOR: In `UsageStore.request_reset_poll`, the list comprehension evaluates `pct >= threshold`. If an upstream API response or cached record contains a window where `pct` is `None` (e.g. tier-based accounts without reported usage percentages or incomplete payloads), comparing `None >= threshold` raises an unhandled `TypeError: '>=' not supported between instances of 'NoneType' and 'float'`, crashing `request_usage_after_reset` and aborting the tick.  
+SUGGESTED FIX: Guard the comparison with an explicit `None` check:
+```python
+            resets = [
+                reset
+                for _name, pct, stamp in oauth.relevant_windows(usage, models)
+                if pct is not None and pct >= threshold and (reset := parse_reset_ts(stamp)) is not None
+            ]
+```
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/switcher.py:4065
+ISSUE: The new `claude_storage_lock` (introduced to serialize secure-store writes with Claude Code's own MCP OAuth updates) is only added to the `_add_account` and `switch_to` write paths, not to the background active-token refresh path, which also performs a read-then-write on the same credentials file.
+ATTACK VECTOR: `_fetch_account_usage`'s refresh flow (switcher.py:4065-4068) reads the live credential under `claude_credentials_lock()` only, then later writes the rotated token at switcher.py:4280-4281 under `claude_config_lock()` alone — `claude_storage_lock()` is never acquired in this whole function. If Claude Code 2.1.273 performs an MCP OAuth update to the same `.credentials.json` (adding/rotating `mcpOAuth`) concurrently with this refresh write, the two writers are no longer mutually excluded, exactly the interleaving `claude_storage_lock` was added to prevent (per its own docstring in claude_locks.py:205-208 and the test `test_real_switch_holds_storage_lock_and_preserves_mcp_login`, which only exercises the switch path). The result can be a lost MCP login or a corrupted/partially-written credentials file, since one writer's file replace can race the other's read-modify-write of shared fields.
+SUGGESTED FIX: Wrap the write at switcher.py:4280-4281 (and, ideally, the whole read-decide-write critical section starting at 4065) in `claude_storage_lock()` alongside the existing `claude_config_lock()`, matching the lock order already used in `_add_account`/`switch_to` (credentials → storage → config).
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================

@@ -1,0 +1,11 @@
+{
+  "src/claude_swap/settings.py": "12461200972eb967696e75bdd8fa4b751a6a2c3aa515e7d33b4816bf8550d3a5",
+  "src/claude_swap/autoswitch.py": "da6e31cf432d5c9b7e536e269385294ec74dfc8e416f700e4db0fb897106b183",
+  "src/claude_swap/claude_locks.py": "7d2174f276c468b04aed92b0c710e4641ea7e47319cd402a20ceae16a16054a5",
+  "src/claude_swap/switcher.py": "ee04a0ebf0b9bc3fcb407a399c4a38c2a71e5c6088732a9492a40ebe15c35020",
+  "src/claude_swap/usage_store.py": "e08b6f569305e17905c2a26d0958caa63cb23f1bdabd727c89fde5dffe56eb8b",
+  "tests/test_preferred_home.py": "980e3e46f17e13611ac49619cc3c039a51b09402faec05d8dc39acf81dc88073",
+  "tests/test_preferred_reset.py": "d4678184d26b6cc1e639538922ce0cedb8da05f58b438c8333e1df83ab82dc97",
+  "verification/check.sh": "8c278fba993dbfacd399e0e0ce7cf897dfb6aa7e60ac7655764ece8a33092dc2",
+  "verification/typecheck.py": "92a094a1226c5c790b42add34d391e0e227e352410575edb9cd510a4b13ab11b"
+}

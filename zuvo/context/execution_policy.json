@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "context_generation": "2026-09-17-claude-preferred",
+  "host": "Codex desktop",
+  "delegation": "allowed: build skill requires analysis and reviews",
+  "review_independence": "same-model analysis plus cursor-agent, agy, claude adversarial; gpt5.4 test role unavailable",
+  "runner": "rt --light on pip verification mirror exported from exact uv.lock",
+  "local_fallback": "forbidden",
+  "index": "separate new git checkout; tgm-survey-platform index out of scope, not reindexed",
+  "behavior_mode": "refactor_and_fix: opt-in preferred account behavior",
+  "commit": "user standing authorization; explicit paths after tests",
+  "push": "not authorized; no push"
+}

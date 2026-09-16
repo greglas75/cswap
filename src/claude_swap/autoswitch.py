@@ -1767,6 +1767,13 @@ class AutoSwitchEngine:
         # the plain rotation.
         home = self._home_slot(settings)
         pin_active = home is not None and not self._home_inert(home, quarantined)
+        if (
+            settings.home_mode == "prefer"
+            and current == home
+            and active_headroom is not None
+            and 100.0 - active_headroom >= settings.threshold
+        ):
+            pin_active = False
         if not pin_active or current != home:
             self._home_unknown_since = None
         if pin_active:
@@ -1782,6 +1789,12 @@ class AutoSwitchEngine:
                 self._unhealthy_ticks = 0
                 self._idle_hold_since = None
                 self._home_unknown_since = None
+                if settings.home_mode == "prefer":
+                    self._emit(NoSwitchEvent(
+                        reason="home-preferred",
+                        detail=f"Account-{home} has quota and retains priority",
+                    ))
+                    return TickOutcome.NO_ACTION
                 burned = self._model_window_burned(
                     usage.get(current), threshold=settings.threshold
                 )
@@ -2601,6 +2614,9 @@ class AutoSwitchEngine:
                     reset_ts if reset_ts is not None else float("inf"),
                     -h,
                 )
+            elif settings.home_mode == "prefer" and settings.home_account:
+                # Account sequence is the fallback order for a preferred home.
+                key = (unhealthy,)
             else:
                 key = (unhealthy, -h)
             qualifying.append((key, num))
@@ -2739,6 +2755,14 @@ class AutoSwitchEngine:
             if n != current and n not in quarantined
         ]
 
+        preferred = (
+            self._home_slot(self.settings)
+            if self.settings.home_mode == "prefer" else None
+        )
+        if preferred in candidates and not self.dry_run:
+            self.switcher.request_usage_after_reset(
+                preferred, self._models, self.settings.threshold
+            )
         pre = self.switcher.usage_entries_by_account(fetch=set())
         plan: set[str] = set()
         active_pre = pre.get(current)
@@ -2778,7 +2802,15 @@ class AutoSwitchEngine:
         ):
             plan.add(current)
         if self._idle_hold_since is None:
-            pick = due_candidate(candidates, pre, now)
+            preferred_entry = pre.get(preferred) if preferred is not None else None
+            preferred_due = (
+                preferred in candidates
+                and preferred_entry is not None
+                and preferred_entry.next_poll_at is not None
+                and now >= preferred_entry.next_poll_at
+                and not preferred_entry.in_backoff(now)
+            )
+            pick = preferred if preferred_due else due_candidate(candidates, pre, now)
             if pick is not None:
                 plan.add(pick)
         entries = self.switcher.usage_entries_by_account(
@@ -2966,15 +2998,17 @@ class AutoSwitchEngine:
     def _gated_triggers(self) -> tuple[str, ...]:
         """Which triggers wait for transcript silence.
 
-        ``autoswitch.switchUnderLoad`` releases only ``proactive`` — the
+        ``autoswitch.switchUnderLoad`` releases ``proactive`` — the
         threshold is already crossed there, so the choice is "swap now and
         lose prompt caches" against "ride into the wall and lose in-flight
         agents". ``consume-first`` is a below-threshold optimization with
         nothing to escape, so it stays gated under every setting — and so
-        is ``return-home`` (CON-1070): the login is working where it is,
-        the return is a correction with nothing burning behind it.
+        is pinned ``return-home``. Prefer mode explicitly prioritizes returning
+        as soon as quota recovers, so that return also honors switchUnderLoad.
         """
         if self.settings.switch_under_load:
+            if self.settings.home_mode == "prefer":
+                return ("consume-first",)
             return ("consume-first", "return-home")
         return ("proactive", "consume-first", "return-home")
 
@@ -3157,7 +3191,16 @@ class AutoSwitchEngine:
             # claims still apply, so a dead home is never hammered.
             entry = self.switcher.usage_entries_by_account(fetch={home}).get(home)
             value = entry.decision_value() if entry is not None else None
-        if _headroom_by_account({home: value}, self._models).get(home) is None:
+        available = _headroom_by_account({home: value}, self._models).get(home)
+        if available is None:
+            return None
+        if (
+            self.settings.home_mode == "prefer"
+            and (
+                100.0 - available >= self.settings.threshold
+                or available < 100.0 - self.settings.threshold + self.settings.hysteresis_pct
+            )
+        ):
             return None
 
         def wait(detail: str) -> None:
@@ -3168,10 +3211,11 @@ class AutoSwitchEngine:
                 )
             )
 
-        quiet, detail = self._session_quiet()
-        if not quiet:
-            wait(detail)
-            return None
+        if "return-home" in self._gated_triggers():
+            quiet, detail = self._session_quiet()
+            if not quiet:
+                wait(detail)
+                return None
         email = self.switcher.account_email(home)
         if self.dry_run:
             return self._perform_with_drain2(home, email, "return-home", None, None)

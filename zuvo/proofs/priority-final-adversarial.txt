@@ -1,0 +1,300 @@
+artifact_kind=adversarial-review
+created_at=2026-09-16T22:33:10Z
+status=ok
+mode=security
+output_format=text
+providers_used=cursor-agent, agy, claude
+provider_count=3
+providers_attempted=3
+provider_outcomes=cursor-agent:ok,agy:ok,claude:ok
+REVIEW BY: CURSOR-AGENT
+REVIEW BY: AGY
+REVIEW BY: CLAUDE
+reviewed_blob=a1343f75890dd7862a4b5768f1ea9370183e9b2b
+reviewed_blob=1774daa80a23958d675acd9afb8e94b5a7e65ede
+reviewed_blob=28895f7100caf57c00fb1c3631bb50898134003b
+reviewed_blob=d8452b531658719549d9156485b2a7d3fd5a10e1
+reviewed_blob=e9d8a39485f54c39410289f5bd9c5401a770b996
+reviewed_blob=ecb68f17e07239f47cd1f3370ac0027dc8128779
+reviewed_blob=b1a7bc22d890bfcd2182b42fe31d4c6c9ee9c36a
+reviewed_blob=64827630ce6643c4da9ddb42cb284d17c7939809
+reviewed_blob=34a3f605f0034b77755e58ac744f66cf9145db91
+reviewed_blob=fea9742b4e759745129dbf28ece70f905b56fd63
+reviewed_blob=52014ae977b78cd3a39232fa5d72df5b2cec0862
+reviewed_blob=75f98ab0d0770de0d0ef944ff66849fa73d7b5e8
+reviewed_blob=ae43d5daa1b812cbff962988be068f509dbe2476
+reviewed_blob=a6e536b32211071de138fd6962b93bbc08e9f607
+reviewed_blob=2424a4eaf61a68a52290e59687ca8ea0e7ae611f
+reviewed_blob=2ca5d006420c6b09cbce3c534d8da7d55705e772
+reviewed_blob=24a4fe7bf2b043c5c1f8602858a4e373a63f4241
+reviewed_blob=27f30b347470dbcdae361e0daafc8f002e33448c
+input_chars=21596
+input_chars_original=21596
+input_truncated=false
+total_findings=15
+critical=2
+warning=9
+info=4
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: cursor-agent, agy, claude (3 total)
+Mode: security
+Input size: 21596 chars
+Date: 2026-09-16T22:33:10Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CURSOR-AGENT
+###############################################################
+
+Adversarial security review is limited to the supplied diff (chunk 1/2). Findings below target behavior and locking changes a functional review might treat as intended product logic.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/autoswitch.py` (~2998–3010, ~3211–3218)  
+**ISSUE:** Prefer mode drops `return-home` from load-gated triggers, so return-home can run while the session is not transcript-quiet.  
+**ATTACK VECTOR:** With `homeMode=prefer` and `switchUnderLoad=true`, autoswitch can activate the home OAuth identity during live CLI/agent traffic on a fallback account. Later API calls use home tokens/org context while in-flight work may still assume the previous account—cross-account billing, org scoping, and audit attribution without an explicit user switch (local privilege/context confusion on a shared `~/.claude` profile).  
+**SUGGESTED FIX:** Gate prefer-mode return-home the same way as pin mode (keep `return-home` in `_gated_triggers()` when `switch_under_load`), or require an explicit “safe to switch” signal (e.g. same `_session_quiet()` check) before `_perform_with_drain2` for `return-home`.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/switcher.py` (~4277–4290)  
+**ISSUE:** Post-refresh credential write depends on `_prepare_credentials_for_activation(working, latest)` merging two on-disk snapshots; a bad merge can persist the wrong token/MCP field mix into the active store.  
+**ATTACK VECTOR:** Under concurrent Claude Code MCP/storage updates (the scenario the new storage lock targets), a flawed merge that favors stale `working` tokens over `latest` shared fields—or the reverse—can leave CC with credentials that do not match the intended account/org. That surfaces as wrong-account API access or refresh failures; on a multi-account machine it is indistinguishable from authorization failure. The diff does not include merge rules, so this is only as strong as typical merge bugs in this class.  
+**SUGGESTED FIX:** In `_prepare_credentials_for_activation`, enforce an invariant before write: same account identity as `working`, MCP/oauth fields taken only from allowlisted keys on `latest`, tokens only from the successful refresh path; fail closed (no `_write_credentials`) if identity or required MCP keys diverge.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/claude_locks.py` (~55, ~207–218)  
+**ISSUE:** New `.storage-write.lock` uses `STORAGE_STALENESS_S = 15.0`, allowing a stale lock to be broken while a slow or hung writer may still be mutating secure storage.  
+**ATTACK VECTOR:** After staleness expiry, a second claude_swap (or CC) process can enter the storage critical section and run read-merge-write on credentials while the first writer has not finished. That raises risk of torn or merged-corrupt credential JSON, undefined active identity, or failed auth—integrity failure on the local trust root.  
+**SUGGESTED FIX:** Align storage lock staleness with the credentials lock policy (or use non-stale mutual exclusion for secure-store writes), and/or verify file checksum/size or atomic rename before merge-after-read.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/switcher.py` (~4920–4928) vs (~2951–2958, ~6697–6705)  
+**ISSUE:** `request_usage_after_reset` holds only `FileLock(self.lock_file)`, while activation/refresh paths also take `claude_credentials_lock()` and `claude_storage_lock()`.  
+**ATTACK VECTOR:** A reset-poll update can interleave with a full switch or credential refresh that changes active account, quarantine, or identity maps. Usage polling may then target the preferred slot with metadata that no longer matches the live credential graph, driving fetches or return-home decisions on stale identity pairings (`email`, `org_uuid or ""`). Unlikely remote exploit; plausible local race leading to switch to the wrong ready account or extra usage API calls under the wrong identity.  
+**SUGGESTED FIX:** Use the same lock ordering as other mutating switcher paths (at minimum `FileLock` + credentials lock; add storage lock if `_usage_store` shares filesystem assumptions with CC storage), or invoke `request_reset_poll` only from code already holding that stack.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/settings.py` (~124–125)  
+**ISSUE:** `home_mode` is an unconstrained `str` on `AutoSwitchSettings`; only config UI/`SettingSpec` choices enforce `pin` | `prefer`.  
+**ATTACK VECTOR:** Callers that construct `AutoSwitchSettings(..., home_mode="prefer\n…")` or typos bypass validated config and fall through to non-prefer branches unpredictably, weakening expected pin/prefer authorization policy for routing (policy bypass, not injection).  
+**SUGGESTED FIX:** Type as `Literal["pin", "prefer"]` or validate in `load_settings` / dataclass `__post_init__` the same way as `SettingSpec` choices.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** low  
+**FILE:** `src/claude_swap/usage_store.py` (~819–858)  
+**ISSUE:** `request_reset_poll` can set `nextPollAt` to `now`, increasing usage fetch frequency after window reset.  
+**ATTACK VECTOR:** On many accounts or tight provider rate limits, accelerated polling raises volume of usage/token-adjacent API traffic; errors may land in local logs with provider response bodies (sensitive data exposure to local log readers), not a remote attacker path.  
+**SUGGESTED FIX:** Cap accelerations per window (the comment mentions preventing repeated acceleration—ensure one-shot is enforced in all code paths) and keep client-facing errors generic while logging details only at debug.
+
+---
+
+No CRITICAL issues are provable from this chunk alone: there is no user-controlled URL/path, SQL, or network input in the diff, and config choice validation for `homeMode` is covered in tests. The strongest production-facing concern is **prefer-mode return-home under load without session quiet** (first finding)—treat as security-relevant account-context switching, not only UX.
+
+
+###############################################################
+###   PROVIDER: AGY
+###############################################################
+
+SEVERITY: CRITICAL  
+CONFIDENCE: high  
+FILE: [`src/claude_swap/switcher.py:4277-4286`](file:///src/claude_swap/switcher.py#L4277-L4286)  
+ISSUE: Active credentials store is overwritten after OAuth refresh without validating that the live identity matches the refreshed account.  
+ATTACK VECTOR: Token refresh network calls are performed asynchronously without holding locks. If the active account changes (via user switch or autoswitch rotation) while the refresh request is in flight, line 4278 reads the newly active account's credentials as `latest` without checking [`self._live_identity_matches`](file:///src/claude_swap/switcher.py#L2953) (unlike line 2953). It merges the refreshed account's tokens (`working`) with the different active account's profile via [`_prepare_credentials_for_activation`](file:///src/claude_swap/switcher.py#L4283) and writes the result to the active credentials store. Subsequent Claude Code requests execute using the wrong account's credentials inside another tenant's session, resulting in cross-account session confusion and broken multi-tenant authorization.  
+SUGGESTED FIX: Check `self._live_identity_matches(working_email, working_org_uuid)` after acquiring the lock before merging and writing credentials; if identity drift occurred, persist the tokens only to the account's internal slot and do not overwrite the live active store.
+
+---
+
+SEVERITY: CRITICAL  
+CONFIDENCE: high  
+FILE: [`src/claude_swap/switcher.py:4277`](file:///src/claude_swap/switcher.py#L4277)  
+ISSUE: Credential refresh write acquires [`claude_storage_lock`](file:///src/claude_swap/claude_locks.py#L209) and [`claude_config_lock`](file:///src/claude_swap/claude_locks.py#L201) but omits [`claude_credentials_lock`](file:///src/claude_swap/claude_locks.py) and `FileLock`.  
+ATTACK VECTOR: Lines 2951 and 6670 establish that modifying active credentials requires the full lock stack: `FileLock(self.lock_file)`, [`claude_credentials_lock`](file:///src/claude_swap/claude_locks.py), [`claude_storage_lock`](file:///src/claude_swap/claude_locks.py#L209), and [`claude_config_lock`](file:///src/claude_swap/claude_locks.py#L201). Line 4277 omits both `FileLock` and `claude_credentials_lock`. Because Claude Code synchronizes credential reads and writes using `claude_credentials_lock`, Claude Code or concurrent switcher processes can read or write credentials concurrently between `self._read_credentials()` and `self._write_credentials(merged)`, causing a TOCTOU race that can interleave writes, read torn/partial state, or drop valid authentication tokens.  
+SUGGESTED FIX: Wrap the read-merge-write block in `FileLock(self.lock_file)` and `claude_credentials_lock()` prior to acquiring `claude_storage_lock()` and `claude_config_lock()`.
+
+---
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: [`src/claude_swap/autoswitch.py:1770-1796`](file:///src/claude_swap/autoswitch.py#L1770-L1796)  
+ISSUE: Preferred home mode retains `pin_active = True` when `active_headroom is None`, trapping the engine on expired or revoked credentials.  
+ATTACK VECTOR: In [`AutoSwitchEngine`](file:///src/claude_swap/autoswitch.py#L1767), line 1770 only unsets `pin_active` when `active_headroom is not None and 100.0 - active_headroom >= settings.threshold`. When an active home account's token expires, is revoked, or fails authentication, `active_headroom` is `None`. As a result, `pin_active` remains `True`. Inside `if pin_active:`, line 1782 resets `self._unhealthy_ticks = 0` (suppressing health failure eviction), emits a [`NoSwitchEvent`](file:///src/claude_swap/autoswitch.py#L1790) claiming the account has quota, and returns [`TickOutcome.NO_ACTION`](file:///src/claude_swap/autoswitch.py#L1795). The engine never rotates to functional fallback accounts, permanently stalling on a dead authentication token.  
+SUGGESTED FIX: Clear `pin_active` or bypass home-preferred retention if `active_headroom is None` or if the account fails token/health validation, allowing standard failover logic to rotate accounts.
+
+---
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: [`src/claude_swap/autoswitch.py:1789-1798`](file:///src/claude_swap/autoswitch.py#L1789-L1798)  
+ISSUE: Home-preferred mode short-circuits with `TickOutcome.NO_ACTION` before evaluating burned model-specific rate-limit windows.  
+ATTACK VECTOR: Line 1789 returns [`TickOutcome.NO_ACTION`](file:///src/claude_swap/autoswitch.py#L1795) immediately when `settings.home_mode == "prefer"`, bypassing line 1797 ([`self._model_window_burned`](file:///src/claude_swap/autoswitch.py#L1797)). If the home account has exhausted quota for a specific requested model (e.g., Opus/Sonnet tier limits) while its aggregate window remains below the threshold, the burned model check is never reached. The switcher keeps priority on the home account, repeatedly exposing clients to upstream 429 rate limits instead of switching to an account with model capacity.  
+SUGGESTED FIX: Move the `if settings.home_mode == "prefer":` return after `burned = self._model_window_burned(...)`, returning `NO_ACTION` only if `not burned`.
+
+---
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: [`src/claude_swap/autoswitch.py:2617-2620`](file:///src/claude_swap/autoswitch.py#L2617-L2620)  
+ISSUE: Fallback candidate sorting orders account numbers lexicographically instead of numerically.  
+ATTACK VECTOR: In [`AutoSwitchEngine`](file:///src/claude_swap/autoswitch.py#L2617), when `settings.home_mode == "prefer"`, the sorting key is simplified to `key = (unhealthy,)`, relying on `qualifying.append((key, num))` to order accounts by sequence number. Because `num` values in `managed_account_numbers()` are strings, Python sorts them lexicographically (e.g., `"10"` precedes `"2"`). In environments with 10 or more accounts, fallback routing unpredictably prioritizes account 10 over account 2, violating the configured fallback order and potentially routing requests to unexpected accounts with lower quota or different tier configurations.  
+SUGGESTED FIX: Normalize `num` to an integer sort key, e.g., `(unhealthy, int(num) if num.isdigit() else num)`.
+
+---
+
+SEVERITY: INFO  
+CONFIDENCE: medium  
+FILE: [`src/claude_swap/autoswitch.py:2617`](file:///src/claude_swap/autoswitch.py#L2617)  
+ISSUE: Truthiness check on raw `settings.home_account` overrides fleet-wide fallback strategy even when the configured home account is invalid.  
+ATTACK VECTOR: Line 2617 checks `elif settings.home_mode == "prefer" and settings.home_account:` rather than verifying that [`self._home_slot(settings)`](file:///src/claude_swap/autoswitch.py#L1767) resolves to a valid, active slot. If a non-existent or misconfigured account name is provided in settings, `_home_slot()` returns `None` (disabling home pinning elsewhere), but line 2617 still matches. This permanently strips the `-h` headroom metric from the sort key across the entire fleet and switches all fallback decisions to sequence order, degrading routing even though no home account is active.  
+SUGGESTED FIX: Change the condition to `elif settings.home_mode == "prefer" and self._home_slot(settings) is not None:`.
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/switcher.py:4277
+ISSUE: Refresh-and-merge credential write reads-merges-writes under `claude_storage_lock()+claude_config_lock()` only, unlike the two other credential-writing call sites in this same diff which also hold `claude_credentials_lock()` (and the outer `FileLock(self.lock_file)`).
+ATTACK VECTOR: If an account switch (which acquires the full `FileLock(self.lock_file), claude_credentials_lock(), claude_storage_lock(), claude_config_lock()` chain) runs concurrently with this refresh path for a different account, the refresh's `_read_credentials()` can observe a mid-switch or just-switched state, and its subsequent `_write_credentials(merged)` is not serialized against the switch by the credentials lock — risking the merged write clobbering the just-activated account's credentials with stale data, or writing a merge computed from a torn read.
+SUGGESTED FIX: Either hold `claude_credentials_lock()` (and `FileLock(self.lock_file)`) around this read-merge-write too, or add a one-line comment explaining why this specific site is safe to omit it (mirroring the existing rationale comment for the OAuth grant round trip).
+
+SEVERITY: WARNING
+CONFIDENCE: low
+FILE: src/claude_swap/switcher.py:4283-4288
+ISSUE: `_prepare_credentials_for_activation(working, latest)` merge direction/precedence is not visible in this diff; if it doesn't favor the just-refreshed OAuth fields in `working` over the re-read `latest`, a fresh (and possibly single-use) refresh token could be silently overwritten by a stale one.
+ATTACK VECTOR: A refresh token is typically single-use — if the merge keeps the stale `latest` refresh token instead of the new `working` one, the next refresh attempt reuses an already-consumed token, which providers commonly treat as a reuse/replay signal and revoke the whole grant, forcing an unexpected full re-login (or silently breaking the account with no clear error surfaced to the user).
+SUGGESTED FIX: Confirm (or add a targeted test/comment) that `_prepare_credentials_for_activation` always takes `working`'s OAuth token fields (access/refresh/expiry) as authoritative and only pulls non-auth (MCP) fields from `latest`.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/switcher.py:4279-4282
+ISSUE: A transient failure to re-read `latest` credentials (`latest is None`) now raises and discards an already-successfully-refreshed `working` credential, setting `live_ok = False`.
+ATTACK VECTOR: A momentary read glitch (not a real auth problem) causes the account to be treated as unhealthy/needing attention even though a valid refreshed token was in hand, which can trigger unnecessary quarantine/re-auth flow noise and mask that the actual OAuth refresh succeeded.
+SUGGESTED FIX: On `latest is None`, fall back to writing `working` alone (the pre-diff behavior) instead of raising, and log the missed-merge as a warning rather than failing the whole refresh.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
+
+=== APPENDED PASS 2026-09-16T22:34:39Z ===
+artifact_kind=adversarial-review
+created_at=2026-09-16T22:34:38Z
+status=ok
+mode=security
+output_format=text
+providers_used=cursor-agent, agy, claude
+provider_count=3
+providers_attempted=3
+provider_outcomes=cursor-agent:ok,agy:ok,claude:ok
+REVIEW BY: CURSOR-AGENT
+REVIEW BY: AGY
+REVIEW BY: CLAUDE
+reviewed_blob=ce476e2b88fc845fadec00fed41cb3047767cc04
+reviewed_blob=a1343f75890dd7862a4b5768f1ea9370183e9b2b
+reviewed_blob=1774daa80a23958d675acd9afb8e94b5a7e65ede
+reviewed_blob=28895f7100caf57c00fb1c3631bb50898134003b
+reviewed_blob=d8452b531658719549d9156485b2a7d3fd5a10e1
+reviewed_blob=e9d8a39485f54c39410289f5bd9c5401a770b996
+reviewed_blob=784db97e85d22c126e6d5bd02a8f5ef216d80ed9
+reviewed_blob=3782c8d0e854ad0e50cc77dba970eb432c6bf56e
+reviewed_blob=b1a7bc22d890bfcd2182b42fe31d4c6c9ee9c36a
+reviewed_blob=64827630ce6643c4da9ddb42cb284d17c7939809
+reviewed_blob=34a3f605f0034b77755e58ac744f66cf9145db91
+reviewed_blob=fea9742b4e759745129dbf28ece70f905b56fd63
+reviewed_blob=52014ae977b78cd3a39232fa5d72df5b2cec0862
+reviewed_blob=e134e02b55832342440cf28881a9a71bcb20705e
+reviewed_blob=ae43d5daa1b812cbff962988be068f509dbe2476
+reviewed_blob=a6e536b32211071de138fd6962b93bbc08e9f607
+reviewed_blob=640658809590cac0b0df7a99691434d176fc54a2
+reviewed_blob=faf11d09f2f1d10b7ab6c354567cd69b801d1f74
+reviewed_blob=2ca5d006420c6b09cbce3c534d8da7d55705e772
+reviewed_blob=24a4fe7bf2b043c5c1f8602858a4e373a63f4241
+reviewed_blob=27f30b347470dbcdae361e0daafc8f002e33448c
+input_chars=13029
+input_chars_original=13029
+input_truncated=false
+total_findings=1
+critical=0
+warning=1
+info=0
+count_method=severity-records
+count_status=partial
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: cursor-agent, agy, claude (3 total)
+Mode: security
+Input size: 13029 chars
+Date: 2026-09-16T22:34:38Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CURSOR-AGENT
+###############################################################
+
+Security review is scoped to the provided diff (`tests/test_preferred_reset.py`). The file is test code; the main signal is **behavior the tests lock in** for production paths they exercise.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** tests/test_preferred_reset.py:198-208  
+**ISSUE:** After OAuth refresh, a failed post-write credential reread still persists the successor `refreshToken` in per-account backup while live `.credentials.json` keeps the expired `accessToken`.  
+**ATTACK VECTOR:** OAuth refresh often rotates refresh tokens. If any code path refreshes or switches using `.credentials.json` while backup already holds the new refresh material, the stale refresh on disk can be invalidated server-side → failed refresh, account lockout, or ambiguous “which credential is authoritative” during concurrent MCP/switch activity. An operator or second process reading backup vs live file sees inconsistent secrets (broken authentication / operational confusion), not a classic external exploit from this test file alone.  
+**SUGGESTED FIX:** Treat reread/merge failure as full refresh failure: do not write successor tokens to backup (or roll back backup) until merged state is verified under the storage lock; keep a single source of truth for both live and backup writes.
+
+---
+
+**Why nothing else rose to report (artifact-only):**
+
+- No user-controlled strings hit shells, SQL, templates, or URLs in this file.  
+- Locks/contended-writer cases assert fail-closed behavior (no switch, unchanged login, lock not stolen)—security-positive, not vulnerabilities.  
+- Fake tokens (`expired`, `sk-2`, etc.) live under `temp_home` fixtures; no demonstrated logging or URL exposure in this chunk.  
+- No constant-time secret comparisons, crypto, or dependency/network behavior in the diff.
+
+If you want the same OWASP pass on the **production** implementations these tests call (`_fetch_active_usage`, `write_account_credentials`, `request_reset_poll`, etc.), that would be a separate artifact/chunk—not inferable as findings from this test-only diff alone.
+
+
+###############################################################
+###   PROVIDER: AGY
+###############################################################
+
+This request was blocked by Gemini's filters. They can occasionally trigger by mistake on safe coding, security, or biology-related queries. Please try rephrasing your prompt. You can [send feedback](https://ai.google.dev/gemini-api/docs/troubleshooting#file-bug) or read more about [our policies here](https://policies.google.com/terms/generative-ai/use-policy).
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+Reported one plausible finding: the backup credential store persists the unmerged refreshed token pair unconditionally even when the live-file merge aborts on read failure, which (if the OAuth provider rotates refresh tokens) can permanently break refresh on the live file while leaving a usable token stranded in backup, and risks re-clobbering MCP data on a later switch-back.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================

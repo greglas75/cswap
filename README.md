@@ -4,6 +4,38 @@ Multi-account switcher for Claude Code. Easily switch between multiple Claude ac
 
 ## Installation
 
+### Local preferred-account adaptation
+
+This checkout adds `autoswitch.homeMode=prefer`. Set a managed account as
+`autoswitch.homeAccount` and choose `prefer` to use it while it has quota, switch
+to eligible fallbacks in account sequence, and return after its quota recovers.
+The original `pin` mode remains the default.
+
+```sh
+cswap config set autoswitch.homeAccount your-primary@example.com
+cswap config set autoswitch.homeMode prefer
+cswap config set autoswitch.threshold 95
+cswap config set autoswitch.switchUnderLoad true
+cswap config set autoswitch.intervalSeconds 15
+```
+
+Returning requires headroom at least `100 - threshold + hysteresisPct`; this
+avoids switching back and forth on tiny quota changes. The first observation
+after a reported reset is scheduled promptly, while provider backoff and
+concurrent polling claims remain respected. An elapsed reset alone never counts
+as available quota. Configured model limits also apply.
+
+Switching changes the login used by subsequent requests without restarting
+Claude Code. macOS normally takes up to approximately 30 seconds to refresh its
+Keychain cache. A turn already halted by Claude Code's quota waiter may still
+need a manual continuation; proactive switching reduces, but cannot eliminate,
+that case. This local adaptation also serializes active credential writes with
+Claude Code's secure-store lock and preserves concurrently updated MCP logins.
+
+Local verification and operational notes are in [LOCAL-SETUP.md](LOCAL-SETUP.md).
+Do not replace this checkout with the similarly named PyPI distribution when
+updating: it does not necessarily include this policy.
+
 ### Using uv (recommended)
 
 ```bash

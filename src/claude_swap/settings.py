@@ -121,6 +121,9 @@ class AutoSwitchSettings:
     # unknown home leaves the pin inert with one warning. None = plain
     # rotation (default).
     home_account: str | None = None
+    # prefer releases an exhausted home and returns only once it has quota.
+    # pin preserves the existing fleet policy, including holding at a limit.
+    home_mode: str = "pin"
 
 
 @dataclass(frozen=True)
@@ -246,6 +249,11 @@ SETTING_SPECS: dict[str, SettingSpec] = {
                 "Pin the live login to this slot (num or email): auto-switch "
                 "only leaves it on a dead token and returns once it reads again"
             ),
+        ),
+        SettingSpec(
+            "autoswitch", "homeMode", "home_mode", "choice",
+            choices=("pin", "prefer"),
+            help="Pin home through limits, or prefer it whenever quota is available",
         ),
         SettingSpec(
             "ui", "theme", "theme", "choice", choices=("dark", "light", "auto"),

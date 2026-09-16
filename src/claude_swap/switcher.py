@@ -26,7 +26,11 @@ from claude_swap.exceptions import (
     ValidationError,
 )
 from claude_swap import oauth, pace
-from claude_swap.claude_locks import claude_config_lock, claude_credentials_lock
+from claude_swap.claude_locks import (
+    claude_config_lock,
+    claude_credentials_lock,
+    claude_storage_lock,
+)
 from claude_swap.json_output import (
     SCHEMA_VERSION,
     STATUS_NOTES,
@@ -2947,7 +2951,12 @@ class ClaudeAccountSwitcher:
         just-added account (a concurrent switch owns the live state — nothing
         here is ours to move).
         """
-        with FileLock(self.lock_file), claude_credentials_lock(), claude_config_lock():
+        with (
+            FileLock(self.lock_file),
+            claude_credentials_lock(),
+            claude_storage_lock(),
+            claude_config_lock(),
+        ):
             if not self._live_identity_matches(added_email, added_org_uuid):
                 return "drift"
             try:
@@ -4268,8 +4277,16 @@ class ClaudeAccountSwitcher:
                         # _clear_managed_key) — the config lock covers just
                         # this write. A timeout here is a live-write failure
                         # (the grant is already consumed), not a defer.
-                        with claude_config_lock():
-                            self._write_credentials(working)  # active store — CC reads this
+                        with claude_storage_lock(), claude_config_lock():
+                            latest = self._read_credentials()
+                            if latest is None:
+                                raise CredentialReadError(
+                                    "Cannot preserve shared credentials after refresh"
+                                )
+                            merged = self._prepare_credentials_for_activation(
+                                working, latest
+                            )
+                            self._write_credentials(merged)  # active store — CC reads this
                     except Exception:
                         live_ok = False
                         self._logger.warning(
@@ -4898,6 +4915,16 @@ class ClaudeAccountSwitcher:
         except Exception as e:
             self._logger.warning(
                 f"Post-switch poll re-plan failed (switch itself succeeded): {e}"
+            )
+
+    def request_usage_after_reset(
+        self, number: str, models: tuple[str, ...], threshold: float
+    ) -> None:
+        """Make a preferred account's first post-reset observation poll-due."""
+        with FileLock(self.lock_file):
+            slot, email, org_uuid = self.resolve_account(number)
+            self._usage_store.request_reset_poll(
+                {slot: (email, org_uuid or "")}, models, threshold
             )
 
     def _usage_by_account(self) -> dict[str, dict | str | None]:
@@ -6670,7 +6697,12 @@ class ClaudeAccountSwitcher:
         # ~/.claude.json.lock likewise keeps the oauthAccount splice from
         # interleaving with Claude Code's own config writes. Everything under
         # here is local I/O — no network while locks are held.
-        with FileLock(self.lock_file), claude_credentials_lock(), claude_config_lock():
+        with (
+            FileLock(self.lock_file),
+            claude_credentials_lock(),
+            claude_storage_lock(),
+            claude_config_lock(),
+        ):
             data = self._get_sequence_data()
             active_account = data.get("activeAccountNumber")
             current_account = str(active_account) if active_account is not None else None
