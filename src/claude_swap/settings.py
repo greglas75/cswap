@@ -124,6 +124,13 @@ class AutoSwitchSettings:
     # prefer releases an exhausted home and returns only once it has quota.
     # pin preserves the existing fleet policy, including holding at a limit.
     home_mode: str = "pin"
+    # Reserve: the owner's main account, to be touched LAST. It leaves the
+    # ordinary pool entirely and is only ever a landing when nothing else
+    # qualifies — and then only while its binding window still holds
+    # `reserve_min_life_pct` of life, so "last resort" never means "burn the
+    # account that has to stay usable". None = no reserve (default).
+    reserve_account: str | None = None
+    reserve_min_life_pct: float = 80.0
 
 
 @dataclass(frozen=True)
@@ -254,6 +261,21 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             "autoswitch", "homeMode", "home_mode", "choice",
             choices=("pin", "prefer"),
             help="Pin home through limits, or prefer it whenever quota is available",
+        ),
+        SettingSpec(
+            "autoswitch", "reserveAccount", "reserve_account", "string",
+            help=(
+                "Hold this slot (num or email) back as the reserve: a landing "
+                "only when no other account qualifies"
+            ),
+        ),
+        SettingSpec(
+            "autoswitch", "reserveMinLifePct", "reserve_min_life_pct", "float",
+            0.0, 100.0,
+            help=(
+                "Skip the reserve once its binding window has less than this "
+                "much life left (headroom pct)"
+            ),
         ),
         SettingSpec(
             "ui", "theme", "theme", "choice", choices=("dark", "light", "auto"),

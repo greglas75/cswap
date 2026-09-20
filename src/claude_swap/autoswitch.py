@@ -2620,6 +2620,22 @@ class AutoSwitchEngine:
             else:
                 key = (unhealthy, -h)
             qualifying.append((key, num))
+        # Reserve (autoswitch.reserveAccount): the owner's main account, to be
+        # touched LAST. Applied after the loop so no strategy's ordering can
+        # reach it: it drops out whenever anything else qualifies, and when it
+        # is the only one left it still has to hold `reserveMinLifePct` of
+        # life. Headroom is the BINDING window (the worse of 5h/7d), so one
+        # threshold guards both — an account with an empty 5h window can still
+        # be out of weekly quota.
+        reserve = self._reserve_slot(settings)
+        if reserve is not None and any(num == reserve for _, num in qualifying):
+            others = [entry for entry in qualifying if entry[1] != reserve]
+            if others:
+                qualifying = others
+            else:
+                reserve_h = headroom.get(reserve)
+                if reserve_h is None or reserve_h < settings.reserve_min_life_pct:
+                    qualifying = []
         # Ascending by the strategy's key; list order (sequence order) breaks ties.
         qualifying.sort(key=lambda t: t[0])
         return [num for _, num in qualifying], any_known, active_reset_ts
@@ -3062,6 +3078,23 @@ class AutoSwitchEngine:
             return None
         if self._home_warned and self._home_warned.startswith("unknown:"):
             self._home_warned = None
+        return number
+
+    def _reserve_slot(self, settings: AutoSwitchSettings) -> str | None:
+        """Resolve ``autoswitch.reserveAccount`` to a managed slot, or None.
+
+        Pure — no emits, no state writes — because ``_rank_candidates`` is
+        replayed twice per tick under consume-first. A value naming no managed
+        account leaves the reserve policy inert rather than gating a slot that
+        does not exist.
+        """
+        ident = settings.reserve_account
+        if not ident:
+            return None
+        try:
+            number, _email, _org = self.switcher.resolve_account(ident)
+        except ClaudeSwitchError:
+            return None
         return number
 
     def _warn_home_once(self, key: str, message: str) -> None:
