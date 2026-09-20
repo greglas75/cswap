@@ -172,3 +172,34 @@ class TestPreferredHomeConfiguration:
     def test_invalid_mode_is_rejected(self, tmp_path):
         with pytest.raises(ConfigError, match="pin.*prefer"):
             set_setting(tmp_path, "autoswitch.homeMode", "random")
+
+
+class TestPreferredEscapeHonoursTheReturnMargin:
+    """An escape must not land on a home `_return_home` would refuse.
+
+    `_return_home` demands `available >= (100 - threshold) + hysteresis_pct`
+    before returning to the preferred account. An at-limit / failover escape
+    reaches the generic ranking path instead, which ordered a preferred home
+    by bare account sequence — so it could land on a home holding 5% while a
+    90% account sat beside it, and escape again on the next tick. That is the
+    flapping `test_small_quota_jitter_does_not_cause_return_flapping` pins for
+    the return path, defeated by the one path that never checked the margin.
+    """
+
+    def test_escape_prefers_headroom_over_a_home_below_the_margin(self, temp_home):
+        h = preferred(temp_home, live=2)
+        assert h.tick_with_usage({
+            "1": _usage(95),    # home: 5% life — under the margin
+            "2": _usage(100),   # active, exhausted -> at-limit escape
+            "3": _usage(10),    # 90% life
+        }) is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+
+    def test_a_home_above_the_margin_still_wins_the_sequence(self, temp_home):
+        h = preferred(temp_home, live=2)
+        assert h.tick_with_usage({
+            "1": _usage(20),    # home: 80% life — clears the margin
+            "2": _usage(100),
+            "3": _usage(10),    # healthier, but home keeps priority
+        }) is TickOutcome.SWITCHED
+        assert h.active_number() == 1

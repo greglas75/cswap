@@ -2540,6 +2540,18 @@ class AutoSwitchEngine:
                 and (100.0 - active_headroom) >= settings.threshold
                 and (100.0 - active_base) < settings.threshold
             )
+        # The home slot, resolved purely (no warn-once — this function is
+        # replayed twice per tick), plus the margin `_return_home` demands
+        # before it will land back on home.
+        home_slot: str | None = None
+        if settings.home_mode == "prefer" and settings.home_account:
+            try:
+                home_slot, _home_email, _home_org = self.switcher.resolve_account(
+                    settings.home_account
+                )
+            except ClaudeSwitchError:
+                home_slot = None
+        home_margin = 100.0 - settings.threshold + settings.hysteresis_pct
         qualifying: list[tuple[tuple, str]] = []
         any_known = False
         for num in oauth_candidates:
@@ -2648,8 +2660,19 @@ class AutoSwitchEngine:
                     -h,
                 )
             elif settings.home_mode == "prefer" and settings.home_account:
-                # Account sequence is the fallback order for a preferred home.
-                key = (unhealthy,)
+                # Account sequence is the fallback order for a preferred home
+                # — but a home that `_return_home` would REFUSE must not win
+                # that order. The dedicated return path demands
+                # `available >= (100 - threshold) + hysteresis_pct` before
+                # landing back on home; an at-limit or failover escape reaches
+                # THIS generic path instead and bypassed the margin entirely,
+                # so the fleet could land on a home holding 5% while a 90%
+                # account sat beside it, then escape again next tick — the
+                # exact flapping the margin exists to prevent, defeated by the
+                # one path that never checked it. Demote such a home behind
+                # the healthy field; sequence order still orders the rest.
+                home_refused = num == home_slot and h < home_margin
+                key = (unhealthy, home_refused)
             else:
                 key = (unhealthy, -h)
             qualifying.append((key, num))
