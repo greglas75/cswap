@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 
 from claude_swap.autoswitch import SwitchEvent, TickOutcome
-from tests.test_autoswitch import _usage, _usage7
+from tests.test_autoswitch import _R_LATER, _R_LATEST, _R_SOON, _usage, _usage7
 from tests.test_home_account import _harness
 
 
@@ -87,5 +87,28 @@ class TestReserveAccount:
         h = reserved(temp_home, reserve_account="nobody@example.com")
         assert h.tick_with_usage({
             "1": _usage(100), "2": _usage(70), "3": _usage(0),
+        }) is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+
+
+class TestReserveUnderConsumeFirst:
+    """The filter runs after ranking, so it must hold under every strategy —
+    including the one whose whole point is to reach for the soonest reset."""
+
+    def test_reserve_is_skipped_even_when_it_resets_soonest(self, temp_home):
+        h = reserved(temp_home, strategy="consume-first")
+        assert h.tick_with_usage({
+            "1": _usage7(20, 20, _R_LATEST),
+            "2": _usage7(10, 10, _R_LATER),
+            "3": _usage7(10, 10, _R_SOON),   # reserve: consume-first would take it first
+        }) is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+
+    def test_reserve_still_lands_as_the_last_resort(self, temp_home):
+        h = reserved(temp_home, strategy="consume-first")
+        assert h.tick_with_usage({
+            "1": _usage7(100, 100, _R_LATEST),
+            "2": _usage7(100, 100, _R_LATER),
+            "3": _usage7(10, 10, _R_SOON),
         }) is TickOutcome.SWITCHED
         assert h.active_number() == 3
