@@ -1,0 +1,1772 @@
+artifact_kind=adversarial-review
+created_at=2026-09-20T17:59:55Z
+status=partial
+mode=code
+output_format=text
+providers_used=codex-5.4, openrouter-3, openrouter-4, claude
+provider_count=4
+providers_attempted=5
+provider_outcomes=codex-5.4:ok,openrouter:timeout,openrouter-3:ok,openrouter-4:ok,claude:ok
+REVIEW BY: CODEX-5.4
+REVIEW BY: OPENROUTER-3
+REVIEW BY: OPENROUTER-4
+REVIEW BY: CLAUDE
+reviewed_blob=3c4b561ce46bc22f38891927d3d2c50983b599b3
+reviewed_blob=cdd245fbec1fffb13a2c294a6ac34d02c2c07ad5
+reviewed_blob=49056e1516b803af14393b4501c2fbcb8fa5f9e9
+reviewed_blob=f56fdff75a4684f50275ff38f1fd2dba6cc4a76c
+reviewed_blob=ffe73584831a158ddaed8ffb884d6eeb77c4b0a1
+input_chars=27992
+input_chars_original=27992
+input_truncated=false
+total_findings=19
+critical=4
+warning=10
+info=5
+count_method=severity-records
+count_status=partial
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: codex-5.4, openrouter-3, openrouter-4, claude (4 total)
+Mode: code
+Input size: 27992 chars
+Date: 2026-09-20T17:59:55Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CODEX-5.4
+###############################################################
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: `src/claude_swap/autoswitch.py:2775`  
+ISSUE: Preferred-account reset polling can abort the autoswitch tick on a config race.  
+ATTACK VECTOR: If the preferred account is removed/renamed between candidate selection and `request_usage_after_reset()`, `resolve_account()` can raise and the unguarded call can take down the decision loop instead of falling back to normal polling.  
+SUGGESTED FIX: Catch `ClaudeSwitchError` around this call, log/emit a warning, and continue with the existing candidate polling path.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: `src/claude_swap/autoswitch.py:3080`  
+ISSUE: Invalid `reserveAccount` silently disables reserve protection.  
+ATTACK VECTOR: A typo or stale email in config makes `_reserve_slot()` return `None`, so the intended reserve account re-enters normal rotation with no warning and can be consumed unexpectedly.  
+SUGGESTED FIX: Mirror home-account behavior: emit a one-time warning or fail validation when `reserveAccount` does not resolve to a managed account.
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: `launchd/com.greglas.claude-account-switcher.plist:17`  
+ISSUE: LaunchAgent bypasses the documented installed binary and hardcodes the checkout venv.  
+ATTACK VECTOR: The service will fail or restart-loop after the checkout moves, the venv is rebuilt, or only `/Users/greglas/.local/bin/cswap` exists, despite `PATH` and docs pointing at the installed command.  
+SUGGESTED FIX: Point `ProgramArguments` at the stable installed `cswap` path, or keep the plist generated from the actual install location.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-3
+###############################################################
+
+
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/switcher.py:4277
+ISSUE: Inconsistent lock acquisition ordering in credential write block.
+ATTACK VECTOR: This code path acquires storage/config locks without the outer FileLock and credentials lock. Downstream methods or concurrent processes may assume stricter serialization, leading to race conditions on the credential file (e.g., lost updates when CLI refreshes keys simultaneously).
+SUGGESTED FIX: Wrap the block in `FileLock(self.lock_file), claude_credentials_lock()` to maintain the invariant established in other credential write paths (e.g., lines 2951, 6697).
+
+SEVERITY: HIGH
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:2622
+ISSUE: The reserve account logic can produce an empty candidate list under valid conditions.
+ATTACK VECTOR: If the reserve account is the only qualified account but fails the `reserve_min_life_pct` check, `qualifying` is cleared to `[]`. Downstream code may assume non-empty candidates, causing the switching engine to stall or fail silently when it should fall back to the only available option.
+SUGGESTED FIX: Only exclude the reserve account if others exist; if it is the sole candidate, retain it even if `life_pct` fails, allowing the caller to decide whether to block or force the switch.
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:3229
+ISSUE: Incorrect boolean logic for hysteresis gating in preferred return.
+ATTACK VECTOR: The return logic uses `100.0 - available >= settings.threshold`, which effectively checks if headroom is *very high* to trigger a return; this inverts the intended condition (return when usage is low), potentially preventing returns or triggering unnecessary ones depending on interpretation.
+SUGGESTED FIX: Replace `>= settings.threshold` with `<= settings.threshold` to properly check if usage has fallen below the threshold, ensuring the hysteresis check works on the intended variable.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:2734
+ISSUE: `request_usage_after_reset` holds FileLock while calling `resolve_account`.
+ATTACK VECTOR: This method calls `resolve_account` inside a FileLock context. If `resolve_account` (or its dependencies) performs network I/O or complex computation, the lock is held longer than necessary, potentially causing contention for the file write lock.
+SUGGESTED FIX: Resolve the account identity (`slot, email, org_uuid`) *before* entering the `FileLock` block.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/settings.py:124
+ISSUE: Mutable default argument in `AutoSwitchSettings`.
+ATTACK VECTOR: If `home_mode` or other defaults were changed to mutable types (like `dict` or `list`) later, the dataclass would share a single instance across all settings objects, causing state leaks. While currently `str`, this pattern invites future bugs.
+SUGGESTED FIX: Set explicit defaults for mutable fields (e.g., `home_mode: list = field(default_factory=list)`) if the schema expands, ensuring strict immutability.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:2630
+ISSUE: Reserve account is silently dropped during candidate ranking without logging.
+ATTACK VECTOR: If the reserve account is excluded because it's the only one and fails the life check, the code silently clears `qualifying`. This makes debugging switching failures difficult as no event or log indicates why the engine selected nothing.
+SUGGESTED FIX: Emit a diagnostic event or log message when the reserve account is excluded to aid observability.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/claude_locks.py:207
+ISSUE: Storage lock staleness threshold (15s) matches the credential lock but is tighter than config lock (10s).
+ATTACK VECTOR: If the storage lock isn't released after 15s (due to crash), it blocks secure-store writes indefinitely. Given that storage writes are frequent, this is more likely to cause operational friction than the config lock.
+SUGGESTED FIX: Increase `STORAGE_STALENESS_S` to 30s to provide a larger margin for crash recovery without locking out operations.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-4
+###############################################################
+
+**SEVERITY: CRITICAL**  
+**CONFIDENCE: high**  
+**FILE:** src/claude_swap/switcher.py:4268‑4281  
+**ISSUE:** Credentials are written without holding `claude_credentials_lock`. The block merges the refreshed credentials with the latest file contents while only holding `claude_storage_lock` + `claude_config_lock`. Concurrent processes that also acquire `claude_credentials_lock` (the canonical lock for the credential file) can interleave writes, leading to corrupted or lost credential data.  
+**ATTACK VECTOR:** A race between two `cswap` instances (or between `cswap` and Claude Code) can overwrite each other’s changes, potentially deleting the active token and forcing a full re‑authentication, or exposing stale tokens to an attacker.  
+**SUGGESTED FIX:** Wrap the entire read‑merge‑write sequence with `claude_credentials_lock()` in addition to the existing locks, e.g.:
+
+```python
+with claude_credentials_lock(), claude_storage_lock(), claude_config_lock():
+    latest = self._read_credentials()
+    merged = self._prepare_credentials_for_activation(working, latest)
+    self._write_credentials(merged)
+```
+
+---
+
+**SEVERITY: CRITICAL**  
+**CONFIDENCE: high**  
+**FILE:** src/claude_swap/autoswitch.py:2966‑2972  
+**ISSUE:** `_gated_triggers` drops `"return-home"` from the gated‑trigger list when `home_mode == "prefer"` and `switch_under_load` is true. Consequently, `_home_slot` no longer checks `self._session_quiet()` before performing a “return‑home” switch. The engine may switch back to the preferred account while a Claude session is still active, aborting in‑flight agents and corrupting transcript state.  
+**ATTACK VECTOR:** Users can experience abrupt credential changes mid‑generation, causing lost work, inconsistent model state, or even denial‑of‑service if the switch repeatedly interrupts active sessions.  
+**SUGGESTED FIX:** Preserve `"return-home"` in the gated list for prefer mode, or explicitly perform the quiet‑check regardless of mode:
+
+```python
+if self.settings.switch_under_load:
+    return ("consume-first", "return-home")
+```
+
+or add a separate quiet‑check before returning home.
+
+---
+
+**SEVERITY: HIGH**  
+**CONFIDENCE: high**  
+**FILE:** src/claude_swap/switcher.py:4900‑4905  
+**ISSUE:** `request_usage_after_reset` acquires only a `FileLock` on `self.lock_file`. The method writes to the usage store (`self._usage_store.request_reset_poll`) which also uses its own lock file. Without acquiring the usage‑store lock (or the new `claude_storage_lock`), concurrent calls can interleave, causing lost or duplicated reset‑poll requests.  
+**ATTACK VECTOR:** In a multi‑process environment, the preferred account may miss its first post‑reset poll, preventing it from being selected again, or may generate spurious polls that waste quota.  
+**SUGGESTED FIX:** Extend the lock scope to include the storage lock (or the usage‑store’s lock) :
+
+```python
+with FileLock(self.lock_file), claude_storage_lock():
+    self._usage_store.request_reset_poll(...)
+```
+
+---
+
+**SEVERITY: HIGH**  
+**CONFIDENCE: medium**  
+**FILE:** src/claude_swap/autoswitch.py:2601‑2625  
+**ISSUE:** When the reserve account is the *only* qualifying candidate, the code clears `qualifying` if the reserve’s headroom is below `reserve_min_life_pct`. This leaves `qualifying` empty, and later `AutoSwitchEngine.tick` expects a non‑empty list of candidates. An empty list can cause the engine to skip switching silently or raise an unexpected exception.  
+**ATTACK VECTOR:** In production, a reserve‑only scenario could halt all switching, leaving the system stuck on an exhausted account.  
+**SUGGESTED FIX:** Instead of emptying the list, fallback to “no action” explicitly:
+
+```python
+if not others:
+    if reserve_h is None or reserve_h < settings.reserve_min_life_pct:
+        return [], any_known, active_reset_ts  # signal no viable candidates
+```
+
+---
+
+**SEVERITY: MEDIUM**  
+**CONFIDENCE: medium**  
+**FILE:** src/claude_swap/autoswitch.py:1767‑1789  
+**ISSUE:** The condition that disables `pin_active` for prefer mode uses `100.0 - active_headroom >= settings.threshold`. `active_headroom` already represents *headroom* (percentage of quota left). Subtracting it from 100 yields *usage*, but the variable name suggests it is already a usage metric elsewhere. This double‑negation is confusing and easy to get wrong; a future change could invert the logic, causing the preferred home to be released prematurely or never released.  
+**ATTACK VECTOR:** Mis‑interpreting quota can lead to excessive fail‑overs, flapping, or staying on an exhausted account.  
+**SUGGESTED FIX:** Rename the variable to `active_usage` or compute usage once and compare directly, e.g.:
+
+```python
+active_usage = 100.0 - active_headroom
+if settings.home_mode == "prefer" and current == home and active_usage >= settings.threshold:
+    pin_active = False
+```
+
+---
+
+**SEVERITY: MEDIUM**  
+**CONFIDENCE: low**  
+**FILE:** src/claude_swap/autoswitch.py:3030‑3036  
+**ISSUE:** When `switch_under_load` is true and `home_mode` is `"prefer"`, `_gated_triggers` returns only `("consume-first",)`. This removes the `"proactive"` trigger, which elsewhere is used to decide whether a proactive switch (outside of quota thresholds) is allowed. The change may unintentionally disable proactive switches for the prefer mode.  
+**ATTACK VECTOR:** Users may find that the system never switches pre‑emptively even when configured to do so, reducing responsiveness.  
+**SUGGESTED FIX:** Keep `"proactive"` in the returned tuple, e.g.:
+
+```python
+if self.settings.switch_under_load:
+    if self.settings.home_mode == "prefer":
+        return ("consume-first", "proactive")
+    return ("consume-first", "return-home")
+```
+
+---
+
+**SEVERITY: INFO**  
+**CONFIDENCE: low**  
+**FILE:** src/claude_swap/claude_locks.py:55‑57  
+**ISSUE:** `STORAGE_STALENESS_S` is defined but never used outside `claude_storage_lock`. If other parts of the code need a storage‑staleness constant they must duplicate the value.  
+**ATTACK VECTOR:** Minor maintenance risk – future developers might use an inconsistent staleness value.  
+**SUGGESTED FIX:** Export `STORAGE_STALENESS_S` via `__all__` or document its intended reuse.  
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:1789
+ISSUE: The prefer-mode early return skips the `_model_window_burned` check that pin mode runs, so a model-specific limit can leave the home account held indefinitely.
+ATTACK VECTOR: The new `home-preferred` branch sits before `burned = self._model_window_burned(...)` and returns `NO_ACTION`. The release test that decides `pin_active` uses `active_headroom` (`100.0 - active_headroom >= threshold`). Pin mode has a separate model-window check, and `test_home_model_window.py` exists for it, which suggests `active_headroom` may not cover the per-model window. `LOCAL-SETUP.md` describes a live case where the account-wide window is 100% free but the Fable window is exhausted until 09-19. The return path (`_home_return`) does apply `self._models`, so the two sides disagree. If `active_headroom` ignores the model window, the engine stays on an account whose configured model is blocked.
+SUGGESTED FIX: Run the `_model_window_burned` check before the prefer early return, or fold the model window into the `pin_active = False` release condition. Add a test with account headroom high and the model window at 100% while current == home in prefer mode.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/switcher.py:4280
+ISSUE: The refresh write to the live store now fails hard when the pre-write `_read_credentials()` returns None, after the refresh grant has already been consumed.
+ATTACK VECTOR: The surrounding comment says the grant is already consumed by this point. The old code wrote `working` unconditionally. The new code re-reads the live store under the locks and raises `CredentialReadError` if the read returns None. A transient keychain failure (locked keychain, `security` timeout, momentary absence) makes `live_ok=False`. The live store then keeps the old, already-rotated refresh token, so the running CLI's login dies on its next refresh. A read failure has been turned into a lost credential write.
+SUGGESTED FIX: If `latest is None`, write `working` unmerged (the old behavior), or retry the read once. Reserve the raise for a read that returns a definite non-None value that fails to merge.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3083
+ISSUE: `_reserve_slot` silently returns None when `reserveAccount` does not resolve, so a typo disables the reserve with no warning.
+ATTACK VECTOR: The home policy warns via `_warn_home_once` when it is misconfigured. The reserve policy swallows `ClaudeSwitchError` and turns itself off. A mistyped email, or an account removed later, makes the owner's main account an ordinary first-pick candidate again, the opposite of what the setting is for. Nothing in the log or status output says so, and the config accepts any string.
+SUGGESTED FIX: Validate that the slot resolves in `cswap config set autoswitch.reserveAccount`. In `_reserve_slot`, emit a once-per-value warning through the same mechanism as `_warn_home_once`. Keep the function pure by having the caller emit.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:2618
+ISSUE: In prefer mode the fallback key `(unhealthy,)` drops headroom from the ranking, so a barely-qualifying low-sequence account beats a nearly fresh one.
+ATTACK VECTOR: Qualification only requires the account to be under the threshold (95% by default). With the key `(unhealthy,)` and sequence-order tie-breaks, slot 2 at 6% headroom is chosen over slot 3 at 90%. The switch lands on an account that crosses the threshold within minutes. Each round costs a credential swap and lost prompt caches. With `switchUnderLoad=true` it can churn between fallbacks while home is still exhausted. This applies to every strategy that reaches this branch, not just the default one.
+SUGGESTED FIX: Keep headroom as a secondary key, `(unhealthy, -h)`, or as a minimum-landing-margin filter. Use sequence order only to break ties.
+
+SEVERITY: WARNING
+CONFIDENCE: low
+FILE: src/claude_swap/switcher.py:4919
+ISSUE: `request_usage_after_reset` takes the global `FileLock` and writes the usage store on every engine tick, with no error guard.
+ATTACK VECTOR: The engine calls it each tick (15s) whenever the preferred account is a candidate. `FileLock(self.lock_file)` blocks with no timeout. If another `cswap` invocation holds that lock during a slow switch, the daemon tick stalls. `resolve_account` or `request_reset_poll` can raise, and the engine call site has no try/except. The post-switch re-plan in this same file is wrapped precisely because such failures should not kill the tick. A filelock timeout or store error would abort the tick and `KeepAlive` would restart the process.
+SUGGESTED FIX: Wrap the call in try/except and log a warning. Call it only when the preferred entry is actually within the reset window, not on every tick.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/autoswitch.py:1792
+ISSUE: The new `home-preferred` NoSwitchEvent fires on every healthy tick with no dedup, and the launchd log files are unrotated.
+ATTACK VECTOR: The plist runs `cswap auto --json` with stdout sent to a fixed log file. If each `NoSwitchEvent` is written as one JSON line, a healthy home account at a 15s interval produces about 5,700 lines per day into `claude-account-switcher.log`. Nothing rotates the file, so it grows without bound. Errors and events also share the same lines that operators need to grep.
+SUGGESTED FIX: Emit `home-preferred` only when the state changes (as `_home_warned` does), or drop it to debug level.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: launchd/com.greglas.claude-account-switcher.plist
+ISSUE: The plist hard-codes one user's absolute paths and runs the checkout's `.venv/bin/cswap`, while `LOCAL-SETUP.md` says the installed binary is `~/.local/bin/cswap`.
+ATTACK VECTOR: If the `.venv` is rebuilt or removed, the service crash-loops every 30s under `KeepAlive`. `cswap status` and the service can also run different builds. Any other user or machine that copies the file gets broken paths.
+SUGGESTED FIX: Point `ProgramArguments` at the same binary the docs name, or document the plist as a per-user template.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
+
+=== APPENDED PASS 2026-09-20T18:02:11Z ===
+artifact_kind=adversarial-review
+created_at=2026-09-20T18:02:11Z
+status=partial
+mode=code
+output_format=text
+providers_used=cursor-agent, codex-5.4, openrouter-3, claude
+provider_count=4
+providers_attempted=5
+provider_outcomes=cursor-agent:ok,codex-5.4:ok,openrouter-3:ok,claude:ok,kimi:empty
+REVIEW BY: CURSOR-AGENT
+REVIEW BY: CODEX-5.4
+REVIEW BY: OPENROUTER-3
+REVIEW BY: CLAUDE
+reviewed_blob=3c4b561ce46bc22f38891927d3d2c50983b599b3
+reviewed_blob=cdd245fbec1fffb13a2c294a6ac34d02c2c07ad5
+reviewed_blob=49056e1516b803af14393b4501c2fbcb8fa5f9e9
+reviewed_blob=1ba96732ed851213dd583b02f3619d440dc57918
+reviewed_blob=459f91df9b5103956fad9fb55d5bd6a6d59977fb
+input_chars=28940
+input_chars_original=28940
+input_truncated=false
+total_findings=20
+critical=0
+warning=9
+info=11
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: cursor-agent, codex-5.4, openrouter-3, claude (4 total)
+Mode: code
+Input size: 28940 chars
+Date: 2026-09-20T18:02:11Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CURSOR-AGENT
+###############################################################
+
+Adversarial review of the provided diff only (production call sites for `request_reset_poll` / `relevant_windows` are not in this chunk).
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** `verification/check.sh:5`  
+**ISSUE:** Ruff is scoped to two new test modules and omits `tests/test_reserve_account.py`.  
+**ATTACK VECTOR:** A syntax/name error or F821-only-in-that-file mistake in `test_reserve_account.py` ships while CI stays green; failures show up only on full local pytest or later pipelines.  
+**SUGGESTED FIX:** Run `ruff check` on all new tests (or `tests/`) the same way as `src/`.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/usage_store.py:847-851` (approx.; `reset = max(resets)` branch)  
+**ISSUE:** Nomination uses `max(resets)` over every window with `pct >= threshold`, so a later, not-yet-due reset on a long window blocks early poll even when a shorter window’s reset is already in the past.  
+**ATTACK VECTOR:** Cached `lastGood` can keep an old short-window exhaustion (e.g. five_hour at 100%) until the normal poll plan fires, while a long window is still over threshold with a future `resets_at`. Prefer-mode “return home” and routing then act on stale quota for up to the remaining poll interval—not on post-reset reality. This matches `test_later_blocking_weekly_reset_still_controls_readiness` as intentional, but it is a stale-read window if readiness and polling disagree on which windows matter.  
+**SUGGESTED FIX:** Nominate only from windows that actually gate readiness/switch decisions (same set as return-home), or use the earliest **elapsed** reset among blocking windows instead of `max()` over all threshold-exhausted windows.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `tests/test_preferred_reset.py` (store tests calling `request_reset_poll(..., (), ...)`) vs production caller (not in chunk)  
+**ISSUE:** Store tests always pass `models=()`, while real usage is often model-scoped (`test_burned_model_prevents_return_even_after_five_hour_reset` in the sibling home tests).  
+**ATTACK VECTOR:** If `oauth.relevant_windows(usage, models)` drops or reweights windows when `models` is non-empty, production may never nominate reset polls for scoped exhaustion paths that the new store tests prove only for the empty tuple.  
+**SUGGESTED FIX:** Add at least one `request_reset_poll` test with the same `models` tuple the autoswitch/collector uses in production (including a scoped/burned-model fixture).
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `tests/test_preferred_reset.py:218-232` (`test_refresh_read_failure_preserves_active_store_and_successor_backup`)  
+**ISSUE:** After OAuth refresh succeeds, a failed re-read leaves on-disk `accessToken` expired while the per-account backup holds the new refresh (and fetch is skipped).  
+**ATTACK VECTOR:** Any consumer that reads only `.credentials.json` (Claude Code, another tool, or a race before reconciliation) keeps using an expired access token although refresh already happened—intermittent auth failures, duplicate refresh attempts, or MCP/oauth drift until a later successful read/write path.  
+**SUGGESTED FIX:** On refresh success, atomically persist successor to the live store when safe, or fail closed without writing partial MCP mutations; ensure a single canonical read path always prefers the updated backup before declaring `USAGE_TOKEN_EXPIRED`.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/usage_store.py:832-856` (`request_reset_poll` / `apply`)  
+**ISSUE:** All guard failures return silently with no metric/log/debug signal.  
+**ATTACK VECTOR:** In production, accounts stay on long poll plans with no visibility into whether nomination was skipped due to stale `fetchedAt`, `lastAttemptAt >= reset`, malformed `resets_at`, or long-window `max(reset)`—hard to distinguish “working as designed” from stuck cache or bad provider payloads.  
+**SUGGESTED FIX:** Emit a structured debug reason (one enum per early-return branch) at trace/debug level, or increment a counter per skip reason.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** medium  
+**FILE:** `verification/check.sh:3-4`  
+**ISSUE:** `pip install --no-deps .` plus unpinned runtime deps (only ruff/mypy pinned) makes CI differ from a normal install.  
+**ATTACK VECTOR:** CI passes with stale/missing transitive deps present in dev machines but absent in CI (or vice versa), masking import/runtime failures until release or user install.  
+**SUGGESTED FIX:** Install with deps (`pip install .` or lockfile/constraints) in verification, or document that CI assumes a pre-provisioned env.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** low  
+**FILE:** `src/claude_swap/usage_store.py:848-849`  
+**ISSUE:** Nomination compares `fetchedAt` / `lastAttemptAt` to parsed reset times with no visible clock-skew handling.  
+**ATTACK VECTOR:** NTP step or manual clock adjustment can make `reset > now` or `fetched >= reset` wrong transiently, delaying or briefly over-accelerating reset polls until the next tick.  
+**SUGGESTED FIX:** Compare with a small tolerance, or derive “reset elapsed” from monotonic elapsed time since a stored reset boundary, not wall-clock alone.
+
+
+###############################################################
+###   PROVIDER: CODEX-5.4
+###############################################################
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: src/claude_swap/usage_store.py:837  
+ISSUE: Malformed exhausted windows can be ignored or crash reset scheduling.  
+ATTACK VECTOR: `lastGood` is deserialized provider/cache data, but `pct >= threshold` and `parse_reset_ts(stamp)` are trusted per window. A non-numeric `pct` can raise during `_mutate`, and a mixed case with one valid reset plus one unparseable exhausted window silently drops the bad blocking window and may schedule an early poll.  
+SUGGESTED FIX: Build the exhausted-window list explicitly; validate/coerce `pct`, and if any exhausted window lacks a parseable reset, leave the poll plan unchanged for that row instead of filtering it out.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-3
+###############################################################
+
+
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/usage_store.py
+ISSUE: nextPollAt backoff window is unconditionally overwritten to now
+ATTACK VECTOR: The code sets row["nextPollAt"] = min(planned, now), which collapses any future scheduled poll to the current time whenever a reset is nominated. This bypasses backoff or throttling logic stored in planned, potentially causing polling storms when providers enforce rate limits or retry windows.
+SUGGESTED FIX: Change the update to only override nextPollAt when no plan exists or when reset occurs after the planned window; otherwise, keep the original planned value.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/usage_store.py
+ISSUE: Unhandled exception in mutate callback
+ATTACK VECTOR: oauth.relevant_windows or parse_reset_ts may throw if usage schema drifts (e.g., unexpected field types or nested formats). The callback lacks try/except, which can abort the entire _mutate operation, leaving other identities in identities unprocessed during a single request.
+SUGGESTED FIX: Wrap the callback body in a try/except block and log non-zero exceptions per identity instead of propagating the failure for the batch.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/usage_store.py
+ISSUE: Silent skip for missing or malformed usage data
+ATTACK VECTOR: The function silently returns for records where lastGood is missing or not a dict. If upstream storage produces inconsistent records (e.g., JSON null instead of object), these rows will never be evaluated for reset nomination, causing false negatives in polling and stalled account rotation.
+SUGGESTED FIX: Emit an error event or metric when usage data is malformed to ensure visibility into data quality issues.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/usage_store.py
+ISSUE: Timezone normalization not enforced for comparisons
+ATTACK VECTOR: Timestamps in lastGood are parsed with parse_reset_ts, while now comes from self.clock. If either source includes mixed timezone formats (UTC vs local) or offsets, the reset > now check may behave unexpectedly, leading to premature or blocked poll resets.
+SUGGESTED FIX: Normalize all timestamps to UTC epoch integers at the entry point of request_reset_poll before any comparison.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/usage_store.py
+ISSUE: Identity key assumptions not validated against storage
+ATTACK VECTOR: The function assumes all identities passed to _mutate exist in storage and have matching row keys. If an identity is removed between selection and mutation, the batch process may crash or partially skip accounts, breaking retry guarantees.
+SUGGESTED FIX: Validate that each identity key exists in the underlying store before invoking _mutate or ensure _mutate safely ignores missing keys without aborting.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: tests/test_preferred_reset.py
+ISSUE: Missing test for concurrent mutate calls
+ATTACK VECTOR: Tests validate single-threaded scenarios with FakeClock. If request_reset_poll is invoked concurrently by multiple workers for the same identity, nextPollAt writes could overwrite each other or violate the reset attempt guard (attempted >= reset), allowing duplicate polling.
+SUGGESTED FIX: Add a concurrency test using threading and shared memory that confirms nextPollAt and attempted counters remain consistent across simultaneous calls.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: verification/check.sh
+ISSUE: Verification script hardcodes external dependencies and paths
+ATTACK VECTOR: check.sh installs pinned versions of ruff and mypy from the network and runs pytest without timeout. In CI environments with network instability or flaky tests, this script can hang indefinitely, blocking deploys.
+SUGGESTED FIX: Wrap pytest and compileall in timeout wrappers, cache dependencies in CI, and allow configurable timeouts.
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/usage_store.py:~850 (`request_reset_poll`, the `fetched >= reset` / `attempted >= reset` guards)
+ISSUE: The post-reset nomination is single-shot, with no settle margin between the local clock and the provider's window roll-over. If the one probe lands on a stale window, the account waits for the normal poll interval.
+ATTACK VECTOR: `reset` comes from the provider (`resets_at`), while `now`, `fetchedAt` and `lastAttemptAt` come from the local clock. If the laptop clock runs a couple of seconds ahead, or the provider's utilization lags the stamp, the probe fires at `now >= reset` and still sees `pct=100` with the same `resets_at`. The success record then sets `fetched >= reset`, and `attempted >= reset` was already true. Acceleration is permanently off for that window. The primary account then stays unusable until the regular plan interval (600 s in the tests), which defeats the "return on first reset tick" goal. The tests use a perfectly synchronized `FakeClock`, so they never see this.
+SUGGESTED FIX: Judge the guard by the observation, not the wall clock. When a post-reset fetch still shows the same exhausted window, allow one more nomination after a short fixed delay (for example 30 s), capped at N attempts per `resets_at` value. Alternatively, nominate at `reset + small_grace` instead of exactly `reset`.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: tests/test_preferred_reset.py:~104 (`test_failed_first_reset_probe_retries_after_backoff`)
+ISSUE: The second `request_reset_poll` call in this test is a no-op by the function's own guard, so the test does not prove what its name claims.
+ATTACK VECTOR: After the failed probe, `lastAttemptAt` (the claim time) is at or after `reset`, so `request_reset_poll` returns early. The final `reserve(..., respect_plans=False)` succeeds only because the first nomination left `nextPollAt` in the past and the backoff expired. If `record(error=...)` ever starts clearing or advancing `nextPollAt`, retry-after-failure would break while this test stays green, or fail for an unrelated reason.
+SUGGESTED FIX: Assert `next_poll_at` explicitly after the failed record, and either drop the redundant second call or use a scenario where the nomination actually has to fire.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/usage_store.py:~857 (`self._mutate(identities, identities.keys(), apply)`)
+ISSUE: `apply` runs over every identity on every call, and most calls change nothing. This is only a problem if `_mutate` unconditionally locks and rewrites the store or creates rows.
+ATTACK VECTOR: `_mutate` is not in this diff, but the test `never_fetched_account_is_not_marked_as_having_quota` suggests rows can be materialized for never-fetched accounts. If `_mutate` also rewrites the file each call, a per-tick call adds a lock and write on the hot path. It also adds contention with the collector's `claim`/`record`, and can create empty rows.
+SUGGESTED FIX: Have `apply` report whether it changed anything and skip the write when it didn't. Otherwise, confirm that `_mutate` is a no-op for unchanged rows.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: tests/test_preferred_reset.py:~267 (`test_contended_writer_aborts_switch_without_changing_login`)
+ISSUE: `monkeypatch.setattr(claude_locks, "DEFAULT_TIMEOUT_S", 0)` may be inert.
+ATTACK VECTOR: The sibling test passes `timeout=0` explicitly, which suggests the timeout is a parameter. If `claude_storage_lock(timeout=DEFAULT_TIMEOUT_S)` binds the default at definition time, the patch does nothing. The test then blocks for the real default timeout, making it slow and timing-dependent. It would still pass, so nothing flags that the patch is ineffective.
+SUGGESTED FIX: Patch the function's default or the call site's timeout, or assert that the elapsed time is short.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: verification/check.sh:3
+ISSUE: The "check" script mutates the ambient interpreter and gates very little.
+ATTACK VECTOR: `python -m pip install --no-deps .` and `pip install ruff==… mypy==…` run against whatever `python` is on PATH, with no venv. Because of `--no-deps`, `pytest` and the other runtime deps must already be present, and nothing checks that. The ruff run selects only `E9,F63,F7,F82` (syntax and undefined-name errors) and covers `src` plus two test files. The other new test files (`test_reserve_account.py` and the rest) are never linted. The script reads as a full verification gate, but it lets most style and logic issues through.
+SUGGESTED FIX: Create a throwaway venv (`python -m venv "$(mktemp -d)"`) inside the script, install the test deps there, and lint all of `tests/` or drop the narrow-scope pretense.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
+
+=== APPENDED PASS 2026-09-20T18:09:57Z ===
+artifact_kind=adversarial-review
+created_at=2026-09-20T18:09:57Z
+status=ok
+mode=code
+output_format=text
+providers_used=codex-5.3, codex-5.4, openrouter, openrouter-4, claude
+provider_count=5
+providers_attempted=5
+provider_outcomes=codex-5.3:ok,codex-5.4:ok,openrouter:ok,openrouter-4:ok,claude:ok
+REVIEW BY: CODEX-5.3
+REVIEW BY: CODEX-5.4
+REVIEW BY: OPENROUTER
+REVIEW BY: OPENROUTER-4
+REVIEW BY: CLAUDE
+reviewed_blob=e9b89bef29cb6936a295a9218e4bfd23a2b9fd52
+reviewed_blob=714371d2c5a69ceabcad534f0ef3d55e6ad0ca60
+input_chars=22445
+input_chars_original=22445
+input_truncated=false
+total_findings=16
+critical=4
+warning=9
+info=3
+count_method=severity-records
+count_status=partial
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: codex-5.3, codex-5.4, openrouter, openrouter-4, claude (5 total)
+Mode: code
+Input size: 22445 chars
+Date: 2026-09-20T18:09:57Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CODEX-5.3
+###############################################################
+
+SEVERITY: CRITICAL  
+CONFIDENCE: high  
+FILE: verification/typecheck.py:18  
+ISSUE: A missing or broken mypy installation can silently pass verification.  
+ATTACK VECTOR: `python -m mypy` exits with status 1 when the module is unavailable; `check()` accepts status 1, ignores stderr, finds no stdout diagnostics, and returns an empty counter. Since `verification/requirements.txt` does not install mypy, a fresh farm environment can report zero introduced errors without type-checking anything.  
+SUGGESTED FIX: Add mypy to the pinned requirements and reject status 1 when stderr is non-empty or no recognizable mypy diagnostic/summary was produced.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: verification/typecheck.py:29  
+ISSUE: The fallback “upstream” baseline is the current `HEAD`, making the check vacuous on clean committed checkouts.  
+ATTACK VECTOR: When `upstream-src.tar` is unavailable, CI archives `HEAD`; after the proposed changes are committed, baseline and current source are identical, so every newly introduced diagnostic cancels out and the gate passes.  
+SUGGESTED FIX: Require the pinned archive, or archive an explicitly supplied merge-base/base commit and fail if that revision is unavailable.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: verification/typecheck.py:21  
+ISSUE: Removing diagnostic locations lets unrelated errors in the same file cancel each other.  
+ATTACK VECTOR: The counter key retains only the file and message. If an existing error is removed while a new error with identical text appears elsewhere in that file, the counts remain equal and `current - baseline` reports no regression.  
+SUGGESTED FIX: Preserve line/column locations, or compare diagnostics using a stable source-aware mapping rather than message counts alone.
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: verification/typecheck.py:18  
+ISSUE: Baseline and current trees may be checked with different mypy configuration.  
+ATTACK VECTOR: The current run uses the repository as its working directory and can auto-discover `pyproject.toml`, `mypy.ini`, or `setup.cfg`; the extracted baseline contains only `src` and therefore cannot discover the same configuration. Configuration differences can create or suppress “introduced” diagnostics independently of code changes.  
+SUGGESTED FIX: Pass an explicit shared `--config-file` to both runs, copying it into or referencing it from the baseline invocation.
+
+
+###############################################################
+###   PROVIDER: CODEX-5.4
+###############################################################
+
+SEVERITY: CRITICAL  
+CONFIDENCE: high  
+FILE: verification/typecheck.py:18  
+ISSUE: Typecheck gate silently passes when `mypy` is not installed.  
+ATTACK VECTOR: `verification/requirements.txt` does not pin `mypy`; `python -m mypy` can exit `1` with “No module named mypy” on stderr, which `check()` treats as a valid mypy-error result, then parses empty stdout and reports zero diagnostics.  
+SUGGESTED FIX: Add/pin `mypy` to `verification/requirements.txt`, use `sys.executable`, and raise when return code `1` has no parsed diagnostics but stderr indicates an execution/import failure.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: verification/typecheck.py:30  
+ISSUE: Missing baseline archive falls back to comparing against `HEAD`, which can mask committed regressions.  
+ATTACK VECTOR: In CI or a committed branch checkout without `verification/upstream-src.tar`, `git archive HEAD src` builds the baseline from the same revision being checked, so newly introduced mypy errors subtract out and the script exits cleanly.  
+SUGGESTED FIX: Require the upstream archive/base ref explicitly, or compare against an explicit merge-base/upstream commit instead of `HEAD`.
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: verification/typecheck.py:20  
+ISSUE: Baseline and current mypy runs can use different configuration.  
+ATTACK VECTOR: The baseline temp tree only extracts `src`, while the current run executes from repo root and may pick up `pyproject.toml`, `mypy.ini`, plugins, or Python-version settings; the counter comparison can then report false regressions or hide real ones.  
+SUGGESTED FIX: Run both checks with the same explicit config, either by archiving required config files into the baseline or passing a fixed `--config-file` to both runs.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER
+###############################################################
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: verification/typecheck.py:20
+ISSUE: A failed `python -m mypy` invocation can be treated as a successful zero-error run.
+ATTACK VECTOR: `verification/requirements.txt` does not pin `mypy`. If `mypy` is missing, `python -m mypy` exits with status 1 and writes the error to stderr only. The code accepts return code 1, parses empty stdout, computes `introduced=0`, and exits 0, silently passing the typecheck gate even when no type checking occurred.
+SUGGESTED FIX: Use `sys.executable`, add a preflight `[sys.executable, "-m", "mypy", "--version"]` that must succeed, and fail if stdout is empty for a normal run. Pin `mypy` in the verification requirements.
+
+SEVERITY: CRITICAL
+CONFIDENCE: medium
+FILE: verification/typecheck.py:33
+ISSUE: The fallback baseline uses `git archive HEAD src`, which can archive the same commit being verified.
+ATTACK VECTOR: If `verification/upstream-src.tar` is absent, CI checkout at the tested commit makes `HEAD` the current code. The baseline and current checks then compare the same source, so `introduced` is always 0 and new mypy errors are masked.
+SUGGESTED FIX: Require the pinned upstream archive, or archive an explicit upstream/base ref such as `origin/main` or `$BASE_REF`, and fail if that ref is unavailable.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: verification/typecheck.py:37
+ISSUE: Baseline and current mypy runs are executed in inconsistent repository environments.
+ATTACK VECTOR: Only `src` is extracted into the temporary baseline root, so repo-level `mypy.ini`, `setup.cfg`, or `pyproject.toml` settings are absent for the baseline run, while the current run uses `Path.cwd()`. Inherited `PYTHONPATH`/site-packages can also cause baseline imports to resolve to current code. This can create false introduced errors or hide real ones.
+SUGGESTED FIX: Run both checks with the same explicit configuration and search path, e.g. copy config files into the baseline root or pass `--config-file`/`--mypy-path`, and sanitize baseline environment variables.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: verification/typecheck.py:23
+ISSUE: Error normalization can mask a new error that replaces an old error with the same message in the same file.
+ATTACK VECTOR: The regex removes the first line/column, so `src/foo.py:10: error: X` and `src/foo.py:20: error: X` become identical. If a change fixes an error at line 10 but introduces a new error at line 20 with the same message, Counter subtraction reports no introduced errors.
+SUGGESTED FIX: Include a stable semantic location identifier, such as an error code or function name, or detect same-file message replacements instead of collapsing all line numbers for the same file.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-4
+###############################################################
+
+**Findings**
+
+| SEVERITY | CONFIDENCE | FILE | ISSUE | ATTACK VECTOR | SUGGESTED FIX |
+|----------|------------|------|-------|---------------|---------------|
+| CRITICAL | high | verification/typecheck.py:31 | `tarfile.open(..., filter="data")` is only available in Python 3.11+. Running the script on Python 3.10 or earlier raises `TypeError`, aborting the verification step. | An automated CI job using an older interpreter will fail silently, breaking the gating process and potentially allowing regressions to be merged. | Detect the interpreter version and fall back to a safe manual filter (e.g., iterate over `tar.getmembers()` and skip non‑regular files) or require Python 3.11+ with an explicit version check. |
+| CRITICAL | medium | verification/typecheck.py:33‑36 | The tar extraction does **not** sanitise member names. A crafted `upstream-src.tar` containing entries like `../evil.py` could write files outside the temporary directory, overwriting code or configuration before `mypy` runs. | An attacker who can influence the upstream archive (e.g., via a compromised CI cache) could achieve arbitrary file write, leading to code injection or supply‑chain compromise. | Before extraction, validate each member’s `name` with `os.path.normpath` and ensure it stays within the target directory (e.g., `if not member_path.startswith(temp_dir): raise`). |
+| WARNING | medium | verification/typecheck.py:15‑18 | Only `result.stdout` is scanned for `": error:"` lines. If `mypy` emits diagnostics to `stderr` (e.g., import‑resolution failures), they are ignored, causing false‑negative “no introduced errors” reports. | Production code with hidden type errors could be merged because the script thinks the baseline matches the current run. | Merge `stdout` and `stderr` (or scan both) when building the diagnostics Counter. |
+| WARNING | medium | verification/typecheck.py:20 | The regex `re.sub(r":\d+(?::\d+)?:", ":", line, count=1)` replaces only the **first** occurrence of a line/column pattern. Errors that contain multiple such patterns (e.g., Windows paths like `C:\path:123:45:`) will retain extra numbers, causing mismatched counters and spurious “new” error reports. | Inconsistent error counting leads to noisy CI failures or missed regressions. | Apply the substitution globally (`count=0`) or use a more precise pattern that targets the file‑position part only. |
+| INFO | medium | verification/typecheck.py:12 | `Path.cwd()` is used as the root for the current source tree. If the script is invoked from a sub‑directory, the relative `FILES` paths will be wrong, yielding missing‑file errors or empty diagnostics. | CI steps that change the working directory could cause the script to mis‑detect regressions. | Resolve `root` relative to the script location (`Path(__file__).resolve().parent.parent`) or accept an explicit `--root` argument and validate it. |
+| INFO | low | verification/typecheck.py:30‑35 | When `verification/upstream-src.tar` exists but is corrupted, `tarfile.open` raises `tarfile.ReadError`, which is not caught. The script aborts with a traceback instead of a clean error message. | A transient disk error could break the verification pipeline, requiring manual intervention. | Wrap the `tarfile.open` block in a `try/except tarfile.ReadError` and emit a clear diagnostic, then exit with a non‑zero status. |
+| INFO | low | verification/typecheck.py:30‑35 | No limit is placed on the size of the extracted archive. A maliciously large tar could exhaust disk space or memory in the CI runner. | Resource‑exhaustion attack could cause CI jobs to fail or stall. | After reading the archive bytes, check its length against a reasonable threshold (e.g., < 50 MiB) before extraction, and abort if exceeded. |
+
+These findings focus on subtle runtime and security issues that are easy to overlook in a surface‑level review but can cause verification failures, false test results, or supply‑chain vulnerabilities in production environments.
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: verification/typecheck.py:20
+ISSUE: A mypy run that never executed is treated as "0 errors" and passes the gate.
+ATTACK VECTOR: The guard accepts return codes 0 and 1 and only parses stdout. `python -m mypy` with mypy missing exits with code 1 and writes `No module named mypy` to stderr. Both `check()` calls then return an empty Counter, so the script prints `upstream=0 current=0 introduced=0` and exits 0. `verification/requirements.txt` is exported with `--all-groups` but contains neither mypy nor ruff, so a farm host built from that lockfile hits this path. A mypy crash that exits 1 without a traceback does the same.
+SUGGESTED FIX: Require positive evidence that mypy ran. Accept the result only if stdout contains `Success:` or a `Found N error` line, otherwise raise with stdout and stderr. Also assert that the baseline total is greater than 0, or that it matches a pinned count.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: verification/typecheck.py:30
+ISSUE: When `verification/upstream-src.tar` is absent, the "upstream" baseline silently becomes `git archive HEAD`, which is this branch's own commits.
+ATTACK VECTOR: The docstring says "pinned upstream baseline". The branch already has commits on top of base `c14ab71` (`0d9a7a3`, `20e8dff`, `a3f5fa3`). If the tar is untracked, git-ignored, or not synced by `rt`, HEAD is used instead. Type errors added in earlier branch commits then count as baseline and are never reported as introduced. The output line looks the same in both cases. The tar is also loaded with no hash or provenance check, so it can drift from the base commit unnoticed. The relative path also means running from any directory other than the repo root falls into the fallback.
+SUGGESTED FIX: Remove the HEAD fallback, or replace it with `git archive <pinned-base-sha>` (or `git merge-base`). Fail if the tar is missing. Print which baseline source was used, and verify the tar's SHA-256 against a recorded value.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: zuvo/audits/test-audit-preferred.md:12
+ISSUE: The report certifies `final-verification=verified` and pins SHA-256 hashes, but its own text says the runtime results are parent-supplied and were not executed by the reviewer.
+ATTACK VECTOR: The gate line reads as measurement, yet it rests on unchecked receipts. The report claims the hashes match `zuvo/proofs/verified-snapshot.json`, but nothing enforces that. `git status` shows `autoswitch.py` and `settings.py` modified in the working tree, and the recent history (`keep the owner's main account as a reserve`, `test_reserve_account.py`, an untracked `reserve-…-adversarial.txt`) points to the design having changed since. Anyone reading the committed report later takes the Tier-A/verified claim as current when it describes an older snapshot.
+SUGGESTED FIX: Change the gate line to `final-verification=reported-by-parent`, or recompute the hashes when the report is committed. Add a one-line "valid for commit <sha> only" header.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: verification/typecheck.py:11
+ISSUE: The hardcoded five-file list means new type errors in any other module never fail the gate.
+ATTACK VECTOR: `--follow-imports=silent` deliberately suppresses errors in imported modules. Errors in a file outside `FILES` (a new module, or `cli.py` and similar) are invisible to both the baseline and the current run. The gate stays green while the branch's own type quality regresses outside those five files.
+SUGGESTED FIX: Derive the list from `git diff --name-only <base> -- 'src/**/*.py'`, or check all of `src/claude_swap`.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: verification/typecheck.py:37
+ISSUE: The baseline is checked in a temp dir containing only `src/`, so it runs without the repo's mypy configuration, while the current run uses `Path.cwd()` with it.
+ATTACK VECTOR: If `pyproject.toml` or `mypy.ini` sets options such as `python_version`, `strict`, `disable_error_code`, or per-module overrides, the two runs apply different rules. This can hide real regressions or produce false "NEW" errors. The matching 122/122 totals suggest no effect today, but the setup breaks once the config changes.
+SUGGESTED FIX: Also extract the mypy config file into the temp dir, or pass an explicit `--config-file` (absolute path) to both runs.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
+
+=== APPENDED PASS 2026-09-20T18:13:12Z ===
+artifact_kind=adversarial-review
+created_at=2026-09-20T18:13:12Z
+status=ok
+mode=code
+output_format=text
+providers_used=codex-5.3, openrouter, openrouter-3, openrouter-4, claude
+provider_count=5
+providers_attempted=5
+provider_outcomes=codex-5.3:ok,openrouter:ok,openrouter-3:ok,openrouter-4:ok,claude:ok
+REVIEW BY: CODEX-5.3
+REVIEW BY: OPENROUTER
+REVIEW BY: OPENROUTER-3
+REVIEW BY: OPENROUTER-4
+REVIEW BY: CLAUDE
+reviewed_blob=fc92989243b9d67277851149ed4bdef722810cf3
+reviewed_blob=70773b39ea2e5f3bd921d5f9354f104452475086
+input_chars=16106
+input_chars_original=16106
+input_truncated=false
+total_findings=25
+critical=3
+warning=13
+info=9
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: codex-5.3, openrouter, openrouter-3, openrouter-4, claude (5 total)
+Mode: code
+Input size: 16106 chars
+Date: 2026-09-20T18:13:12Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CODEX-5.3
+###############################################################
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: zuvo/proofs/priority-adversarial.txt:12  
+ISSUE: Repeated `reviewed_blob` keys make the proof ambiguous and lossy under standard key-value parsing.  
+ATTACK VECTOR: A parser that loads the header into a dictionary retains only the final hash, silently discarding the other ten reviewed blobs; downstream verification may then certify an incomplete artifact set.  
+SUGGESTED FIX: Use indexed keys such as `reviewed_blob.0=...` or a single explicitly encoded list.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: zuvo/proofs/priority-adversarial.txt:9  
+ISSUE: Repeated `REVIEW BY` keys have the same lossy representation problem as the blob records.  
+ATTACK VECTOR: Common configuration parsers retain only `CLAUDE`, while the metadata still claims three providers, allowing provenance checks to disagree depending on how the file is parsed.  
+SUGGESTED FIX: Use one canonical machine-readable field, such as `reviewers=cursor-agent,agy,claude`, and remove duplicate keys.
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: zuvo/proofs/priority-adversarial.txt:1  
+ISSUE: The proof has no digest or signature covering its metadata and review body.  
+ATTACK VECTOR: A local or pipeline-stage modification can alter findings, severity counts, provider attribution, or `status` while leaving all `reviewed_blob` hashes intact, because those hashes identify reviewed inputs rather than authenticate this output.  
+SUGGESTED FIX: Emit a detached digest or signature over the complete canonicalized proof and verify it before consumption.
+
+SEVERITY: INFO  
+CONFIDENCE: high  
+FILE: zuvo/proofs/priority-adversarial.txt:4  
+ISSUE: `output_format=text` combines machine-readable metadata with unrestricted provider prose without an explicit framing or escaping scheme.  
+ATTACK VECTOR: Provider output containing delimiter lines or header-like records can be misinterpreted by line-oriented consumers, corrupting provider boundaries or finding counts.  
+SUGGESTED FIX: Store the result in structured JSON with provider output as escaped string fields, or length-prefix each provider section.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER
+###############################################################
+
+SEVERITY: CRITICAL  
+CONFIDENCE: high  
+FILE: zuvo/proofs/priority-adversarial.txt:118-216  
+ISSUE: The artifact embeds imperative “SUGGESTED FIX” code blocks targeting source files not included, which downstream automation may treat as actionable.  
+ATTACK VECTOR: A CI/agent that extracts fenced Python snippets and applies them to `src/claude_swap/*` can modify locks or autoswitch logic based on unverified review text, bypassing source review and causing deadlocks, failover suppression, or credential races.  
+SUGGESTED FIX: Separate advisory text from executable patches; require the actual source diff and human approval before applying any fix, and instruct parsers to ignore fenced blocks.
+
+---
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: zuvo/proofs/priority-adversarial.txt:170-216  
+ISSUE: The review contains contradictory lock-ordering fixes: one says acquire `claude_config_lock()` before `claude_storage_lock()`, while another says preserve `credentials -> storage -> config`.  
+ATTACK VECTOR: If both suggestions are applied by different automation or humans, the codebase can end up with ABBA lock acquisition across paths, causing production deadlocks or leaving the original storage race unserialized.  
+SUGGESTED FIX: Reconcile to a single documented lock order, mark one section as authoritative, and remove or annotate conflicting remediation snippets.
+
+---
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: zuvo/proofs/priority-adversarial.txt:51-216  
+ISSUE: Finding records use inconsistent syntax (`**SEVERITY:**` in one provider, plain `SEVERITY:` in others), while metadata claims severity-record counting.  
+ATTACK VECTOR: A parser anchored to plain `SEVERITY:` will miss the cursor-agent findings, causing dashboards/gates to undercount warnings and info and treat the review as complete with fewer issues than recorded.  
+SUGGESTED FIX: Normalize every finding to the same machine-readable key-value format, or emit JSON/YAML records and compute counts from the parser.
+
+---
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: zuvo/proofs/priority-adversarial.txt:108-125  
+ISSUE: CRITICAL findings are asserted with high confidence about files and line numbers that are not present in the artifact.  
+ATTACK VECTOR: Consumers may use this proof as a merge/security gate and accept high-severity claims without source evidence, or conversely dismiss them if they cannot reproduce the lines, weakening trust in the review.  
+SUGGESTED FIX: Include the relevant source diff snippets or lower confidence when the artifact alone cannot substantiate the claim.
+
+---
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: zuvo/proofs/priority-adversarial.txt:1-33  
+ISSUE: Metadata asserts `status=ok`, `count_status=complete`, and `input_truncated=false` without an input hash, signature, or reproducible finding records.  
+ATTACK VECTOR: A tampered or stale proof can claim complete review of a different input; downstream systems relying on these fields may pass unsafe changes.  
+SUGGESTED FIX: Add a SHA-256 of the exact reviewed input, sign the artifact, and derive counts from structured finding records rather than manual fields.
+
+---
+
+SEVERITY: INFO  
+CONFIDENCE: high  
+FILE: zuvo/proofs/priority-adversarial.txt:53-216  
+ISSUE: Line references mix exact, approximate (`~4912`), and multi-line forms, and refer to paths outside the artifact.  
+ATTACK VECTOR: Triage and automated line-level validation cannot reliably locate the cited code, increasing the chance that reported races/deadlocks are ignored or misapplied.  
+SUGGESTED FIX: Standardize line references and include a diff context or blob anchor for each finding.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-3
+###############################################################
+
+
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: zuvo/proofs/priority-adversarial.txt
+ISSUE: Artifact integrity mismatch — the reviewed diff is a review log, not the Python source code it claims to analyze
+ATTACK VECTOR: All reported findings are unverifiable as the actual implementation (`autoswitch.py`, `usage_store.py`, `locks.py`) is absent. Decisions based on this report may address false positives or miss real bugs.
+SUGGESTED FIX: Replace the report log artifact with the actual source code diff for the files referenced in the findings to enable static analysis.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: zuvo/proofs/priority-adversarial.txt
+ISSUE: Sensitive file paths and infrastructure details exposed in the review artifact
+ATTACK VECTOR: The log exposes specific paths (e.g., `~/.claude/credentials`, `src/claude_swap/`, `~/.claude.json.lock`) which could aid targeted local attacks or supply chain reconnaissance if this artifact is leaked or stored insecurely.
+SUGGESTED FIX: Sanitize all absolute paths and sensitive file locations before exporting or storing adversarial review logs.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: zuvo/proofs/priority-adversarial.txt
+ISSUE: Conflicting lock ordering strategies between providers (AGY vs. Cursor-Agent)
+ATTACK VECTOR: AGY recommends acquiring `config_lock` before `storage_lock`, while the original code and Cursor-Agent enforce `storage_lock` before `config_lock`. Applying conflicting advice risks introducing ABBA deadlock conditions in shared storage.
+SUGGESTED FIX: Centralize lock acquisition order in a dedicated module and document it; resolve conflicting provider recommendations before merging fixes.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: zuvo/proofs/priority-adversarial.txt
+ISSUE: Hardcoded magic numbers in suggested fixes (e.g., `5.0` hysteresis, `15.0` staleness)
+ATTACK VECTOR: Embedding fixed constants in code increases brittleness; thresholds like `5.0` (quota buffer) or `15.0` (lock staleness) may not scale across different deployment environments or account types.
+SUGGESTED FIX: Move these values to configuration settings or constants with validation rather than hardcoding them into suggested patches.
+
+---
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: zuvo/proofs/priority-adversarial.txt
+ISSUE: Assumed API contract stability (HTTP 401, 429, 502-504) without validation
+ATTACK VECTOR: Findings depend on specific error codes (e.g., `active_headroom is None` due to `401`/`429`). If the upstream API changes error semantics, the recovery logic fails silently or behaves unexpectedly.
+SUGGESTED FIX: Add integration tests or mocks to verify that specific HTTP status codes reliably map to the expected state transitions before relying on them in core logic.
+
+---
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: zuvo/proofs/priority-adversarial.txt
+ISSUE: Missing cleanup on failure paths in lock acquisition suggestions
+ATTACK VECTOR: Several fixes recommend wrapping operations with `FileLock` but do not address what happens if a timeout expires or the process dies mid-lock. This could leave locks orphaned, blocking subsequent operations.
+SUGGESTED FIX: Ensure all lock context managers use strict timeouts and validate cleanup logic (e.g., deleting stale lock files) in test scenarios.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-4
+###############################################################
+
+**SEVERITY:** CRITICAL  
+**CONFIDENCE:** high  
+**FILE:** zuvo/proofs/priority-adversarial.txt  
+**ISSUE:** No cryptographic integrity check (e.g., signature, hash) is performed on the review artifact, allowing an attacker with write access to the repository to tamper with findings, provider outcomes, or blob hashes without detection.  
+**ATTACK VECTOR:** A malicious contributor could modify the file to hide critical vulnerabilities or inject false “OK” status, causing downstream automation (e.g., CI gate that parses `status=ok`) to approve insecure code.  
+**SUGGESTED FIX:** Add a signed hash (e.g., SHA‑256 with GPG signature) to the file and verify it in CI before trusting its contents, or store the artifact in an immutable, signed storage bucket.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** zuvo/proofs/priority-adversarial.txt  
+**ISSUE:** The file contains internal operational data (provider names, `reviewed_blob` SHA‑1 hashes, timestamps, `providers_used`, `provider_outcomes`).  
+**ATTACK VECTOR:** If the repository is public, this data can be harvested for reconnaissance (e.g., learning which internal tooling is used, correlating blob hashes with other leaked artifacts).  
+**SUGGESTED FIX:** Redact or move sensitive metadata to a separate, access‑controlled location; keep only the human‑readable summary in the public repo.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** zuvo/proofs/priority-adversarial.txt  
+**ISSUE:** The file mixes machine‑parseable `key=value` lines with free‑form review text without a clear section delimiter, which can break parsers that expect a strict key‑value format.  
+**ATTACK VECTOR:** Automated tools that ingest the file may stop parsing at the first non‑key‑value line, silently ignoring later findings or misreporting counts, leading to false‑negative security posture.  
+**SUGGESTED FIX:** Separate the metadata block (e.g., top‑section) from the narrative using a clear marker (`---`), or store the narrative in a distinct `.md` file referenced by the metadata.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** medium  
+**FILE:** zuvo/proofs/priority-adversarial.txt  
+**ISSUE:** The `created_at` timestamp is set to a future date (`2026-09-16T22:24:10Z`).  
+**ATTACK VECTOR:** Any logic that treats `created_at` as a freshness indicator may consider the artifact “not yet valid,” causing it to be ignored or rejected in time‑sensitive pipelines.  
+**SUGGESTED FIX:** Ensure timestamps are generated from the current system time or validate that they are not in the future before downstream consumption.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** low  
+**FILE:** zuvo/proofs/priority-adversarial.txt  
+**ISSUE:** The file ends without a trailing newline.  
+**ATTACK VECTOR:** Some tools concatenate files line‑by‑line; missing newline can cause the first line of a subsequently appended file to be merged, corrupting parsing.  
+**SUGGESTED FIX:** Add a final newline character to the file.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** low  
+**FILE:** zuvo/proofs/priority-adversarial.txt  
+**ISSUE:** The field `input_truncated=false` is present, but there is no verification that the original input truly fits within any size limits of downstream consumers.  
+**ATTACK VECTOR:** If a downstream parser assumes `false` guarantees completeness and then processes a partially truncated payload, it may raise unexpected errors.  
+**SUGGESTED FIX:** Include an explicit size check or a checksum of the original input and verify it before trusting the `input_truncated` flag.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** low  
+**FILE:** zuvo/proofs/priority-adversarial.txt  
+**ISSUE:** The `mode=security` flag is present but not enforced anywhere in the file; downstream tools may misinterpret the mode and apply inappropriate handling (e.g., skipping security‑related checks).  
+**ATTACK VECTOR:** Misconfiguration could lead to a security‑focused pipeline treating the artifact as a non‑security review, bypassing critical validation steps.  
+**SUGGESTED FIX:** Document and enforce the semantics of `mode` in the consuming pipeline, or remove the flag if it has no functional effect.
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: zuvo/proofs/priority-adversarial.txt:1-9
+ISSUE: The proof records `status=ok` with `critical=2, warning=7` and no disposition for any finding, so a passing status sits next to unresolved criticals.
+ATTACK VECTOR: `status=ok` only means the review run completed. It doesn't mean the findings were addressed. The header says this file is the `--artifact` for the push gate. If the gate checks only that the file exists and has `status=ok`, `provider_count>=2` and matching blob hashes, the two agy CRITICALs (permanent deadlock on a broken primary, and poll suppression after a failed attempt) pass the gate untriaged. Whether they were fixed, refuted or accepted isn't recorded anywhere in the artifact. The recent commits (`4eea8d0`, `a3f5fa3`) don't show whether they address these.
+SUGGESTED FIX: Append a triage block to the artifact, with one line per CRITICAL/WARNING marked FIXED (commit), REFUTED (reason) or ACCEPTED. Have the gate fail when `critical>0` has no matching disposition.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: zuvo/proofs/priority-adversarial.txt:5-9
+ISSUE: `provider_count=3` includes `claude`, the same model family as the author, so the cross-model panel is really two independent reviewers.
+ATTACK VECTOR: Your own `cross-model-review-clients` rule says to review with a family different from the writer, because same-model review shares the writer's blind spots. The count of 3 overstates independence. The only finding that came from `claude` is a lock-coverage gap that `cursor-agent` had already raised. That is consistent with correlated review rather than added coverage.
+SUGGESTED FIX: Have the driver record `independent_family_count` (here 2) and gate on that instead of `provider_count`. Or swap `claude` for `kimi` or `codex`, which the doctor reported as working.
+
+Neither finding is a runtime defect. This chunk is a text artifact with no executable Python, so I did not re-review the code its embedded reviews describe. Those files are covered in the sibling chunks.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
+
+=== APPENDED PASS 2026-09-20T18:13:28Z ===
+artifact_kind=adversarial-review
+created_at=2026-09-20T18:13:28Z
+status=partial
+mode=code
+output_format=text
+providers_used=cursor-agent, codex-5.4, openrouter-3, claude
+provider_count=4
+providers_attempted=5
+provider_outcomes=cursor-agent:ok,codex-5.4:ok,openrouter:timeout,openrouter-3:ok,claude:ok
+REVIEW BY: CURSOR-AGENT
+REVIEW BY: CODEX-5.4
+REVIEW BY: OPENROUTER-3
+REVIEW BY: CLAUDE
+reviewed_blob=9a8efb32d5eb28b92eb245106689e419733533fe
+reviewed_blob=047997803dec396270b4f272dc377cc81633eb35
+reviewed_blob=d6e5d3569119fc9495b7433509d917b88ee61a4f
+input_chars=15599
+input_chars_original=15599
+input_truncated=false
+total_findings=23
+critical=2
+warning=14
+info=7
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: cursor-agent, codex-5.4, openrouter-3, claude (4 total)
+Mode: code
+Input size: 15599 chars
+Date: 2026-09-20T18:13:28Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CURSOR-AGENT
+###############################################################
+
+Adversarial review of the provided diff only (prior false positives and already-fixed reserve empty-list event excluded).
+
+---
+
+**SEVERITY:** CRITICAL  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/autoswitch.py` (~1792–1798, `pin_active` block)  
+**ISSUE:** Prefer-mode `home-preferred` returns `NO_ACTION` for any `pin_active` tick, not only when `current == home`.  
+**ATTACK VECTOR:** Home has quota (`pin_active` true) but the active slot is a spare account. Every tick exits early with `NO_ACTION`, so later logic in the same tick (including `_try_return_home` if it runs after this block) never runs. The fleet can sit on a non-home account indefinitely while home is healthy.  
+**SUGGESTED FIX:** Gate the early return on `current == home` (mirror the `pin_active = False` condition). When `current != home`, fall through to return-home / normal candidate selection instead of `NO_ACTION`.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/autoswitch.py` (~2617–2620, `_rank_candidates`)  
+**ISSUE:** `home_mode == "prefer"` and `home_account` set forces sort key `(unhealthy,)` for every qualifying slot, not only the home slot.  
+**ATTACK VECTOR:** With `strategy="best"` and prefer+home configured, alternates are ordered by managed sequence (and unhealthy flag), not headroom. A slot with worse quota can be chosen before a better one; reserve filtering then applies on that wrong order. Looks like “best” in config but behaves like sequence rotation.  
+**SUGGESTED FIX:** Apply the sequence-only key only when ranking the home account (or document and branch strategy so `best` still uses headroom for non-home candidates).
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/autoswitch.py` (~1792–1798 vs ~1799+, same `pin_active` block)  
+**ISSUE:** Prefer mode at home returns `NO_ACTION` before `_model_window_burned(...)` runs; pin mode still runs that check.  
+**ATTACK VECTOR:** Aggregate/bindings headroom says home is “fine” (`pin_active` stays true) while a model-specific window is already burned (the check pin mode used to catch). Operator stays on home, misses proactive rotation, hits provider limits or errors on that model while autoswitch reports “retains priority”.  
+**SUGGESTED FIX:** Run `_model_window_burned` (or equivalent) before the prefer `NO_ACTION`, or release `pin_active` / allow proactive switch when any binding window is burned.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/autoswitch.py` (~2774–2830, consume-first / poll planning)  
+**ISSUE:** `request_usage_after_reset(preferred, ...)` runs, then `pre` is loaded with `fetch=set()` and `preferred_due` is computed from that stale snapshot; `pick = preferred if preferred_due else due_candidate(...)`.  
+**ATTACK VECTOR:** Same tick: reset polling is requested for home, but `next_poll_at` is not yet due in `pre`, so `due_candidate` picks another slot and it is added to `plan`. You can switch away from home in the same tick you tried to prioritize polling it for return—undermining prefer-mode “poll home first” and causing flip-flop under load.  
+**SUGGESTED FIX:** After `request_usage_after_reset`, refresh the preferred entry (or treat “just requested reset poll” as due for this tick), or defer non-preferred picks when `preferred in candidates` until the updated poll schedule is visible.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/autoswitch.py` (~3230–3250, `_try_return_home`)  
+**ISSUE:** Return-home quota gate uses `100.0 - available >= threshold` OR `available < 100.0 - threshold + hysteresis_pct`; pin release uses only `100.0 - active_headroom >= threshold` (no hysteresis on the release side in this diff).  
+**ATTACK VECTOR:** Home utilization drops just below the proactive threshold so pin releases and rotation sends traffic off home, but return-home stays blocked until headroom clears the wider hysteresis band. Longer than necessary exile from home in prefer mode, especially with large `hysteresis_pct`—quota recovered in UI sense but autoswitch won’t return.  
+**SUGGESTED FIX:** Align return-home eligibility with pin release (single shared helper for “home has enough quota to prefer/return”), or apply the same hysteresis symmetrically on release and return.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/autoswitch.py` (~3014–3025 `_gated_triggers`, ~3247–3252 `_try_return_home`)  
+**ISSUE:** With `switch_under_load` and `home_mode == "prefer"`, `return-home` is omitted from gated triggers, so `_session_quiet()` is skipped for return-home.  
+**ATTACK VECTOR:** Return-home switches under active transcript/agent load (same class of loss as proactive under `switchUnderLoad`), without the consume-first/return-home silence guard pin mode still uses. Prompt-cache and in-flight work disruption when quota flickers back on home.  
+**SUGGESTED FIX:** If that tradeoff is intentional, surface it in operator-facing docs/UI; if not, keep return-home session-gated unless an explicit “aggressive prefer return” flag is set.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/settings.py` (~124–127, ~260–264)  
+**ISSUE:** `home_mode: str = "pin"` with choice validation only in `SETTING_SPECS`, not on the dataclass.  
+**ATTACK VECTOR:** Config typo or manual construction (`home_mode="Prefer"`) never matches `== "prefer"`; system silently behaves as pin while UI/help imply prefer (reserve/prefer tests pass; production config does not).  
+**SUGGESTED FIX:** Normalize/validate on load (same path as other `choice` settings) and reject or warn on unknown values.
+
+
+###############################################################
+###   PROVIDER: CODEX-5.4
+###############################################################
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: src/claude_swap/autoswitch.py:2614  
+ISSUE: Invalid preferred-home config still changes candidate ranking.  
+ATTACK VECTOR: In `home_mode == "prefer"`, the fallback ordering is enabled by raw `settings.home_account`, not by a resolved managed home slot. A typo or stale email makes home inert elsewhere, but ranking still ignores `best` headroom and falls back to account sequence, selecting a worse account in production.  
+SUGGESTED FIX: Gate this branch on a resolved home, e.g. `self._home_slot(settings) is not None`, or pass the resolved home into ranking.
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: src/claude_swap/autoswitch.py:2618  
+ISSUE: Reserve protection only filters future landings, not the currently active reserve account.  
+ATTACK VECTOR: If the process starts on the reserve account, or a user manually switches to it, this code does not force a move away while other accounts qualify. The reserve can keep being consumed until normal autoswitch thresholds fire, contradicting “ordinary pool entirely” / “touched LAST.”  
+SUGGESTED FIX: Add an active-reserve check: when `current == reserve` and a non-reserve candidate qualifies, switch to the non-reserve candidate before applying normal active-account threshold behavior.
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: src/claude_swap/autoswitch.py:2627  
+ISSUE: Unhealthy non-reserve candidates can suppress a healthy reserve.  
+ATTACK VECTOR: `others` includes every non-reserve qualifying entry, even entries whose ranking key marks them `unhealthy`. If the only alternative is unhealthy, reserve is removed anyway, causing a failed/noisy switch attempt or blocked tick instead of using the reserve as the actual last viable option.  
+SUGGESTED FIX: Only drop the reserve when at least one viable/non-unhealthy non-reserve candidate exists, or retry with reserve if all non-reserve candidates are rejected.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-3
+###############################################################
+
+
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:2617
+ISSUE: Reserve filtering ignores accounts that qualify via reset priority, creating an ordering loop in consume-first mode
+ATTACK VECTOR: In consume-first mode, the reserve account is ranked first based on reset time. The filter at line 2617 removes the reserve if it is present in the list, regardless of why it qualified. This leaves an empty list even when the reserve legitimately qualified due to reset timing, causing the engine to block instead of switching.
+SUGGESTED FIX: Only filter the reserve when it qualified by headroom, not when it qualified by reset priority. Distinguish qualifying reasons (e.g., key tuple) before filtering.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3105
+ISSUE: _reserve_slot silently treats resolution failures for valid accounts as non-reserve
+ATTACK VECTOR: resolve_account can raise exceptions beyond ClaudeSwitchError (e.g., transient network, data corruption, unexpected format). Since the except block only catches ClaudeSwitchError, these raise and crash the tick loop, breaking switching for all accounts.
+SUGGESTED FIX: Broaden the exception handling (e.g., except Exception) and return None with a warning log for any resolution failure.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:1772
+ISSUE: Unused/undefined variable active_headroom used for home pin logic
+ATTACK VECTOR: The diff introduces a reference to active_headroom that is not declared in this scope. This will raise a NameError every time the prefer home pin check is evaluated, halting switching for home accounts.
+SUGGESTED FIX: Compute active_headroom using the existing _headroom_by_account helper as done in _home_inert.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:1789
+ISSUE: NoSwitchEvent emitted while returning TickOutcome.NO_ACTION
+ATTACK VECTOR: The engine emits NoSwitchEvent (which typically logs/records a state change) but returns NO_ACTION. Downstream metrics that aggregate switching frequency or reasons from events will be out of sync with the actual TickOutcome counts.
+SUGGESTED FIX: Emit events only when a TickOutcome changes, or ensure events distinguish between "observed" vs "acted" decisions.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:2777
+ISSUE: Requested usage for preferred home may race with plan construction
+ATTACK VECTOR: request_usage_after_reset is called before the final plan is computed at line 2771. If reset requests can trigger immediate side effects or change headroom, subsequent plan calculations could use stale state.
+SUGGESTED FIX: Defer requests until the plan is finalized, or ensure the function is truly side-effect free.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/settings.py:126
+ISSUE: home_mode lacks validation for valid choices
+ATTACK VECTOR: The runtime accepts any string for home_mode. If an invalid string is passed, the if comparisons fail silently and revert to pin-like behavior without warning, masking misconfiguration.
+SUGGESTED FIX: Add a validation step in __post_init__ (or during settings build) to raise ValueError if home_mode is not "pin" or "prefer".
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/test_reserve_account.py:49
+ISSUE: Life threshold check uses floating point without tolerance
+ATTACK VECTOR: Comparing reserve_h directly to settings.reserve_min_life_pct using < with floats can be brittle. If headroom is computed with rounding, an account at exactly 80.0% could be blocked or allowed inconsistently.
+SUGGESTED FIX: Add explicit floating point tolerance in the threshold comparison.
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:2632
+ISSUE: The reserve filter treats "unhealthy" candidates as real alternatives, so a healthy reserve is dropped in favour of an unhealthy account.
+ATTACK VECTOR: The sort keys start with `unhealthy`, so unhealthy accounts stay in `qualifying` and only rank last. The filter runs after the loop and drops the reserve whenever any other entry exists, unhealthy ones included. Take slot 2 with a flaky or erroring token and a healthy, fully fresh reserve in slot 3. The old ranking would pick slot 3, but now `others=[2]` and slot 3 is removed. The engine switches to a broken account, fails, and may flap. The tests only cover healthy `others`.
+SUGGESTED FIX: Compute `others` from healthy entries only. If every other entry is unhealthy, let the reserve compete, subject to its life floor. For example, keep the reserve when `all(key[0] for key, n in others)`.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:1792
+ISSUE: In prefer mode the new early `return NO_ACTION` runs before the `_model_window_burned(...)` check, so a home account with a burned model window is never released.
+ATTACK VECTOR: `pin_active` is only cleared from `active_headroom`. The burned-window check that follows exists because a single model window (for example Opus) can be exhausted while overall headroom still looks fine. Pin mode uses that check to let the home go. Prefer mode returns first, so the engine stays on a home account where the active model is at its limit. That makes prefer stickier than pin, the opposite of "releases an exhausted home".
+SUGGESTED FIX: Run the burned-window check before the prefer early return. Only emit `home-preferred` and return when the window is not burned.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:2617
+ISSUE: The prefer-mode ranking key is chosen by `settings.home_account` being truthy, not by the resolved home slot, and it discards both the configured strategy and headroom.
+ATTACK VECTOR: There are two problems.
+- A `homeAccount` that names no managed account leaves the pin inert with a warning. The `elif` still fires, though, so `strategy=best` is silently replaced by plain sequence order for every non-consume-first strategy.
+- Even with a valid home, sequence order picks the first account under threshold, which may have about 1% headroom left. That account can cross the threshold again on the next tick and cause rapid switch churn on every prefer-mode release.
+SUGGESTED FIX: Gate the branch on `self._home_slot(settings) is not None`. Keep `-h` as a secondary key, for example `(unhealthy, -h)`, or use it as the tie-break after sequence order.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3084
+ISSUE: `_reserve_slot` swallows `ClaudeSwitchError` with no warning, so a typo or an ambiguous identifier silently disables the reserve protection.
+ATTACK VECTOR: The owner's main account is often the same email across several slots (personal plus org). If `resolve_account` rejects that as ambiguous, or the value has a typo, the reserve becomes inert. `best` or `consume-first` then burns the main account first, which is exactly what the setting was meant to prevent. Nothing surfaces this. The home path uses `_warn_home_once` for the same situation, so this is also convention drift.
+SUGGESTED FIX: Emit a one-time warning when resolution fails. It must be deduplicated and kept out of the twice-replayed ranking path, for example via a `_reserve_warned` key like `_home_warned`. Also catch broader resolve failures if `resolve_account` can raise anything other than `ClaudeSwitchError`.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/autoswitch.py:2636
+ISSUE: The reserve life floor applies to every trigger, including recovery from a dead or failing current account, and there is no validation that reserve and home differ.
+ATTACK VECTOR: With the default `reserveMinLifePct=80`, a reserve at 70% life is refused. If the active account has a dead token or is fully exhausted, `qualifying=[]` and the engine reports BLOCKED, so the user stays on a non-working login while a usable account sits idle. Separately, if `reserveAccount == homeAccount`, prefer-mode return-home goes straight to the reserve and never consults the reserve rules, so the two settings contradict each other.
+SUGGESTED FIX: Bypass the floor when the current account is unusable. Reject or warn when `reserve_account` resolves to the same slot as `home_account`.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/autoswitch.py:2775
+ISSUE: `request_usage_after_reset` is called on every poll-planning pass for the preferred home. The preferred home also takes priority for the single poll slot whenever it is "due".
+ATTACK VECTOR: If `request_usage_after_reset` reschedules on each call, `next_poll_at` for the home can keep moving. If a fetch leaves `next_poll_at` in the past without entering backoff (a non-429 failure, for example), the preferred home wins the one slot every tick. Other candidates then never get polled, and their ranking data goes stale or unknown.
+SUGGESTED FIX: Make the `request_usage_after_reset` call idempotent, so it only sets a reset-time poll if none is scheduled. Alternate the poll slot with `due_candidate`, or limit the preferred override to once per N ticks.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
+
+=== APPENDED PASS 2026-09-20T18:17:49Z ===
+artifact_kind=adversarial-review
+created_at=2026-09-20T18:17:49Z
+status=ok
+mode=code
+output_format=text
+providers_used=cursor-agent, codex-5.3, openrouter, openrouter-3, openrouter-4
+provider_count=5
+providers_attempted=5
+provider_outcomes=cursor-agent:ok,codex-5.3:ok,openrouter:ok,openrouter-3:ok,openrouter-4:ok
+REVIEW BY: CURSOR-AGENT
+REVIEW BY: CODEX-5.3
+REVIEW BY: OPENROUTER
+REVIEW BY: OPENROUTER-3
+REVIEW BY: OPENROUTER-4
+reviewed_blob=9a8efb32d5eb28b92eb245106689e419733533fe
+reviewed_blob=f10c40a596eb4d26f3e98a09ab8b95c2a143d136
+reviewed_blob=8fce7543ff5a739a602b709127bf41d45d6dfe82
+reviewed_blob=4ca7230fe3eaf7e4d4dc2ec606ce8fd29a264166
+reviewed_blob=defd57b2bd4b9e25e43c0c0c54b570c91e95d900
+input_chars=24566
+input_chars_original=24566
+input_truncated=false
+total_findings=26
+critical=5
+warning=16
+info=5
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: cursor-agent, codex-5.3, openrouter, openrouter-3, openrouter-4 (5 total)
+Mode: code
+Input size: 24566 chars
+Date: 2026-09-20T18:17:49Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CURSOR-AGENT
+###############################################################
+
+Review is limited to the supplied artifact (aggregated adversarial output plus the appended pass). Findings below are issues the three embedded passes did not treat as one root cause or did not cover in pass 1 production blobs.
+
+---
+
+**SEVERITY:** CRITICAL  
+**CONFIDENCE:** high  
+**FILE:** tests/test_preferred_reset.py:198-208 (production path: post-refresh credential persistence / per-account backup write)  
+**ISSUE:** Rotated OAuth material is written to per-account backup even when live `.credentials.json` merge/verify fails, leaving live store on expired access token.  
+**ATTACK VECTOR:** Providers that rotate refresh tokens invalidate the stale live refresh after backup already holds the successor; the next refresh from live reuses or conflicts with server state → refresh failure, grant revocation, or ambiguous authority between backup and live under concurrent switch/MCP activity. Pass 1 production reviews of `switcher.py` blobs never tie this to `write_account_credentials` (or equivalent backup write).  
+**SUGGESTED FIX:** Make backup and live updates one atomic outcome under the same lock stack: if merge, reread, or live write fails, do not persist successor tokens to backup (or roll back backup); only commit both after verified merged live state.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** src/claude_swap/switcher.py:4279-4288 (with tests/test_preferred_reset.py:198-208)  
+**ISSUE:** Refresh failure handling is inconsistent: `latest is None` aborts and discards successful `working`, while another path can persist rotated tokens to backup without a successful live merge.  
+**ATTACK VECTOR:** Flaky reads or timing-dependent failures produce opposite outcomes (no write anywhere vs backup ahead of live), so recovery and ops tooling cannot rely on a single rule for “refresh succeeded”; intermittent split-brain between stores worsens token rotation bugs.  
+**SUGGESTED FIX:** Single policy: classify refresh success only after live (+ backup if used) commit; on any post-refresh persistence failure, fail closed with no backup advance and optional retry of live write from in-memory `working`.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/switcher.py:4277  
+**ISSUE:** Post-refresh persistence may be omitting the same lock stack as activation under the same “OAuth round trip” rationale used for the network grant phase.  
+**ATTACK VECTOR:** Grant-time lock omission only protects in-flight HTTP; read–merge–write of active credentials is a separate critical section. Reusing the grant rationale for persistence leaves refresh serialized only by `claude_storage_lock`/`claude_config_lock`, so CC/switcher can interleave credential reads/writes (already flagged partially) in ways grant-phase comments do not justify.  
+**SUGGESTED FIX:** Split comments and lock policy: document grant phase vs persist phase; persist phase must match activation (`FileLock` + `claude_credentials_lock()` + storage/config) or prove an invariant that makes omission safe.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/autoswitch.py:~2998-3010 and src/claude_swap/switcher.py:~4277-4286  
+**ISSUE:** Prefer-mode `return-home` can run without session/transcript quiet while OAuth refresh for another slot may complete and merge against whichever identity is currently active.  
+**ATTACK VECTOR:** Return-home switches live identity during active CLI traffic; an in-flight refresh for the previous or home slot can merge refreshed tokens with a newly active profile (especially without `_live_identity_matches` on that path). Cross-account context, billing, and audit attribution on one `~/.claude` profile—not a remote exploit, but a realistic local multi-account failure mode. Pass 1 lists each piece separately, not this composed sequence.  
+**SUGGESTED FIX:** Gate prefer `return-home` on the same quiet/drain signals as pin mode, and bind refresh persistence to the refreshed slot unless live identity still matches before any active-store write.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/claude_locks.py:~207-218 and src/claude_swap/switcher.py:4277  
+**ISSUE:** 15s stale break on `.storage-write.lock` combined with refresh persistence holding only storage/config locks increases torn read–merge–write risk if a slow writer is still mutating secure storage.  
+**ATTACK VECTOR:** After staleness expiry, a second process enters storage critical section while the first writer may still be updating; refresh merge-write interleaves with CC storage updates → corrupted or hybrid credential JSON and undefined active identity. Staleness and partial lock stack were reported separately, not as one integrity window.  
+**SUGGESTED FIX:** Use non-stale mutual exclusion for secure-store writes (or staleness aligned with credentials lock policy), and require full credential lock ordering on refresh persist before merge-after-read.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/switcher.py:~4920-4928 and src/claude_swap/switcher.py:4277  
+**ISSUE:** `request_usage_after_reset` uses a narrower lock set than refresh persist and activation, so usage-driven routing can observe identity/graph state mid-refresh or mid-switch.  
+**ATTACK VECTOR:** Reset-poll updates `nextPollAt`/usage metadata while credentials and active slot change under overlapping locks; autoswitch/prefer/return-home decisions can target `(email, org_uuid)` pairings that no longer match live credentials, causing wrong ready-account selection or extra usage API traffic under the wrong identity.  
+**SUGGESTED FIX:** Align `request_usage_after_reset` with mutating paths’ lock order (at least `FileLock` + credentials lock, plus storage if usage store shares CC filesystem assumptions), or run it only from callers already holding that stack.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** high  
+**FILE:** zuvo/proofs/priority-final-adversarial.txt (appended pass metadata)  
+**ISSUE:** Appended pass records `provider_outcomes=agy:ok` while AGY body is a Gemini filter block, not a review.  
+**ATTACK VECTOR:** Downstream automation that trusts `status=ok` and provider counts treats chunk 5/6 as fully triangulated when one third of providers contributed no findings; gaps (e.g. backup/live until pass 2) look like consensus when they are coverage holes.  
+**SUGGESTED FIX:** Record `agy:blocked` (or `skipped`) in `provider_outcomes`, set `provider_count`/`count_status` accordingly, and fold appended pass totals into one rollup header.
+
+---
+
+**Note:** Several CRITICAL/WARNING items in the artifact (missing `_live_identity_matches` on refresh write, omitted `FileLock`/`claude_credentials_lock` at ~4277, prefer `pin_active` when `active_headroom is None`, prefer short-circuit before `_model_window_burned`) are already documented there; they are not repeated above except where composed or cross-path gaps were missing.
+
+
+###############################################################
+###   PROVIDER: CODEX-5.3
+###############################################################
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: zuvo/proofs/priority-final-adversarial.txt:239  
+ISSUE: The appended pass records every provider outcome as `ok`, although the AGY section explicitly says the request was blocked.  
+ATTACK VECTOR: Automation trusting `status=ok`, `provider_count=3`, or `provider_outcomes` will treat a two-provider partial review as a successful three-provider review, allowing incomplete security coverage to satisfy review gates silently.  
+SUGGESTED FIX: Record AGY as `blocked`, reduce the successful provider count, and derive the aggregate status from actual provider results.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: zuvo/proofs/priority-final-adversarial.txt:232  
+ISSUE: Two review records are concatenated without a structured boundary, duplicating singleton metadata keys with conflicting values.  
+ATTACK VECTOR: A key-value parser may use either the first or last occurrence of `status`, `total_findings`, `count_status`, or `created_at`; consequently, the same artifact can be interpreted as a complete 15-finding review or a partial one-finding review depending on parser behavior.  
+SUGGESTED FIX: Store each pass in a separate file or wrap passes in an explicitly structured collection with independently scoped metadata.
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: zuvo/proofs/priority-final-adversarial.txt:242  
+ISSUE: Reviewed blob hashes are not associated with paths, providers, or individual review passes.  
+ATTACK VECTOR: Because hashes from multiple inputs are presented as an unlabelled repeated field—and several recur across passes—a verifier cannot establish which source artifact produced a finding or whether all claimed inputs were actually reviewed. This weakens the file’s value as auditable proof.  
+SUGGESTED FIX: Record each input as a structured tuple containing pass ID, repository path, blob hash, and reviewing provider.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER
+###############################################################
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: zuvo/proofs/priority-final-adversarial.txt:212
+ISSUE: The appended pass reports `provider_outcomes=agy:ok` and `status=ok` even though the AGY section is a filter-blocked error and `count_status=partial`.
+ATTACK VECTOR: A security gate consuming this proof will treat the review as completed by three providers; the blocked provider’s missing findings are silently omitted, creating false assurance and bypassing required adversarial coverage.
+SUGGESTED FIX: Parse provider sections for error/blocked text and count status; emit `provider_outcomes=agy:blocked/failed`, `provider_count=2`, `providers_attempted=3`, and `status=partial/failed` until the provider is re-run or explicitly waived.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: zuvo/proofs/priority-final-adversarial.txt:3
+ISSUE: `status=ok` is emitted even when the artifact records unresolved `critical=2` findings, conflating pipeline success with security acceptance.
+ATTACK VECTOR: Consumers that check only `status=ok` may treat a review with CRITICAL findings as clean and allow unsafe changes to merge.
+SUGGESTED FIX: Separate `pipeline_status` from `review_status`; set `review_status=fail` or `warning` when critical/warning findings exist unless an explicit waiver is recorded.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: zuvo/proofs/priority-final-adversarial.txt:204
+ISSUE: One file contains two complete metadata blocks with conflicting totals/status and no final aggregate or pass identifier.
+ATTACK VECTOR: Parsers may use the first block (`total_findings=15`) or the last block (`total_findings=1`), producing inconsistent security gates; the appended partial pass can be silently ignored or treated as the final result.
+SUGGESTED FIX: Emit one artifact per pass or add `pass_id` plus a final aggregate metadata block with `final_status` and merged counts.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: zuvo/proofs/priority-final-adversarial.txt:296
+ISSUE: The second-pass CLAUDE finding is prose without `SEVERITY`, `CONFIDENCE`, or `FILE` fields, while `count_method=severity-records`.
+ATTACK VECTOR: Automated aggregation can drop or undercount the finding, leaving a credential-backup integrity issue untracked while `provider_outcomes` still reports `claude:ok`.
+SUGGESTED FIX: Validate provider output schema; if not severity-records, mark provider format failed and require re-run, or convert the prose finding into a structured record.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: zuvo/proofs/priority-final-adversarial.txt:13
+ISSUE: `reviewed_blob` provenance is unreliable: the same key is repeated many times, and the second pass’s blob list omits blobs from the first pass without pass scope.
+ATTACK VECTOR: A simple key-value parser may keep only the last blob, and consumers may think the final blob list is complete; evidence for which inputs were reviewed can be lost or mismatched.
+SUGGESTED FIX: Use a structured list or indexed keys (`reviewed_blob_1...N`, `reviewed_blob_count`) and make cumulative vs per-pass scope explicit.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: zuvo/proofs/priority-final-adversarial.txt:289
+ISSUE: Provider error text containing instruction-like content and external URLs is embedded directly in the artifact without sanitization.
+ATTACK VECTOR: Downstream LLMs or log viewers that consume this proof as prompt context could be influenced by the provider error text or follow embedded links.
+SUGGESTED FIX: Store provider errors in a structured field such as `provider_errors=agy:...` and escape or strip provider output before reusing it in prompts.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-3
+###############################################################
+
+
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: zuvo/proofs/priority-final-adversarial.txt
+ISSUE: All security findings reference external source code paths (e.g., `src/claude_swap/switcher.py`) that are not present in the diff
+ART
+ ATTACK VECTOR: Downstream pipelines accepting this report cannot verify vulnerabilities; an attacker could inject false findings into a trusted review tool by tampering with the log content while maintaining the format.
+SUGGESTED FIX: Include referenced code snippets or commit hashes directly in the artifact, or require digital signatures from the reviewing agents.
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: zuvo/proofs/priority-final-adversarial.txt
+ISSUE: Critical and WARNING severities for the same code locations (e.g., `switcher.py` 4277) are conflicting across providers with no resolution logic.
+ATTACK VECTOR: Automated CI systems consuming this report will either block builds unnecessarily due to a single provider or fail to block due to conflicting status flags, breaking security gate integrity.
+SUGGESTED FIX: Add a `final_severity` field that aggregates findings (e.g., maximum severity), rather than storing raw provider outputs.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: zuvo/proofs/priority-final-adversarial.txt
+ISSUE: Internal repository blob hashes and provider names (`providers_used: cursor-agent, agy, claude`) are hardcoded in the text output.
+ATTACK VECTOR: Leaks internal CI/CD topology and commit history, enabling reconnaissance for supply chain attacks or targeted exploits on specific provider agents.
+SUGGESTED FIX: Redact or hash repository blobs and omit raw provider names before committing review artifacts to the main branch.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: zuvo/proofs/priority-final-adversarial.txt
+ISSUE: Security findings rely on specific line numbers (e.g., `~2998–3010`) without version pinning to a commit.
+ATTACK VECTOR: Codebase changes (even whitespace) shift line numbers, making findings obsolete or false positives without triggering re-runs or updates to the review record.
+SUGGESTED FIX: Replace line ranges with semantic identifiers (function names) or hash the specific code blocks verified during the scan.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: zuvo/proofs/priority-final-adversarial.txt
+ISSUE: The artifact records `input_chars` and `input_chars_original` which correlate to private prompt content.
+ATTACK VECTOR: Exposes internal prompt sizes and potential redaction strategies, aiding attackers in reverse-engineering security filters or prompt injection limits.
+SUGGESTED FIX: Omit raw character counts or normalize them (e.g., `size_bucket=large`) instead of exact numbers.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: zuvo/proofs/priority-final-adversarial.txt
+ISSUE: `status=ok` and `mode=security` flags in the artifact are unauthenticated text fields.
+ATTACK VECTOR: If this artifact is parsed by monitoring tools to determine if a security scan passed, a compromised build pipeline could simply overwrite `status` values to bypass checks.
+SUGGESTED FIX: Sign the artifact with a build system key before writing to disk to prevent tampering.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-4
+###############################################################
+
+**SEVERITY:** CRITICAL  
+**CONFIDENCE:** high  
+**FILE:** zuvo/proofs/priority-final-adversarial.txt (entire file)  
+**ISSUE:** The newly‑added review artifact contains numerous internal‑only details (provider names, blob SHA‑1 hashes, timestamps, lock‑staleness values, internal file‑system URLs, and exact line‑range references). If this file is committed to the public repository it leaks operational secrets that could aid an attacker in reconnaissance, social‑engineering, or targeted exploitation of the CI/CD pipeline.  
+**ATTACK VECTOR:** An external adversary can clone the repo, harvest the disclosed hashes and timestamps to correlate with internal build logs, identify the exact versions of the review tooling in use, and craft phishing or supply‑chain attacks against the listed reviewers or the CI system. The exposed lock‑staleness constant (`STORAGE_STALENESS_S = 15.0`) also reveals a timing parameter that could be abused in a race‑condition test.  
+**SUGGESTED FIX:** Remove the entire `priority‑final‑adversarial.txt` file from the source tree or move it to a secure, non‑public location. If the file must be kept for audit, redact all sensitive fields (provider names, blob hashes, timestamps, internal URLs, lock constants) before committing, or store the artifact as an encrypted asset outside the codebase.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** zuvo/proofs/priority-final-adversarial.txt (lines containing `file:///src/claude_swap/...`)  
+**ISSUE:** The artifact embeds absolute `file://` URLs that expose the internal repository layout and exact source‑file locations. This information is unnecessary for the review summary and provides an attacker with a precise map of the codebase, facilitating targeted attacks (e.g., locating the credential‑locking logic).  
+**ATTACK VECTOR:** An adversary who obtains the repo can use the disclosed paths to focus fuzzing or exploit development on the most security‑critical modules (`autoswitch.py`, `switcher.py`, `claude_locks.py`).  
+**SUGGESTED FIX:** Strip or replace `file:///src/...` references with generic module names (e.g., `autoswitch.py`) before committing. Alternatively, keep the URLs in a separate internal report that is not version‑controlled.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** zuvo/proofs/priority-final-adversarial.txt (metadata block at the top)  
+**ISSUE:** The header includes `mode=security`, `output_format=text`, and `providers_used=cursor-agent, agy, claude`. Publishing the security‑review mode and the exact tooling chain reveals the internal security posture and the fact that an automated adversarial review is being performed. This can cue threat actors to adjust their tactics (e.g., focusing on race‑conditions known to be checked).  
+**ATTACK VECTOR:** Knowledge of the review mode may lead an attacker to prioritize concurrency bugs (the review already flags lock‑staleness) or to avoid detection by targeting un‑reviewed code paths.  
+**SUGGESTED FIX:** Redact or generalize the metadata section. Use generic tags like `mode=internal` or omit the `providers_used` list entirely from the committed artifact.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** low  
+**FILE:** zuvo/proofs/priority-final-adversarial.txt (any user‑generated content)  
+**ISSUE:** If this file is ever rendered in a web UI or documentation generator without proper escaping, the embedded markdown‑style headings (`###   PROVIDER: CLAUDE`) and back‑ticks could lead to HTML/Markdown injection, potentially executing scripts in the viewer’s context.  
+**ATTACK VECTOR:** An attacker who can modify the review output (e.g., by influencing the AI reviewer) could inject malicious markup that, when displayed, runs JavaScript in the browser of a developer reading the report.  
+**SUGGESTED FIX:** Ensure any rendering pipeline sanitizes the file content (escape HTML, strip or encode back‑ticks) before display. If the file is never displayed, document that it is for internal consumption only.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
+
+=== APPENDED PASS 2026-09-20T18:19:35Z ===
+artifact_kind=adversarial-review
+created_at=2026-09-20T18:19:35Z
+status=ok
+mode=code
+output_format=text
+providers_used=cursor-agent, codex-5.3, codex-5.4, openrouter, claude
+provider_count=5
+providers_attempted=5
+provider_outcomes=cursor-agent:ok,codex-5.3:ok,codex-5.4:ok,openrouter:ok,claude:ok
+REVIEW BY: CURSOR-AGENT
+REVIEW BY: CODEX-5.3
+REVIEW BY: CODEX-5.4
+REVIEW BY: OPENROUTER
+REVIEW BY: CLAUDE
+reviewed_blob=9a8efb32d5eb28b92eb245106689e419733533fe
+reviewed_blob=f10c40a596eb4d26f3e98a09ab8b95c2a143d136
+reviewed_blob=8fce7543ff5a739a602b709127bf41d45d6dfe82
+reviewed_blob=235b6997b8ec0599441601331a471da74de718a2
+reviewed_blob=bfe51960f2e842232cacfa4bdedb2b22f4c872b4
+reviewed_blob=b22acc62fc08562e9b68e430f2f349c12b321b82
+input_chars=5663
+input_chars_original=5663
+input_truncated=false
+total_findings=27
+critical=1
+warning=20
+info=6
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: cursor-agent, codex-5.3, codex-5.4, openrouter, claude (5 total)
+Mode: code
+Input size: 5663 chars
+Date: 2026-09-20T18:19:35Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CURSOR-AGENT
+###############################################################
+
+Adversarial review of the provided artifact (`zuvo/proofs/verification-report.md` only). Findings are grounded in what the report states, not in unseen source.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** zuvo/proofs/verification-report.md:6–7, 88–89  
+**ISSUE:** Verification ran on Linux farm only; macOS Keychain behavior is called out as runtime-critical but not exercised by tests on Mac.  
+**ATTACK VECTOR:** CI stays green on Linux while production on macOS hits Keychain reread delays (~30s), failed reads, and different timing around login refresh—preferred-account logic may switch, stall, or retain the wrong active login under real desktop conditions.  
+**SUGGESTED FIX:** Add a macOS-targeted integration smoke (or farm job on macOS) for Keychain + storage lock paths, or downgrade the report to “Linux-verified; macOS behavior operational assumption only.”
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** zuvo/proofs/verification-report.md:47–50  
+**ISSUE:** Test-audit independence is explicitly degraded (same-model); no strict independence pass or content-keyed gate artifact is claimed.  
+**ATTACK VECTOR:** Test quality and regression coverage are partially self-validated; gaps in Tier A/B scenarios (concurrency, partial failure) can survive “2258 passed” while the audit that should catch weak assertions did not run under independent review.  
+**SUGGESTED FIX:** Re-run `test-audit` with a supported independent model and attach the gate artifact before treating acceptance evidence as audit-backed.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** zuvo/proofs/verification-report.md:52–55  
+**ISSUE:** Second adversarial review was chunked; AGY refused the test-only chunk while other providers reviewed it—no single complete multi-reviewer pass on all chunks.  
+**ATTACK VECTOR:** Test-only logic (reservation retries, reset polling, hysteresis regressions) may lack the same hostile scrutiny as production chunks; bugs in test doubles or missing edge cases can “prove” behaviors that fail under real provider latency or out-of-order usage events.  
+**SUGGESTED FIX:** Replace refused chunk with another provider or one consolidated review run that covers test + production artifacts together; record disposition per chunk.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** zuvo/proofs/verification-report.md:82–84  
+**ISSUE:** Known invalid-configuration path: nonempty `homeAccount` in prefer mode still orders fallbacks by sequence, not headroom (documented as noncritical follow-up).  
+**ATTACK VECTOR:** A typo or stale config (common in multi-account setups) does not fail fast; the engine keeps prefer-mode semantics but picks a suboptimal or exhausted account by sequence, causing quota blocks or unnecessary switches despite available headroom on another candidate.  
+**SUGGESTED FIX:** Validate `homeAccount` at startup (must exist in candidate set) or apply headroom-based ordering when home is invalid; add one regression test for misconfigured home.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** zuvo/proofs/verification-report.md:37–38, 76–77  
+**ISSUE:** On live-write failure, policy preserves consumed-token successor / declines unreadable live overwrite—recoverability over forcing latest live bytes.  
+**ATTACK VECTOR:** Repeated partial failures, corrupted live files, or concurrent writers can leave local state on a backup/successor while other processes or a later reader assume live storage is authoritative—stale active login or divergent MCP credential allowlist until manual intervention.  
+**SUGGESTED FIX:** Surface explicit sync failure state (metric/log/health), bounded retry with backoff, and operator-visible “storage out of sync” rather than silent preserve-only behavior.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** high  
+**FILE:** zuvo/proofs/verification-report.md:17–19  
+**ISSUE:** mypy gate is regression-only (122 inherited diagnostics unchanged); report disclaims inherited type cleanliness.  
+**ATTACK VECTOR:** Runtime failures in inherited preferred-account, lock, or merge paths are not ruled out by verification; farm tests can pass while Optional/union misuse in untouched code throws mid-request.  
+**SUGGESTED FIX:** Tighten typing or add boundary validation on the small set of paths this change touches; do not treat “introduced=0” as type-safe for the feature.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** medium  
+**FILE:** zuvo/proofs/verification-report.md:94–96, 99  
+**ISSUE:** Time-bound operational claim (Fable limit through `2026-09-19T05:59:59Z`) and activation snapshot (`2026-09-16`) embed expiry-sensitive guidance in an evergreen verification report.  
+**ATTACK VECTOR:** Operators or automation reading the report after those dates treat stale limits as current—wrong expectations on reset/recovery (report itself warns not to promise five-hour Fable recovery but still anchors on a passed deadline).  
+**SUGGESTED FIX:** Move dated limits to a living ops note with TTL, or replace with “verify at deploy time” checks without hard-coded provider window end times in the proof artifact.
+
+---
+
+No CRITICAL issues are deterministically provable from this markdown alone; the strongest production risks here are **platform gap (no Mac tests)**, ** weakened audit/review independence**, and the **acknowledged misconfigured `homeAccount` ordering** behavior.
+
+
+###############################################################
+###   PROVIDER: CODEX-5.3
+###############################################################
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: zuvo/proofs/verification-report.md:5  
+ISSUE: The verification excludes the actual production platform while three platform-specific tests are skipped.  
+ATTACK VECTOR: Linux results cannot validate the documented macOS Keychain, LaunchAgent, and native locking behavior; an OS-specific failure can pass every reported check and appear production-ready.  
+SUGGESTED FIX: Run the platform-specific tests on the target macOS version and record the skipped test names and results.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: zuvo/proofs/verification-report.md:4  
+ISSUE: The committed report exposes personal account identities, local usernames, account slots, and quota state.  
+ATTACK VECTOR: Repository readers learn operator identities (`greg.laski`, `Tatiana`), machine layout, active-account placement, and exhaustion windows, enabling privacy leakage and targeted social engineering.  
+SUGGESTED FIX: Replace identities and absolute paths with redacted labels and keep live account state in an access-controlled operational log.
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: zuvo/proofs/verification-report.md:10  
+ISSUE: Opaque run IDs and a separately referenced snapshot do not cryptographically bind each claimed result to the code and tests it executed.  
+ATTACK VECTOR: A stale or unrelated successful run can be presented alongside newer hashes, and reviewers cannot determine from the report which snapshot produced each result—especially the cleanup run occurring after the “final” snapshot.  
+SUGGESTED FIX: Record the source hash, test hash, platform, command, and immutable result URL or artifact digest for every run.
+
+SEVERITY: INFO  
+CONFIDENCE: high  
+FILE: zuvo/proofs/verification-report.md:93  
+ISSUE: Expiring operational state is written as timeless current fact in a versioned verification artifact.  
+ATTACK VECTOR: After the stated reset timestamp, readers may treat obsolete quota and active-slot information as current and make incorrect recovery or switching decisions.  
+SUGGESTED FIX: Mark the entire operational section with an explicit “as of” timestamp and label all quota/account observations as historical snapshots.
+
+
+###############################################################
+###   PROVIDER: CODEX-5.4
+###############################################################
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: zuvo/proofs/verification-report.md:4  
+ISSUE: Report commits a local absolute source path with a personal username.  
+ATTACK VECTOR: If this proof file is shared or published, it leaks the developer’s workstation layout and account name, which can become useful reconnaissance data.  
+SUGGESTED FIX: Replace the absolute path with a repo-relative path or a redacted placeholder like `<repo-root>`.
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: zuvo/proofs/verification-report.md:88  
+ISSUE: Time-sensitive operational state is written as current fact without an expiry boundary.  
+ATTACK VECTOR: The statement about Tatiana’s Fable limit is only valid until `2026-09-19T05:59:59Z`; after that, the report can be read as live evidence while encoding stale quota state.  
+SUGGESTED FIX: Reword as historical evidence, e.g. “At verification time, Tatiana had…”, and include the report generation timestamp near the top.
+
+SEVERITY: INFO  
+CONFIDENCE: medium  
+FILE: zuvo/proofs/verification-report.md:96  
+ISSUE: Runtime activation evidence is a point-in-time observation but is phrased like durable deployment proof.  
+ATTACK VECTOR: A LaunchAgent being verified at `2026-09-16T22:37:05Z` does not prove it remains installed, enabled, or healthy later; downstream reviewers may over-trust a stale runtime claim.  
+SUGGESTED FIX: Label it explicitly as snapshot evidence and avoid implying ongoing activation unless there is a fresh health check artifact.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER
+###############################################################
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: zuvo/proofs/verification-report.md:5,26,97
+ISSUE: The report claims full verification while macOS-specific behavior is the production target, but no tests ran on macOS and three platform tests were skipped on the Linux farm.
+ATTACK VECTOR: macOS Keychain reread timing, native storage lock behavior, and LaunchAgent refresh races can ship untested; a Linux-only “All checks passed” result may hide account-switch failures or stale-login races on the actual user machine.
+SUGGESTED FIX: Require a macOS test run for platform-sensitive paths or explicitly downgrade the report to “Linux-only verification” and block release until macOS coverage passes.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: zuvo/proofs/verification-report.md:80
+ISSUE: Invalid nonempty `homeAccount` is accepted in prefer mode but causes fallback ordering by sequence instead of best headroom.
+ATTACK VECTOR: A typo or stale configured home account silently changes account selection, potentially using the wrong account, exhausting quota, or bypassing the intended preferred-home behavior.
+SUGGESTED FIX: Validate `homeAccount` against the known account set; reject the configuration or coerce invalid nonempty values to `None` before fallback ordering.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: zuvo/proofs/verification-report.md:66
+ISSUE: The native config writer releases its synchronous file lock without awaiting storage completion, leaving config and storage updates non-atomic.
+ATTACK VECTOR: A concurrent reader can observe new config while storage state is still stale or incomplete, creating a TOCTOU window for account switching, token persistence, or active-login state.
+SUGGESTED FIX: Hold the relevant lock through storage commit, or persist a transaction marker and recover/roll back if storage completion fails.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: zuvo/proofs/verification-report.md:67,87
+ISSUE: The verification relies on fixed 15s storage staleness and an approximately 30s macOS Keychain reread delay, so reads after writes may be stale during switching.
+ATTACK VECTOR: Proactive 95% rotation can make decisions from stale quota or login state, causing the wrong account to be retained or selected despite the “All checks passed” result.
+SUGGESTED FIX: Invalidate or bypass staleness for reads immediately following a local write, or treat recent writes as authoritative for at least the observed staleness window.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: zuvo/proofs/verification-report.md:37,75
+ISSUE: A consumed single-use successor token is retained on live-write failure, and unreadable live overwrite is declined with backup preservation.
+ATTACK VECTOR: The failure path may leave a consumed grant recoverable but not consistently persisted, risking token reuse, stale recovery state, or silent refresh failure after a partial write.
+SUGGESTED FIX: Mark the successor as consumed/unusable until live persistence succeeds, and emit an explicit recovery error or require manual recovery instead of only preserving the backup.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: zuvo/proofs/verification-report.md:86
+ISSUE: The adaptation is pinned to inspected Claude Code 2.1.273 behavior and related timing assumptions.
+ATTACK VECTOR: An upstream version change can silently invalidate lock semantics, Keychain timing, quota-window behavior, or storage staleness assumptions, causing incorrect account switching.
+SUGGESTED FIX: Detect the installed Claude Code version at startup and fail closed or run a compatibility probe when the pinned behavior is not confirmed.
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: zuvo/proofs/verification-report.md:36
+ISSUE: All tests ran on the Linux farm, but the feature is a macOS Keychain/LaunchAgent adaptation, and the platform-specific tests were skipped.
+ATTACK VECTOR: The report says "no test suite ran on the Mac" and that "Three existing platform tests are skipped on the Linux farm". The acceptance claims "Native storage lock contention preserves active login" and macOS "rereads changed Keychain login within about 30s". These are exactly the paths where Linux and macOS differ (Keychain reads, file-lock semantics). The 2258 passes therefore prove little about them. The only macOS evidence is a single dry-run poll with no switch performed.
+SUGGESTED FIX: Say plainly that Keychain and storage-lock behavior is unverified on the target OS. Run the skipped platform tests, or one real switch and restore cycle, on the Mac and record the result.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: zuvo/proofs/verification-report.md:64
+ISSUE: The rationale for rejecting the "unknown home quota" finding does not answer it.
+ATTACK VECTOR: The finding is about the home account's quota being unknown. The rejection says "its enclosing branch requires non-None active_headroom", which is the active account's headroom. A known active headroom says nothing about the home quota. If the home quota is None (failed or backed-off probe, or a new account), the early return can still retain or return to home on unknown data. The follow-up "Existing bounded failure logic remains" is asserted, with no test cited.
+SUGGESTED FIX: Cite or add a test with home quota = None and active headroom known, and assert the outcome. Otherwise reopen the finding.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: zuvo/proofs/verification-report.md:24
+ISSUE: The type-regression check compares diagnostic counts (122 vs 122), not diagnostic identity.
+ATTACK VECTOR: `introduced=0` from equal totals means a new mypy error offset by one that disappeared (for example, a refactored function no longer errors) passes silently. Inherited code is also known to be untyped. `verification/typecheck.py` is itself modified in this change set, so the checker was changed alongside the code it checks. The lint run is only Ruff E9/F63/F7/F82, a syntax and undefined-name subset, yet it is reported as "All checks passed!".
+SUGGESTED FIX: Diff the sets of (file, code, message), normalized for line numbers, against upstream. Report the lint scope in the headline, not only in a later note.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: zuvo/proofs/verification-report.md:5
+ISSUE: The evidence chain does not cover the final state.
+ATTACK VECTOR: The last full run (2258 tests) is followed by a "final test-only cleanup" that ran only 46 tests. The report points to `verified-snapshot.json` for hashes without saying which run those hashes belong to. The listed reviews (`priority-*-adversarial.txt`) and runs do not mention the reserve behavior. Recent history has reserve commits ("keep the owner's main account as a reserve", "a reserve that looks configured must not silently gate nothing"), and there are uncommitted edits to `autoswitch.py` and `tests/test_preferred_home.py`. So "Final production snapshot" may not describe the code being shipped, and later changes may have had no full-suite run or cross-provider review.
+SUGGESTED FIX: Re-run the full battery on the exact tree being committed. Record one hash set tied to that run ID, and state which review artifacts cover which commit.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: zuvo/proofs/verification-report.md:82
+ISSUE: A known misconfiguration (invalid non-empty `homeAccount` in prefer mode) is deferred as "noncritical", and it degrades silently.
+ATTACK VECTOR: With a typo in `homeAccount`, fallbacks are ordered by sequence instead of best headroom, so a nearly exhausted account can be picked ahead of a healthy one. Nothing is logged or rejected. The report only says to document it "before general distribution", with no tracking item. This is the same class as the recent "reserve that looks configured must not silently gate nothing" fix.
+SUGGESTED FIX: On an invalid non-empty `homeAccount`, log a warning per poll or fail config validation. At minimum, fall back to headroom ordering.
+
+SEVERITY: WARNING
+CONFIDENCE: low
+FILE: zuvo/proofs/verification-report.md:60
+ISSUE: The report defends holding the lock pair across the whole refresh POST, but the 15s storage staleness window is not reconciled with that.
+ATTACK VECTOR: Refresh holds `FileLock` and the OAuth locks "around the entire POST and persistence block", and the report says the 15s staleness "matches installed Claude 2.1.273". If the POST exceeds 15s (slow network, provider `Retry-After`), a Claude CLI process can treat the lock as stale and take it. Two writers then rotate the single-use refresh token concurrently, and one loses its successor. Only the deadlock case was analyzed.
+SUGGESTED FIX: Add a test or bound so the POST timeout is well under the staleness window. Otherwise renew the lock mtime during the request.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: zuvo/proofs/verification-report.md:92
+ISSUE: The time-bound operational claims are stale or unqualified.
+ATTACK VECTOR: The report says Tatiana "currently has a separate Fable limit through 2026-09-19T05:59:59Z", and runtime activation was verified on 2026-09-16 with a single poll. Today is 2026-09-20, so the stated limit has passed and the "currently" claim is wrong. The report also carries no as-of date for the "third account pending login" status.
+SUGGESTED FIX: Stamp each runtime claim with an observation timestamp, or drop those lines from the proof artifact. Re-check the live state before relying on it.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
