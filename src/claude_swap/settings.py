@@ -23,6 +23,10 @@ from pathlib import Path
 from claude_swap.exceptions import ConfigError
 
 SETTINGS_SCHEMA_VERSION = 1
+
+# Settings whose value is a slot identifier ("num or email"): a bare JSON
+# integer is the natural hand-written form and must read as its string.
+_SLOT_IDENTIFIER_KEYS = ("homeAccount", "reserveAccount")
 SETTINGS_FILENAME = "settings.json"
 
 _logger = logging.getLogger("claude-swap")
@@ -332,9 +336,14 @@ def _clamped(settings: AutoSwitchSettings) -> AutoSwitchSettings:
             # (None) so a null/garbage settings.json value disables the filter.
             # A bare JSON number is the natural hand-written form of a slot
             # number (``"homeAccount": 32``) and reads as its string; for
-            # every other string key a number is garbage as before.
+            # every other string key a number is garbage as before. Every key
+            # whose help says "num or email" belongs in _SLOT_IDENTIFIER_KEYS —
+            # reserveAccount was added to the surface without it and silently
+            # read as None, i.e. the reserve policy looked configured while
+            # gating nothing (the inert-pin failure the homeAccount comment
+            # above already warns about, repeated one key later).
             if (
-                spec.json_key == "homeAccount"
+                spec.json_key in _SLOT_IDENTIFIER_KEYS
                 and isinstance(value, int)
                 and not isinstance(value, bool)
             ):

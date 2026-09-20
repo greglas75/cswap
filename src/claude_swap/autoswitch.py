@@ -2260,6 +2260,39 @@ class AutoSwitchEngine:
                 h is not None and h <= 0 for h in candidate_headrooms
             )
             if not truly_exhausted:
+                # Name the reserve floor when IT is what emptied the pool.
+                # The generic detail below describes the threshold/hysteresis
+                # gate — which an at-limit escape never even runs (it is
+                # behind `if voluntary:`) — so on a fleet held back only by a
+                # protected reserve it reads as "everyone is exhausted" and
+                # sends the operator hunting for quota that is sitting right
+                # there, deliberately untouched.
+                reserve = self._reserve_slot(settings)
+                reserve_h = headroom.get(reserve) if reserve else None
+                reserve_floor_blocked = (
+                    reserve is not None
+                    and reserve_h is not None
+                    and reserve_h < settings.reserve_min_life_pct
+                    and all(
+                        n == reserve or (headroom.get(n) or 0) <= 0
+                        for n in oauth_candidates
+                    )
+                )
+                if reserve_floor_blocked:
+                    self._emit(
+                        NoSwitchEvent(
+                            reason="reserve-protected",
+                            detail=(
+                                f"Account-{reserve} is the only candidate left "
+                                f"but holds {reserve_h:.0f}% life, under the "
+                                f"{settings.reserve_min_life_pct:.0f}% reserve "
+                                "floor; lower autoswitch.reserveMinLifePct or "
+                                "switch to it by hand to release it"
+                            ),
+                        )
+                    )
+                    self._abandon_switch_intent(trigger, "reserve protected")
+                    return TickOutcome.BLOCKED
                 self._emit(
                     NoSwitchEvent(
                         reason="no-qualifying-candidate",
@@ -3087,6 +3120,12 @@ class AutoSwitchEngine:
         replayed twice per tick under consume-first. A value naming no managed
         account leaves the reserve policy inert rather than gating a slot that
         does not exist.
+
+        One caveat, so "pure" is not read wider than it is: ``resolve_account``
+        can perform a ONE-TIME legacy ``organizationUuid`` migration write on
+        first call. It is idempotent and cannot change the ranking on replay,
+        but it is a write, and a future reader comparing this docstring against
+        the call chain deserves to find that here rather than discover it.
         """
         ident = settings.reserve_account
         if not ident:

@@ -3,9 +3,14 @@ only while it still has life. Companion to test_preferred_home.py."""
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
-from claude_swap.autoswitch import SwitchEvent, TickOutcome
+from claude_swap.autoswitch import NoSwitchEvent, SwitchEvent, TickOutcome
+from claude_swap.settings import load_settings
+from tests.test_home_account import settings_path
 from tests.test_autoswitch import _R_LATER, _R_LATEST, _R_SOON, _usage, _usage7
 from tests.test_home_account import _harness
 
@@ -46,6 +51,22 @@ class TestReserveAccount:
             "1": _usage(100), "2": _usage(100), "3": _usage(0),
         }) is TickOutcome.SWITCHED
         assert h.active_number() == 3
+
+    def test_the_block_names_the_reserve_floor(self, temp_home):
+        """A blocked tick must say WHY. The generic detail describes the
+        threshold/hysteresis gate, which an at-limit escape never runs — so on
+        a fleet held back only by the reserve it read as "everyone is
+        exhausted" and sent the operator hunting for quota sitting right
+        there, deliberately untouched."""
+        h = reserved(temp_home)
+        assert h.tick_with_usage({
+            "1": _usage(100), "2": _usage(100), "3": _usage(60),
+        }) is TickOutcome.BLOCKED
+        reasons = [e.reason for e in h.events if isinstance(e, NoSwitchEvent)]
+        assert "reserve-protected" in reasons
+        detail = next(e.detail for e in h.events
+                      if isinstance(e, NoSwitchEvent) and e.reason == "reserve-protected")
+        assert "40% life" in detail and "80% reserve floor" in detail
 
     @pytest.mark.parametrize("used", [20.1, 25.0, 60.0])
     def test_reserve_is_refused_below_its_life_threshold(self, temp_home, used):
@@ -112,3 +133,25 @@ class TestReserveUnderConsumeFirst:
             "3": _usage7(10, 10, _R_SOON),
         }) is TickOutcome.SWITCHED
         assert h.active_number() == 3
+
+
+class TestReserveSettingsClamp:
+    """Parity with TestSettingsClamp: a hand-written slot number must read.
+
+    `reserveAccount` reached the settings surface without the bare-int
+    coercion `homeAccount` has, so `{"reserveAccount": 3}` fell through to
+    None — the reserve looked configured while gating nothing, with no
+    warning (the string branch does not warn, unlike `choice`).
+    """
+
+    def test_bare_json_number_reads_as_the_slot(self, tmp_path: Path):
+        path = settings_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"autoswitch": {"reserveAccount": 3}}))
+        assert load_settings(tmp_path).reserve_account == "3"
+
+    def test_an_email_reserve_is_untouched(self, tmp_path: Path):
+        path = settings_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"autoswitch": {"reserveAccount": "a@example.com"}}))
+        assert load_settings(tmp_path).reserve_account == "a@example.com"
