@@ -89,6 +89,12 @@ _logger = logging.getLogger("claude-swap")
 # Freshen targets whose access token expires within this window: twice Claude
 # Code's own 5-minute refresh buffer, so its post-lock "abort refresh if not
 # expired" re-read holds with margin after our swap.
+# One tick asks whether sessions are quiet up to five times (the gate, the
+# drain gate, the pre-swap re-measure). Each ask used to walk the whole
+# transcript tree. Holding one scan for a few seconds collapses them into one
+# without changing what any of them can observe: the scan is a snapshot
+# either way, and a tick is ~15 s.
+SESSION_SCAN_CACHE_S = 5.0
 FRESHEN_BUFFER_MS = 10 * 60 * 1000
 # Pre-freshen reaches further than the switch-time check: a token refreshed
 # in the pre-band must still clear FRESHEN_BUFFER_MS when the switch lands a
@@ -258,13 +264,26 @@ DRAIN2_RELEASE_MESSAGE = (
 SETTINGS_WATCH_S = 5.0
 
 
-def latest_session_activity_ts(projects_dir: Path) -> float | None:
+def latest_session_activity_ts(
+    projects_dir: Path, *, stop_at: float | None = None
+) -> float | None:
     """Newest mtime among session transcripts (``<projects_dir>/**/*.jsonl``),
     or None when there are none (or the directory doesn't exist).
 
     ``os.walk`` swallows unreadable directories and a per-file ``stat`` race
     is skipped: the gate must degrade toward "assume quiet" only when there
     is provably nothing to read, never crash a tick.
+
+    ``stop_at`` returns as soon as a transcript at or newer than it is found.
+    Every caller asks the same question — "has anything been written since
+    X" — so once one such file exists the exact maximum changes no answer,
+    and on a large tree that early exit is the whole cost. Measured
+    2026-09-22 on the owner's machine: 9530 transcripts / 10.7 GB, and this
+    scan took 12.5 s inside a switch that calls it twice. THAT, not the token
+    refresh, was the 25-88 s a proactive swap took while the window's last
+    points burned at ~5.8 pts/min. The returned value may then be older than
+    the true newest, which is the safe direction: it is still inside the
+    window, so "activity exists" stands.
     """
     latest: float | None = None
     for dirpath, _dirnames, filenames in os.walk(projects_dir):
@@ -277,6 +296,8 @@ def latest_session_activity_ts(projects_dir: Path) -> float | None:
                 continue
             if latest is None or mtime > latest:
                 latest = mtime
+            if stop_at is not None and latest >= stop_at:
+                return latest
     return latest
 
 
@@ -1190,6 +1211,8 @@ class AutoSwitchEngine:
         # longer than the normal interval.
         self._sleep_until_ts: float | None = None
         self._blocked_wait_long = False
+        # (clock() of the scan, its result) — see SESSION_SCAN_CACHE_S.
+        self._session_scan_cache: tuple[float, float | None] | None = None
         # Pre-freshen throttle: slot -> clock() of the last attempt.
         self._prefreshened: dict[str, float] = {}
         # Timing of the switch in flight, stamped into its SwitchEvent so the
@@ -3119,7 +3142,7 @@ class AutoSwitchEngine:
             # voluntary switch. The same measurement labels the event, so
             # every logged switch carries the traffic state it landed in.
             t_quiet = time.monotonic()
-            quiet, detail = self._session_quiet()
+            quiet, detail = self._session_quiet(force=True)
             quiet_s = time.monotonic() - t_quiet
             if trigger in self._gated_triggers() and not quiet:
                 self._emit(NoSwitchEvent(reason="sessions-active", detail=detail))
@@ -3499,7 +3522,7 @@ class AutoSwitchEngine:
             )
             return True, None
         now = self.clock()
-        latest = latest_session_activity_ts(self.claude_projects_dir)
+        latest = self._latest_session_activity()
         record = self._read_drain()
         if record is not None:
             started = record.get("startedAt")
@@ -4612,14 +4635,42 @@ class AutoSwitchEngine:
             )
         return True, ""
 
-    def _session_quiet(self) -> tuple[bool, str]:
+    def _latest_session_activity(self, *, force: bool = False) -> float | None:
+        """Newest transcript write, scanned at most once per
+        ``SESSION_SCAN_CACHE_S`` and abandoned as soon as the answer is
+        settled.
+
+        Both callers ask "was anything written inside QUIET_WINDOW_S", so the
+        scan may stop at the first transcript that recent. What it gives up is
+        precision in the `last session write Ns ago` text, never the verdict.
+
+        ``force`` skips the cache. The re-measure inside ``_perform`` MUST use
+        it: its whole job is to catch a session that woke up between the
+        tick-top gate and the swap, and a cached answer is by definition from
+        before that window (test_perform_rechecks_quiet_under_lock).
+        """
+        now = self.clock()
+        cached = self._session_scan_cache
+        if (
+            not force
+            and cached is not None
+            and 0 <= now - cached[0] < SESSION_SCAN_CACHE_S
+        ):
+            return cached[1]
+        latest = latest_session_activity_ts(
+            self.claude_projects_dir, stop_at=now - QUIET_WINDOW_S
+        )
+        self._session_scan_cache = (now, latest)
+        return latest
+
+    def _session_quiet(self, *, force: bool = False) -> tuple[bool, str]:
         """Whether session traffic has been silent for ``QUIET_WINDOW_S``.
 
         Returns ``(quiet, detail)``. No transcripts at all is quiet (nothing
         to burn). A transcript mtime *ahead* of the clock (clock skew, or a
         write racing the scan) counts as activity — the conservative side.
         """
-        latest = latest_session_activity_ts(self.claude_projects_dir)
+        latest = self._latest_session_activity(force=force)
         if latest is None:
             return True, "no session transcripts"
         age = self.clock() - latest
