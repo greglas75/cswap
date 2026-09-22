@@ -90,6 +90,16 @@ _logger = logging.getLogger("claude-swap")
 # Code's own 5-minute refresh buffer, so its post-lock "abort refresh if not
 # expired" re-read holds with margin after our swap.
 FRESHEN_BUFFER_MS = 10 * 60 * 1000
+# Pre-freshen reaches further than the switch-time check: a token refreshed
+# in the pre-band must still clear FRESHEN_BUFFER_MS when the switch lands a
+# minute or two later, or the switch pays for the refresh anyway.
+PREFRESHEN_BUFFER_MS = 30 * 60 * 1000
+# Per-slot throttle, so a candidate is not re-freshened every 15 s tick.
+PREFRESHEN_INTERVAL_S = 120.0
+# Per-tick budget: the pass runs inside a normal below-threshold tick and must
+# never be the thing that stalls it. Tokens far from expiry cost ~0 s (the
+# freshen returns before any network), so the budget only binds on refreshes.
+PREFRESHEN_BUDGET_S = 3.0
 
 # Sleep caps around a known quota reset (RESET_SLACK_S lives in poll_policy
 # with the rest of the cadence numbers). Recheck at the exhausted-account poll
@@ -421,6 +431,11 @@ class SwitchEvent(AutoSwitchEvent):
     # small-park early trigger (CON-582) — the burn report correlates the
     # migration price against it. Additive field, present only when True.
     early: bool = False
+    # Where the swap's seconds went: {"freshenMs", "freshenAttempts",
+    # "quietScanMs", "switchMs"}. Added after proactive swaps measured 25-88 s
+    # against a manual `cswap switch` of ~1 s, with nothing in the log to say
+    # which step was slow. Additive field, present only on real swaps.
+    timing: dict | None = None
 
     def _fields(self) -> dict:
         fields = {
@@ -437,6 +452,8 @@ class SwitchEvent(AutoSwitchEvent):
             fields["drain2"] = self.drain2
         if self.early:
             fields["early"] = True
+        if self.timing is not None:
+            fields["timing"] = self.timing
         return fields
 
     def human(self) -> str:
@@ -1173,6 +1190,11 @@ class AutoSwitchEngine:
         # longer than the normal interval.
         self._sleep_until_ts: float | None = None
         self._blocked_wait_long = False
+        # Pre-freshen throttle: slot -> clock() of the last attempt.
+        self._prefreshened: dict[str, float] = {}
+        # Timing of the switch in flight, stamped into its SwitchEvent so the
+        # log says where the seconds went (freshen vs traffic scan vs write).
+        self._switch_timing: dict | None = None
         # Idle-hold: when the active token expired while Claude Code owns it
         # (and is therefore idle), crawl instead of counting unhealthy ticks.
         # ``_idle_hold_since`` survives across ticks (elapsed-time cap);
@@ -1358,7 +1380,70 @@ class AutoSwitchEngine:
             f"on the slot's own login family: {slots}"
         )
 
-    def _freshen_target(self, number: str, email: str) -> str:
+    def _pre_freshen(
+        self,
+        current: str,
+        headroom: dict[str, float | None],
+        quarantined: set[str] | frozenset[str],
+    ) -> None:
+        """Freshen idle candidates ahead of the switch, off the critical path.
+
+        Measured 2026-09-22: a proactive switch took 25-88 s from the tick
+        that crossed the threshold to the logged swap, while the last points
+        of the window burned at a median 5.8 pts/min — a 3-point margin
+        (threshold 97) bought ~31 s, less than the swap itself. The switch-time
+        freshen is the only step on that path that goes to the network, and it
+        does so exactly when a candidate's token is within FRESHEN_BUFFER_MS of
+        expiry. Doing it here, at the pre-band, with a wider buffer, means the
+        switch finds every candidate already fresh and pays only the write.
+
+        Candidates go best-headroom first (the likely target), throttled per
+        slot and bounded per tick. A dead lineage or identity conflict is
+        quarantined NOW — learning it at the pre-band, not under the wall, is
+        half the point. Transient failures are left for the switch-time
+        freshen, which still runs and remains the safety net.
+        """
+        now = self.clock()
+        # The reserve goes LAST, not by its headroom: it is held back from the
+        # ordinary pool, so it is the least likely target, yet it usually has
+        # the MOST headroom — sorted naively it would be freshened first and
+        # could spend the whole per-tick budget on the one account the switch
+        # is built to avoid.
+        reserve = self._reserve_slot(self.settings)
+        pending = sorted(
+            (
+                n for n, h in headroom.items()
+                if n != current and h is not None and h > 0 and n not in quarantined
+            ),
+            key=lambda n: (n == reserve, -(headroom.get(n) or 0.0)),
+        )
+        # The budget bounds how many refreshes START in this tick, not how long
+        # one takes: a single refresh is bounded by its own network timeout.
+        # That is deliberate — cutting a refresh mid-flight would consume a
+        # grant without persisting its successor.
+        started = time.monotonic()
+        for num in pending:
+            if time.monotonic() - started > PREFRESHEN_BUDGET_S:
+                break
+            if now - self._prefreshened.get(num, 0.0) < PREFRESHEN_INTERVAL_S:
+                continue
+            self._prefreshened[num] = now
+            # Best-effort by construction: this pass is an optimisation, and
+            # an optimisation must never be the thing that fails a tick. The
+            # switch-time freshen still runs and stays the safety net.
+            try:
+                email = self.switcher.account_email(num)
+                status = self._freshen_target(
+                    num, email, buffer_ms=PREFRESHEN_BUFFER_MS
+                )
+                if status in ("identity-conflict", "invalid_grant"):
+                    self._quarantine(num, email, status)
+            except Exception as e:  # noqa: BLE001 — see comment above
+                _logger.debug("pre-freshen of account %s failed: %r", num, e)
+
+    def _freshen_target(
+        self, number: str, email: str, buffer_ms: int = FRESHEN_BUFFER_MS
+    ) -> str:
         """Ensure a candidate's stored token outlives Claude Code's 5-min
         refresh buffer before it gets activated.
 
@@ -1436,7 +1521,7 @@ class AutoSwitchEngine:
         now_ms = self.clock() * 1000
         near_expiry = (
             isinstance(expires_at, (int, float))
-            and now_ms + FRESHEN_BUFFER_MS >= expires_at
+            and now_ms + buffer_ms >= expires_at
         )
         if not near_expiry:
             return "ok"
@@ -1947,6 +2032,12 @@ class AutoSwitchEngine:
                         # the event label differ.
                         trigger = "proactive"
                     elif settings.strategy != "consume-first":
+                        if (
+                            settings.pre_freshen_threshold > 0
+                            and utilization >= settings.pre_freshen_threshold
+                            and not self.dry_run
+                        ):
+                            self._pre_freshen(current, headroom, quarantined)
                         self._emit(
                             NoSwitchEvent(
                                 reason="below-threshold",
@@ -2407,6 +2498,8 @@ class AutoSwitchEngine:
 
         # -- freshen + switch ----------------------------------------------
         transient_failure = False
+        freshen_s = 0.0
+        freshen_attempts = 0
         for num in ordered:
             email = self.switcher.account_email(num)
             if trigger == "consume-first" or early:
@@ -2435,7 +2528,10 @@ class AutoSwitchEngine:
                 return self._perform_with_drain2(
                     num, email, trigger, drain, drain2, early=early
                 )
+            t_freshen = time.monotonic()
             status = self._freshen_target(num, email)
+            freshen_s += time.monotonic() - t_freshen
+            freshen_attempts += 1
             if status == "identity-conflict":
                 # The slot's credential is alive but belongs to a different
                 # account — switching onto it would silently run the wrong
@@ -2451,6 +2547,10 @@ class AutoSwitchEngine:
                 continue
             if status == "skip-live-session":
                 continue
+            self._switch_timing = {
+                "freshenMs": int(freshen_s * 1000),
+                "freshenAttempts": freshen_attempts,
+            }
             return self._perform_with_drain2(
                 num, email, trigger, drain, drain2, early=early
             )
@@ -2987,6 +3087,12 @@ class AutoSwitchEngine:
             )
             return TickOutcome.SWITCHED
 
+        # Take the freshen timing NOW and clear it: every early return below
+        # (cooldown, sessions-active, already-active) would otherwise leave it
+        # set, and the NEXT switch would report this one's freshen as its own.
+        pre_timing = self._switch_timing or {}
+        self._switch_timing = None
+
         # Hold the state lock across the whole recheck -> switch -> record
         # sequence so two concurrent engines (loop + cron --once) make one
         # serialized decision: the loser re-reads the winner's lastSwitchAt
@@ -3007,12 +3113,16 @@ class AutoSwitchEngine:
             # and a session waking up in that window must still block a
             # voluntary switch. The same measurement labels the event, so
             # every logged switch carries the traffic state it landed in.
+            t_quiet = time.monotonic()
             quiet, detail = self._session_quiet()
+            quiet_s = time.monotonic() - t_quiet
             if trigger in self._gated_triggers() and not quiet:
                 self._emit(NoSwitchEvent(reason="sessions-active", detail=detail))
                 return TickOutcome.NO_ACTION
 
+            t_switch = time.monotonic()
             result = self.switcher.switch_to(number, json_output=True)
+            switch_s = time.monotonic() - t_switch
             if not result or not result.get("switched"):
                 self._emit(
                     NoSwitchEvent(
@@ -3045,6 +3155,9 @@ class AutoSwitchEngine:
             except OSError as e:
                 _logger.debug("drain2 switch marker write failed: %r", e)
 
+        timing = dict(pre_timing)
+        timing["quietScanMs"] = int(quiet_s * 1000)
+        timing["switchMs"] = int(switch_s * 1000)
         self._emit(
             SwitchEvent(
                 trigger=trigger,
@@ -3055,6 +3168,7 @@ class AutoSwitchEngine:
                 drain=drain,
                 drain2=drain2,
                 early=early,
+                timing=timing,
             )
         )
         return TickOutcome.SWITCHED
@@ -3314,7 +3428,9 @@ class AutoSwitchEngine:
         email = self.switcher.account_email(home)
         if self.dry_run:
             return self._perform_with_drain2(home, email, "return-home", None, None)
+        t_freshen = time.monotonic()
         status = self._freshen_target(home, email)
+        freshen_ms = int((time.monotonic() - t_freshen) * 1000)
         if status in ("identity-conflict", "invalid_grant"):
             self._quarantine(home, email, status)
             quarantined.add(home)
@@ -3332,6 +3448,9 @@ class AutoSwitchEngine:
             # lineage (the stale-copy class).
             wait(f"a 'cswap run' session holds Account-{home}")
             return None
+        # Set only on the path that actually performs, so no exit above can
+        # leave a return-home timing behind for some later switch to report.
+        self._switch_timing = {"freshenMs": freshen_ms, "freshenAttempts": 1}
         return self._perform_with_drain2(home, email, "return-home", None, None)
 
     def _drain_gate(

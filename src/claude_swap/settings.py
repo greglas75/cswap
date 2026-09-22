@@ -135,6 +135,12 @@ class AutoSwitchSettings:
     # account that has to stay usable". None = no reserve (default).
     reserve_account: str | None = None
     reserve_min_life_pct: float = 80.0
+    # Pre-freshen: once the ACTIVE account's binding window crosses this
+    # utilization, refresh the idle candidates' tokens in the background, so
+    # the switch at `threshold` never has to wait on a network refresh. The
+    # switch-time freshen stays as the safety net; this only moves its slow
+    # path out of the critical window. 0 = off (default).
+    pre_freshen_threshold: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -271,6 +277,15 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             help=(
                 "Hold this slot (num or email) back as the reserve: a landing "
                 "only when no other account qualifies"
+            ),
+        ),
+        SettingSpec(
+            "autoswitch", "preFreshenThreshold", "pre_freshen_threshold", "float",
+            0.0, 99.9,
+            help=(
+                "Refresh idle candidates' tokens once the active account "
+                "reaches this pct, so the switch never waits on the network "
+                "(0 = off)"
             ),
         ),
         SettingSpec(
