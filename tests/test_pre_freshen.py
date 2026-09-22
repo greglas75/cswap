@@ -167,3 +167,13 @@ class TestSwitchTiming:
         h.tick_with_usage({"1": _usage(99), "2": _usage(20), "3": _usage(10)})
         assert h.engine._switch_timing is None
         assert not any(isinstance(e, SwitchEvent) for e in h.events)
+
+    def test_a_consume_first_switch_reports_its_freshen_too(self, temp_home):
+        """Consume-first takes the same freshen loop, so its timing must carry
+        freshenMs/freshenAttempts — not only the traffic scan and the write."""
+        h = engine(temp_home, strategy="consume-first")
+        spy(h)
+        h.tick_with_usage({"1": _usage(99), "2": _usage(20), "3": _usage(10)})
+        ev = next((e for e in h.events if isinstance(e, SwitchEvent)), None)
+        assert ev is not None
+        assert {"freshenMs", "freshenAttempts"} <= set(ev.timing)

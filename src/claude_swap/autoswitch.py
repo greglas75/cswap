@@ -1439,7 +1439,12 @@ class AutoSwitchEngine:
                 if status in ("identity-conflict", "invalid_grant"):
                     self._quarantine(num, email, status)
             except Exception as e:  # noqa: BLE001 — see comment above
-                _logger.debug("pre-freshen of account %s failed: %r", num, e)
+                # WARNING, not debug: network trouble never raises here (the
+                # freshen reports it as "transient"), so anything that lands in
+                # this handler is unexpected — and one of the calls it guards is
+                # the quarantine, whose silent failure leaves a dead account in
+                # the rotation pool.
+                _logger.warning("pre-freshen of account %s failed: %r", num, e)
 
     def _freshen_target(
         self, number: str, email: str, buffer_ms: int = FRESHEN_BUFFER_MS
