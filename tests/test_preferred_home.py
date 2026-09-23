@@ -46,9 +46,11 @@ class TestPreferredHome:
         assert switches(h) == []
 
     def test_return_is_allowed_at_exact_headroom_margin(self, temp_home):
+        # The margin is HOME_RETURN_MIN_HEADROOM_PCT (20) once it exceeds
+        # 100 - threshold + hysteresis — see tests/test_home_near_limit.py.
         h = preferred(temp_home, live=2, threshold=95)
         assert h.tick_with_usage({
-            "1": _usage(85), "2": _usage(30), "3": _usage(0),
+            "1": _usage(80), "2": _usage(30), "3": _usage(0),
         }) is TickOutcome.SWITCHED
         assert h.active_number() == 1
 

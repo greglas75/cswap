@@ -131,6 +131,21 @@ IDLE_HOLD_MAX_S = 30 * 60.0
 # at-limit and failover switches are forced and skip the gate.
 QUIET_WINDOW_S = 5 * 60.0
 
+# The least headroom at which a prefer-mode home counts as "recovered" — for
+# the return and for landing on it from another slot. The old bar was the
+# hysteresis margin (6% at threshold 97), which on 2026-09-23 pulled the login
+# BACK onto a home reading 94% one minute after the owner had left it by hand;
+# at ~6 pts/min that is a minute of room, and it crossed 100% before the next
+# escape landed. A home that recovered by its window resetting has far more.
+HOME_RETURN_MIN_HEADROOM_PCT = 20.0
+
+
+def _home_return_margin(settings: AutoSwitchSettings) -> float:
+    return max(
+        HOME_RETURN_MIN_HEADROOM_PCT,
+        100.0 - settings.threshold + settings.hysteresis_pct,
+    )
+
 # Drain gate for forced switches (the ones the voluntary gate does not hold).
 # A drain episode lives in the state file so cron `--once` ticks share it; a
 # record whose last busy observation is older than this belongs to an episode
@@ -1883,6 +1898,30 @@ class AutoSwitchEngine:
         if (
             settings.home_mode == "prefer"
             and current == home
+            and active_headroom is None
+        ):
+            # Unreadable now, but the last reading was already within the
+            # hysteresis band of the threshold: holding the pin on "unknown"
+            # (up to IDLE_HOLD_MAX_S) rides it into the wall. 2026-09-23: the
+            # home read 94%, then "keychain unavailable" for four minutes of
+            # holds, and was at 100% when a reading came back. Treat it as
+            # at the threshold so the plain rotation escapes now.
+            last = entries.get(current)
+            last_h = (
+                _headroom_by_account({current: last.last_good}, self._models)
+                .get(current)
+                if last is not None and last.last_good is not None
+                else None
+            )
+            if (
+                last_h is not None
+                and 100.0 - last_h
+                >= settings.threshold - settings.hysteresis_pct
+            ):
+                active_headroom = 100.0 - settings.threshold
+        if (
+            settings.home_mode == "prefer"
+            and current == home
             and active_headroom is not None
             and 100.0 - active_headroom >= settings.threshold
         ):
@@ -2679,7 +2718,7 @@ class AutoSwitchEngine:
                 )
             except ClaudeSwitchError:
                 home_slot = None
-        home_margin = 100.0 - settings.threshold + settings.hysteresis_pct
+        home_margin = _home_return_margin(settings)
         qualifying: list[tuple[tuple, str]] = []
         any_known = False
         for num in oauth_candidates:
@@ -3141,12 +3180,26 @@ class AutoSwitchEngine:
             # and a session waking up in that window must still block a
             # voluntary switch. The same measurement labels the event, so
             # every logged switch carries the traffic state it landed in.
-            t_quiet = time.monotonic()
-            quiet, detail = self._session_quiet(force=True)
-            quiet_s = time.monotonic() - t_quiet
-            if trigger in self._gated_triggers() and not quiet:
-                self._emit(NoSwitchEvent(reason="sessions-active", detail=detail))
-                return TickOutcome.NO_ACTION
+            # Only a gated trigger needs the answer BEFORE the swap. An
+            # ungated one (at-limit, failover, proactive under
+            # switchUnderLoad) measures only to label the event, so it swaps
+            # first and measures after: the scan walks every transcript, and
+            # at the limit it walks all of them — every session is stalled,
+            # nothing is recent, the early exit never fires. Measured
+            # 2026-09-23: 47.5 s and 64.6 s spent there before two switches
+            # while the window burned past 100%; a raw walk of 11070
+            # transcripts took 350 s on the loaded machine.
+            gated = trigger in self._gated_triggers()
+            quiet_s = 0.0
+            if gated:
+                t_quiet = time.monotonic()
+                quiet, detail = self._session_quiet(force=True)
+                quiet_s = time.monotonic() - t_quiet
+                if not quiet:
+                    self._emit(
+                        NoSwitchEvent(reason="sessions-active", detail=detail)
+                    )
+                    return TickOutcome.NO_ACTION
 
             t_switch = time.monotonic()
             result = self.switcher.switch_to(number, json_output=True)
@@ -3160,6 +3213,10 @@ class AutoSwitchEngine:
                 )
                 return TickOutcome.NO_ACTION
 
+            if not gated:
+                # Landed; now the label (see above). ``quiet_s`` stays the
+                # pre-swap cost, which for an ungated trigger is zero.
+                quiet, _ = self._session_quiet(force=True)
             state["schemaVersion"] = STATE_SCHEMA_VERSION
             state["lastSwitchAt"] = self.clock()
             state["lastSwitchTo"] = number
@@ -3433,10 +3490,7 @@ class AutoSwitchEngine:
             return None
         if (
             self.settings.home_mode == "prefer"
-            and (
-                100.0 - available >= self.settings.threshold
-                or available < 100.0 - self.settings.threshold + self.settings.hysteresis_pct
-            )
+            and available < _home_return_margin(self.settings)
         ):
             return None
 
