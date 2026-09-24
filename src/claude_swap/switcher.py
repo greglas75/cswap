@@ -5279,7 +5279,10 @@ class ClaudeAccountSwitcher:
             )
 
         seq_data = self._get_sequence_data() or {}
-        print(bolded("Accounts:"))
+        accounts_info, order_notes = self._in_switch_order(
+            accounts_info, entries, seq_data
+        )
+        print(bolded("Accounts:") + " " + muted("(in the order they will be used)"))
         for i, (num, email, org_name, org_uuid, is_active, _, alias) in enumerate(accounts_info):
             tag = self._get_display_tag(email, org_name, org_uuid)
             label = f"{accent(alias)} ({email})" if alias else email
@@ -5288,6 +5291,8 @@ class ClaudeAccountSwitcher:
                 markers += f" {bold_accent('(active)')}"
             if self._disabled_from_data(seq_data, str(num)):
                 markers += f" {muted('(disabled)')}"
+            if str(num) in order_notes:
+                markers += f" {muted(order_notes[str(num)])}"
             print(f"  {num}: {label} {muted(f'[{tag}]')}{markers}")
             for line in _usage_entry_lines(entries[str(num)]):
                 print(f"     {line}")
@@ -5343,6 +5348,87 @@ class ClaudeAccountSwitcher:
                     print(f"  {dimmed('●')} {muted(label)}   {muted(cwd)}  {dimmed(f'({", ".join(parts)})')}")
         except Exception:
             self._logger.debug("Failed to detect running instances", exc_info=True)
+
+    def _in_switch_order(
+        self,
+        accounts_info: list,
+        entries: dict,
+        seq_data: dict,
+    ) -> tuple[list, dict[str, str]]:
+        """Order the human list the way the auto-switch would reach the slots.
+
+        Active first; then the home slot (prefer mode) while it has the room
+        a return needs; then the rest by life left in the binding window
+        (5h/7d plus the configured model window), most first; then the
+        reserve, and only while it clears ``reserveMinLifePct``; slots that
+        cannot be used (disabled, dead token, no usage data) last. A display
+        approximation of the engine's ranking on the numbers shown — the
+        engine re-ranks on fresh data at every switch. JSON output keeps the
+        slot order, so no consumer of it changes.
+        """
+        from claude_swap.autoswitch import HOME_RETURN_MIN_HEADROOM_PCT
+
+        try:
+            settings = load_settings(self.backup_dir)
+        except Exception:
+            return accounts_info, {}
+        models = parse_model_names(settings.model)
+
+        def slot_of(ident: str | None) -> str | None:
+            if not ident:
+                return None
+            try:
+                return self.resolve_account(ident)[0]
+            except Exception:
+                return None
+
+        home = slot_of(settings.home_account) if settings.home_mode == "prefer" else None
+        reserve = slot_of(settings.reserve_account)
+        home_margin = max(
+            HOME_RETURN_MIN_HEADROOM_PCT,
+            100.0 - settings.threshold + settings.hysteresis_pct,
+        )
+
+        active, ranked, reserve_rows, unusable = [], [], [], []
+        notes: dict[str, str] = {}
+        for row in accounts_info:
+            num = str(row[0])
+            entry = entries.get(num)
+            life = (
+                oauth.account_headroom(entry.last_good, models)
+                if entry is not None and entry.last_good is not None
+                else None
+            )
+            dead = entry is not None and (
+                entry.token_dead() or entry.sentinel is not None
+            )
+            if row[4]:
+                active.append(row)
+            elif self._disabled_from_data(seq_data, num):
+                unusable.append(row)
+            elif dead or life is None:
+                notes[num] = "(not usable now)"
+                unusable.append(row)
+            elif num == reserve:
+                if life >= settings.reserve_min_life_pct:
+                    notes[num] = "(reserve — last resort)"
+                else:
+                    notes[num] = (
+                        f"(reserve — held: {life:.0f}% life < "
+                        f"{settings.reserve_min_life_pct:.0f}%)"
+                    )
+                reserve_rows.append(row)
+            elif life <= 0:
+                notes[num] = "(exhausted)"
+                unusable.append(row)
+            else:
+                first = 0 if num == home and life >= home_margin else 1
+                ranked.append(((first, -life), row))
+        ranked.sort(key=lambda item: item[0])
+        ordered = active + [row for _, row in ranked] + reserve_rows + unusable
+        if ranked:
+            notes.setdefault(str(ranked[0][1][0]), "(next)")
+        return ordered, notes
 
     def _active_account_usage(
         self, account_num: str, current_email: str, org_uuid: str
