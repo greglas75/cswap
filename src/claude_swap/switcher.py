@@ -491,6 +491,40 @@ class ClaudeAccountSwitcher:
     def _read_credentials(self) -> str | None:
         return self._store._read_credentials()
 
+    # Backoff for an EMPTY live-credential read before a switch. A macOS
+    # Keychain `security` timeout returns "" instead of raising; on a machine
+    # running ~70 Claude sessions that is not rare. 2026-09-23 22:06-22:26Z:
+    # five at-limit switches failed on it, 3-5 min apart, with the live
+    # account at 100% the whole time. Retrying inside the switch turns a
+    # 20-minute stall into seconds; the refusal below still stands if the
+    # read never settles.
+    CREDENTIAL_READ_RETRY_DELAYS_S: tuple[float, ...] = (0.5, 1.0, 2.0, 4.0)
+
+    def _read_credentials_settled(self) -> str | None:
+        creds = self._read_credentials()
+        for delay in self.CREDENTIAL_READ_RETRY_DELAYS_S:
+            if creds is None or creds:
+                return creds
+            time.sleep(delay)
+            creds = self._read_credentials()
+        return creds
+
+    def rotation_account_numbers(self) -> list[str]:
+        """Managed, non-disabled slots in sequence order — WITHOUT the
+        stored-backup check of :meth:`switchable_account_numbers`.
+
+        The difference between the two is the set of slots whose backups
+        could not be read right now. That read goes through the Keychain,
+        so the difference is usually "Keychain busy", not "slot is gone".
+        """
+        data = self._get_sequence_data() or {}
+        return [
+            str(num)
+            for num in data.get("sequence", [])
+            if str(num) in data.get("accounts", {})
+            and not self._disabled_from_data(data, str(num))
+        ]
+
     def _read_active_credentials(self) -> ActiveCredentials:
         return self._store._read_active_credentials()
 
@@ -6895,7 +6929,7 @@ class ClaudeAccountSwitcher:
 
             # Create transaction for rollback capability
             try:
-                original_creds = self._read_credentials()
+                original_creds = self._read_credentials_settled()
                 if original_creds is None:
                     raise CredentialReadError("Failed to read current credentials")
                 if not original_creds:

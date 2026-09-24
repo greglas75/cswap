@@ -2414,7 +2414,20 @@ class AutoSwitchEngine:
             # viable at any moment — and the active account can hit 100% and
             # need the at-limit escape — so those keep the normal cadence.
             candidate_headrooms = [headroom.get(n) for n in oauth_candidates]
-            truly_exhausted = all(
+            # A slot whose stored backup could not be read this tick drops
+            # out of `candidates` entirely (switchable_account_numbers reads
+            # it through the Keychain), so "every candidate at 0" can be true
+            # of a list the unreadable slots were silently removed from.
+            # 2026-09-23 23:06Z: slots 10 (63% life) and 13 (26%) vanished
+            # that way on an overloaded Keychain, the rest read 0, and the
+            # engine declared the fleet exhausted and slept 600 s while the
+            # live session sat at its limit. Unreadable is unknown, not spent.
+            unreadable = [
+                n
+                for n in self.switcher.rotation_account_numbers()
+                if n != current and n not in quarantined and n not in candidates
+            ]
+            truly_exhausted = not unreadable and all(
                 h is not None and h <= 0 for h in candidate_headrooms
             )
             if not truly_exhausted:
