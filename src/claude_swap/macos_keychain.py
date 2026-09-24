@@ -51,7 +51,20 @@ _NOT_FOUND_RC = 44  # errSecItemNotFound surfaced by find/delete-generic-passwor
 # CLI. 5s, deliberately short: a credential op that has to fall back to the file
 # may be followed by a best-effort cleanup spawn, so the per-op budget doubles in
 # the worst case. A healthy Keychain answers in well under 100ms.
-_TIMEOUT = 5.0
+#
+# ``CSWAP_KEYCHAIN_TIMEOUT_S`` raises it for the long-running daemon only. On a
+# machine at load ~150 (70 concurrent Claude sessions) the spawn alone overran
+# 5s: the daemon logged "keychain unavailable" for 20+ minutes at a time while a
+# terminal read of the same item took 0.05s, and every switch was refused.
+def _timeout_from_env(default: float = 5.0) -> float:
+    try:
+        value = float(os.environ.get("CSWAP_KEYCHAIN_TIMEOUT_S", default))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+_TIMEOUT = _timeout_from_env()
 
 # Pin the absolute path to Apple's system binary rather than resolving via PATH:
 # this is a credential tool, so an attacker-controlled ``security`` earlier on
