@@ -1913,11 +1913,12 @@ class AutoSwitchEngine:
                 if last is not None and last.last_good is not None
                 else None
             )
-            if (
-                last_h is not None
-                and 100.0 - last_h
-                >= settings.threshold - settings.hysteresis_pct
-            ):
+            # The band is the same one the return refuses to come back into
+            # (headroom under _home_return_margin): a home too spent to be
+            # returned to is too spent to be held blind. The first version
+            # used the hysteresis band (>=94%); 2026-09-24 the home read 91%,
+            # went unreadable, and was held blind for over 20 minutes.
+            if last_h is not None and last_h < _home_return_margin(settings):
                 active_headroom = 100.0 - settings.threshold
         if (
             settings.home_mode == "prefer"

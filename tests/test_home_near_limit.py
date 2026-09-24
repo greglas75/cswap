@@ -65,6 +65,12 @@ class TestUnreadableHomeNearTheThreshold:
         assert h.active_number() == 2
         assert "home-unknown-hold" not in _reasons(h)
 
+    def test_last_reading_of_91_percent_escapes_too(self, temp_home):
+        # 2026-09-24: 91%, then unreadable, held blind for 20+ minutes.
+        h = owner_settings(temp_home, live=1)
+        assert self._tick(h, 91) is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+
     def test_last_reading_with_room_still_holds_the_pin(self, temp_home):
         h = owner_settings(temp_home, live=1)
         assert self._tick(h, 60) is TickOutcome.NO_ACTION
