@@ -1133,12 +1133,16 @@ def _ref(number: str, email: str) -> dict:
 
 
 def _headroom_by_account(
-    usage: dict[str, dict | str | None], models: tuple[str, ...]
+    usage: dict[str, dict | str | None],
+    models: tuple[str, ...],
+    weekly_shift: float = 0.0,
 ) -> dict[str, float | None]:
     """Per-account headroom derived from decision values."""
     return {
         num: oauth.account_headroom(
-            value if isinstance(value, dict) else None, models
+            value if isinstance(value, dict) else None,
+            models,
+            weekly_shift=weekly_shift,
         )
         for num, value in usage.items()
     }
@@ -1827,7 +1831,7 @@ class AutoSwitchEngine:
         # fleet's model-pinned work is starving for; the model-aware map
         # above keeps binding the at-limit escape and escape landings.
         base_headroom = (
-            _headroom_by_account(usage, ()) if self._models else headroom
+            _headroom_by_account(usage, (), self.settings.weekly_shift) if self._models else headroom
         )
         self._emit(
             PollEvent(
@@ -1908,7 +1912,9 @@ class AutoSwitchEngine:
             # at the threshold so the plain rotation escapes now.
             last = entries.get(current)
             last_h = (
-                _headroom_by_account({current: last.last_good}, self._models)
+                _headroom_by_account(
+                    {current: last.last_good}, self._models, self.settings.weekly_shift
+                )
                 .get(current)
                 if last is not None and last.last_good is not None
                 else None
@@ -2290,9 +2296,9 @@ class AutoSwitchEngine:
                 fetch={current, *candidates}
             )
             usage = {num: entry.decision_value() for num, entry in entries.items()}
-            headroom = _headroom_by_account(usage, self._models)
+            headroom = _headroom_by_account(usage, self._models, self.settings.weekly_shift)
             base_headroom = (
-                _headroom_by_account(usage, ()) if self._models else headroom
+                _headroom_by_account(usage, (), self.settings.weekly_shift) if self._models else headroom
             )
             active_headroom = headroom.get(current)
             ordered, any_known, active_reset_ts = self._rank_candidates(
@@ -3077,7 +3083,9 @@ class AutoSwitchEngine:
 
         active_value = usage.get(current)
         active_headroom = oauth.account_headroom(
-            active_value if isinstance(active_value, dict) else None, self._models
+            active_value if isinstance(active_value, dict) else None,
+            self._models,
+            weekly_shift=self.settings.weekly_shift,
         )
         # The caller's tick-snapshotted threshold, so one tick fetches and
         # decides on the same value even if apply_threshold() lands mid-tick.
@@ -3100,7 +3108,9 @@ class AutoSwitchEngine:
                 entry = entries.get(num)
                 value = usage.get(num)
                 planned_headroom = oauth.account_headroom(
-                    value if isinstance(value, dict) else None, self._models
+                    value if isinstance(value, dict) else None,
+                    self._models,
+                    weekly_shift=self.settings.weekly_shift,
                 )
                 if (
                     entry is not None
@@ -3117,7 +3127,7 @@ class AutoSwitchEngine:
             )
             usage = {num: entry.decision_value() for num, entry in entries.items()}
 
-        headroom = _headroom_by_account(usage, self._models)
+        headroom = _headroom_by_account(usage, self._models, self.settings.weekly_shift)
         return entries, usage, headroom
 
     def _perform_with_drain2(
@@ -3499,7 +3509,9 @@ class AutoSwitchEngine:
             # claims still apply, so a dead home is never hammered.
             entry = self.switcher.usage_entries_by_account(fetch={home}).get(home)
             value = entry.decision_value() if entry is not None else None
-        available = _headroom_by_account({home: value}, self._models).get(home)
+        available = _headroom_by_account(
+            {home: value}, self._models, self.settings.weekly_shift
+        ).get(home)
         if available is None:
             return None
         if (

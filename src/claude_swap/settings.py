@@ -141,6 +141,21 @@ class AutoSwitchSettings:
     # switch-time freshen stays as the safety net; this only moves its slow
     # path out of the critical window. 0 = off (default).
     pre_freshen_threshold: float = 0.0
+    # Its own switch point for the WEEKLY windows (7d and the model-scoped
+    # weekly windows); the 5h window keeps ``threshold``. A point of a weekly
+    # window is ~34x a point of the 5h one in absolute quota, so leaving it at
+    # the 5h margin strands a large slice of every account each week (owner,
+    # 2026-09-27: "szkoda takie masy"). 0 = same as ``threshold``.
+    weekly_threshold: float = 0.0
+
+    @property
+    def weekly_shift(self) -> float:
+        """How many points a weekly window is discounted in decision headroom,
+        so every comparison against ``threshold`` lands at ``weekly_threshold``
+        for those windows (see :func:`oauth.account_headroom`)."""
+        if self.weekly_threshold <= 0:
+            return 0.0
+        return max(0.0, self.weekly_threshold - self.threshold)
 
 
 @dataclass(frozen=True)
@@ -286,6 +301,14 @@ SETTING_SPECS: dict[str, SettingSpec] = {
                 "Refresh idle candidates' tokens once the active account "
                 "reaches this pct, so the switch never waits on the network "
                 "(0 = off)"
+            ),
+        ),
+        SettingSpec(
+            "autoswitch", "weeklyThreshold", "weekly_threshold", "float",
+            0.0, 99.9,
+            help=(
+                "Switch point for the weekly (7d and model) windows; the 5h "
+                "window keeps threshold (0 = same as threshold)"
             ),
         ),
         SettingSpec(

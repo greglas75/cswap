@@ -5395,7 +5395,9 @@ class ClaudeAccountSwitcher:
             num = str(row[0])
             entry = entries.get(num)
             life = (
-                oauth.account_headroom(entry.last_good, models)
+                oauth.account_headroom(
+                    entry.last_good, models, weekly_shift=settings.weekly_shift
+                )
                 if entry is not None and entry.last_good is not None
                 else None
             )

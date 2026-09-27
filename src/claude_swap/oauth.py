@@ -503,7 +503,7 @@ def relevant_windows(
 
 
 def account_headroom(
-    usage: dict | None, models: Sequence[str] = ()
+    usage: dict | None, models: Sequence[str] = (), *, weekly_shift: float = 0.0
 ) -> float | None:
     """Remaining percentage before this account hits a rate-limit window.
 
@@ -521,12 +521,22 @@ def account_headroom(
     fleet incident — a scoped-less account read as 92% free and won the
     at-limit escape while its Fable access was dead). The ``all`` sentinel
     names no particular window, so it never triggers this.
+
+    ``weekly_shift`` discounts every window except 5h by that many points, so
+    a caller comparing against its 5h threshold compares the weekly windows
+    against ``threshold + weekly_shift`` (``autoswitch.weeklyThreshold``). A
+    window at or over 100% is never discounted: exhausted stays exhausted.
     """
     windows = relevant_windows(usage, models)
     named = {m.lower() for m in models} - {"all"}
     if named - {label.lower() for label, _, _ in windows}:
         return None
-    pcts = [pct for _, pct, _ in windows]
+    pcts = [
+        pct
+        if weekly_shift <= 0 or label == "5h" or pct >= 100.0
+        else max(0.0, pct - weekly_shift)
+        for label, pct, _ in windows
+    ]
     if not pcts:
         return None
     return 100.0 - max(pcts)
