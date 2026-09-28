@@ -944,6 +944,106 @@ Defaults live in settings.json in the backup root; flags override them.
         sys.exit(130)
 
 
+def _codex_command(argv: list[str]) -> None:
+    """Handle `cswap codex {add,list,switch,auto}` — Codex CLI account rotation.
+
+    Pre-dispatched like `config`. See :mod:`claude_swap.codex` for the storage
+    and the rotation rule.
+    """
+    import json as _json
+    import time
+    from datetime import datetime, timezone
+
+    from claude_swap import codex
+    from claude_swap.printer import bold_accent
+    from claude_swap.settings import load_settings
+
+    parser = argparse.ArgumentParser(
+        prog="cswap codex",
+        description=(
+            "Rotate Codex CLI (ChatGPT) logins. Log in with `codex login`, "
+            "then `cswap codex add` — once per account, per machine."
+        ),
+    )
+    sub = parser.add_subparsers(dest="action", metavar="{add,list,switch,auto}")
+    sub.add_parser("add", help="Store the account Codex is logged in with now")
+    sub.add_parser("list", help="Stored accounts with weekly usage, in switch order")
+    p_switch = sub.add_parser("switch", help="Make a stored account the live login")
+    p_switch.add_argument("email")
+    p_auto = sub.add_parser("auto", help="Switch at the weekly threshold (loop)")
+    p_auto.add_argument("--once", action="store_true", help="One decision, then exit")
+    p_auto.add_argument("--interval", type=float, default=60.0, help="Seconds between checks")
+    p_auto.add_argument("--dry-run", action="store_true", help="Decide, never switch")
+    args = parser.parse_args(argv)
+
+    root = paths.get_backup_root()
+    settings = load_settings(root)
+    threshold = settings.threshold
+    weekly = settings.weekly_threshold or settings.threshold
+
+    def in_time(ts: float | None) -> str:
+        if ts is None:
+            return ""
+        left = max(0, int(ts - time.time()))
+        days, rem = divmod(left, 86400)
+        return f"resets in {days}d {rem // 3600}h" if days else f"resets in {rem // 3600}h {rem % 3600 // 60}m"
+
+    try:
+        if args.action == "add":
+            email, plan = codex.add(root)
+            print(f"Stored Codex account {email}" + (f" ({plan})" if plan else ""))
+        elif args.action == "switch":
+            previous = codex.switch(root, args.email)
+            if previous == args.email.lower():
+                print(f"{args.email} is already the live Codex login")
+            else:
+                print(f"Codex login: {previous or 'none'} -> {args.email.lower()}")
+                print(dimmed("New codex processes use it; restart running sessions to move them."))
+        elif args.action == "auto":
+            while True:
+                try:
+                    event = codex.auto_tick(root, threshold, weekly, dry_run=args.dry_run)
+                except Exception as e:  # one bad tick never ends the loop
+                    event = {"event": "codex-error", "message": f"{type(e).__name__}: {e}"}
+                event["ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+                print(_json.dumps(event), flush=True)
+                if args.once:
+                    break
+                time.sleep(max(15.0, args.interval))
+        else:  # list (default)
+            current = codex.sync_live(root)
+            emails = codex.stored_accounts(root)
+            if not emails:
+                print(dimmed("No Codex accounts stored — log in with `codex login`, then `cswap codex add`."))
+                return
+            usages = codex.usages_for(root, emails, current)
+            order = codex.rank(usages, current, threshold, weekly)
+            rest = [e for e in emails if e != current and e not in order]
+            print(bolded("Codex accounts:") + " " + muted(f"(in the order they will be used; weekly switch at {weekly:g}%)"))
+            for i, email in enumerate(([current] if current in emails else []) + order + rest):
+                u = usages[email]
+                tags = []
+                if email == current:
+                    tags.append(bold_accent("(active)"))
+                elif order and email == order[0]:
+                    tags.append(muted("(next)"))
+                elif email in rest:
+                    tags.append(muted("(exhausted)"))
+                print(f"  {email} {' '.join(tags)}".rstrip())
+                if u.error:
+                    print(f"     └ {muted('usage unknown: ' + u.error)}")
+                    continue
+                if u.short_pct is not None:
+                    print(f"     ├ short: {u.short_pct:5.0f}%   {in_time(u.short_reset_at)}")
+                print(f"     └ week:  {u.weekly_pct if u.weekly_pct is not None else 0:5.0f}%   {in_time(u.weekly_reset_at)}")
+            if current and current not in emails:
+                print()
+                warning(f"The live Codex login {current} is not stored — run `cswap codex add` before logging in with another account.")
+    except codex.CodexError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def _config_command(argv: list[str]) -> None:
     """Handle `cswap config [list|get KEY|set KEY VALUE|unset KEY|path]`.
 
@@ -1137,6 +1237,9 @@ def main() -> None:
     if argv and argv[0] == "auto":
         _auto_command(argv[1:])
         return  # only reachable in tests where sys.exit is mocked
+    if argv and argv[0] == "codex":
+        _codex_command(argv[1:])
+        return
     if len(sys.argv) > 1 and sys.argv[1] == "config":
         _config_command(sys.argv[2:])
         return
@@ -1185,6 +1288,7 @@ Commands:
   %(prog)s switch                     rotate to the next account
   %(prog)s switch <num|email>         switch to a specific account
   %(prog)s add                        add the current account
+  %(prog)s codex {add,list,switch,auto}  rotate Codex CLI (ChatGPT) logins
   %(prog)s add-token [TOKEN|-]        register a setup-token or API key
   %(prog)s attach-token <num|email> [TOKEN|-]
                                    attach a year-long setup-token to a login slot:
