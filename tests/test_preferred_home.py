@@ -30,12 +30,16 @@ def switches(harness):
 
 
 class TestPreferredHome:
-    def test_fallback_sequence_wins_over_larger_remaining_quota(self, temp_home):
+    def test_with_equal_resets_the_most_life_wins_not_the_sequence(self, temp_home):
+        # Was test_fallback_sequence_wins_over_larger_remaining_quota: slot
+        # order decided the escape. Since 2026-09-28 the soonest weekly reset
+        # decides (tests/test_expiring_quota_first.py), and with none known
+        # the most life does — slot 3 at 100% life, not slot 2 at 30%.
         h = preferred(temp_home)
         assert h.tick_with_usage({
             "1": _usage(100), "2": _usage(70), "3": _usage(0),
         }) is TickOutcome.SWITCHED
-        assert h.active_number() == 2
+        assert h.active_number() == 3
 
     def test_small_quota_jitter_does_not_cause_return_flapping(self, temp_home):
         h = preferred(temp_home, live=2, threshold=95)

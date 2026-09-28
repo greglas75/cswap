@@ -5358,15 +5358,20 @@ class ClaudeAccountSwitcher:
         """Order the human list the way the auto-switch would reach the slots.
 
         Active first; then the home slot (prefer mode) while it has the room
-        a return needs; then the rest by life left in the binding window
-        (5h/7d plus the configured model window), most first; then the
+        a return needs; then the rest by soonest weekly reset (the quota
+        that expires first), slots under MIN_USEFUL_LIFE_PCT behind those
+        with real room, most life breaking ties; then the
         reserve, and only while it clears ``reserveMinLifePct``; slots that
         cannot be used (disabled, dead token, no usage data) last. A display
         approximation of the engine's ranking on the numbers shown — the
         engine re-ranks on fresh data at every switch. JSON output keeps the
         slot order, so no consumer of it changes.
         """
-        from claude_swap.autoswitch import HOME_RETURN_MIN_HEADROOM_PCT
+        from claude_swap.autoswitch import (
+            HOME_RETURN_MIN_HEADROOM_PCT,
+            MIN_USEFUL_LIFE_PCT,
+            _seven_day_reset_ts,
+        )
 
         try:
             settings = load_settings(self.backup_dir)
@@ -5424,8 +5429,21 @@ class ClaudeAccountSwitcher:
                 notes[num] = "(exhausted)"
                 unusable.append(row)
             else:
+                # Same key as the engine's prefer-mode ranking: home, then
+                # soonest weekly reset among slots with real room, then life.
                 first = 0 if num == home and life >= home_margin else 1
-                ranked.append(((first, -life), row))
+                reset = _seven_day_reset_ts(
+                    entry.last_good if entry is not None else None, time.time()
+                )
+                ranked.append((
+                    (
+                        first,
+                        life < MIN_USEFUL_LIFE_PCT,
+                        reset if reset is not None else float("inf"),
+                        -life,
+                    ),
+                    row,
+                ))
         ranked.sort(key=lambda item: item[0])
         ordered = active + [row for _, row in ranked] + reserve_rows + unusable
         if ranked:

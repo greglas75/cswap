@@ -139,6 +139,11 @@ QUIET_WINDOW_S = 5 * 60.0
 # escape landed. A home that recovered by its window resetting has far more.
 HOME_RETURN_MIN_HEADROOM_PCT = 20.0
 
+# Below this much life a candidate is a landing that switches again within
+# minutes, so it sorts behind every candidate with real room whatever its
+# reset time (see the prefer-mode ranking key).
+MIN_USEFUL_LIFE_PCT = 10.0
+
 
 def _home_return_margin(settings: AutoSwitchSettings) -> float:
     return max(
@@ -2859,7 +2864,25 @@ class AutoSwitchEngine:
                 # one path that never checked it. Demote such a home behind
                 # the healthy field; sequence order still orders the rest.
                 home_refused = num == home_slot and h < home_margin
-                key = (unhealthy, home_refused)
+                # Past the home, the quota that expires soonest goes first
+                # (owner, 2026-09-28: "priorytet na konta, które zaraz się
+                # zresetują, żeby wcisnąć jak najwięcej"). Weekly quota left
+                # at its reset is lost, and only one login burns at a time,
+                # so earliest-reset-first is what leaves the least behind.
+                # It was plain sequence order before — not even most life,
+                # which is what the owner had asked for. A candidate with
+                # under MIN_USEFUL_LIFE_PCT sorts behind every one with real
+                # room; equal (or unknown) resets fall back to most life.
+                home_first = num == home_slot and not home_refused
+                weekly_reset = _seven_day_reset_ts(usage.get(num), now)
+                key = (
+                    unhealthy,
+                    home_refused,
+                    not home_first,
+                    h < MIN_USEFUL_LIFE_PCT,
+                    weekly_reset if weekly_reset is not None else float("inf"),
+                    -h,
+                )
             else:
                 key = (unhealthy, -h)
             qualifying.append((key, num))
