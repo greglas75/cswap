@@ -60,13 +60,13 @@ class TestReserveAccount:
         there, deliberately untouched."""
         h = reserved(temp_home)
         assert h.tick_with_usage({
-            "1": _usage(100), "2": _usage(100), "3": _usage(60),
+            "1": _usage(100), "2": _usage(100), "3": _usage7(0.0, 60.0),
         }) is TickOutcome.BLOCKED
         reasons = [e.reason for e in h.events if isinstance(e, NoSwitchEvent)]
         assert "reserve-protected" in reasons
         detail = next(e.detail for e in h.events
                       if isinstance(e, NoSwitchEvent) and e.reason == "reserve-protected")
-        assert "40% life" in detail and "80% reserve floor" in detail
+        assert "40% of its week" in detail and "80% reserve floor" in detail
 
     @pytest.mark.parametrize("used", [20.1, 25.0, 60.0])
     def test_reserve_is_refused_below_its_life_threshold(self, temp_home, used):
@@ -74,27 +74,49 @@ class TestReserveAccount:
         h = reserved(temp_home)
         # Every candidate refused — the engine reports BLOCKED, not NO_ACTION.
         assert h.tick_with_usage({
-            "1": _usage(100), "2": _usage(100), "3": _usage(used),
+            "1": _usage(100), "2": _usage(100), "3": _usage7(0.0, used),
         }) is TickOutcome.BLOCKED
         assert h.active_number() == 1
         assert switches(h) == []
 
     def test_reserve_lands_at_exactly_its_life_threshold(self, temp_home):
-        """80% life left is still 'at least 80%' — the boundary is inclusive."""
+        """80% of the week left is still 'at least 80%' — inclusive boundary."""
         h = reserved(temp_home)
         assert h.tick_with_usage({
-            "1": _usage(100), "2": _usage(100), "3": _usage(20.0),
+            "1": _usage(100), "2": _usage(100), "3": _usage7(0.0, 20.0),
         }) is TickOutcome.SWITCHED
         assert h.active_number() == 3
 
-    def test_the_weekly_window_binds_the_life_check_too(self, temp_home):
-        """5h wide open, weekly half gone: headroom is the WORSE window."""
+    def test_the_weekly_window_is_what_the_floor_reads(self, temp_home):
+        """5h wide open, weekly half gone: the floor holds the reserve."""
         h = reserved(temp_home)
         assert h.tick_with_usage({
             "1": _usage(100), "2": _usage(100), "3": _usage7(0.0, 50.0),
         }) is TickOutcome.BLOCKED
         assert h.active_number() == 1
         assert switches(h) == []
+
+    def test_a_busy_5h_window_does_not_hold_the_reserve(self, temp_home):
+        """Owner's rule (2026-09-30): usable until 80% of its WEEK is spent.
+        The floor used to read the binding window, so 2026-09-29 22:49Z a
+        reserve with 53% of its week left was held while everything else was
+        out, and every session stopped for 3 hours. The 5h window is the
+        normal threshold's business, not the floor's."""
+        h = reserved(temp_home, reserve_min_life_pct=20.0)
+        assert h.tick_with_usage({
+            "1": _usage(100), "2": _usage(100), "3": _usage7(85.0, 57.0),
+        }) is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+
+    def test_the_default_floor_lets_the_reserve_run_to_80pct_of_its_week(self, temp_home):
+        from claude_swap.settings import AutoSwitchSettings
+
+        h = reserved(
+            temp_home, reserve_min_life_pct=AutoSwitchSettings().reserve_min_life_pct
+        )
+        assert h.tick_with_usage({
+            "1": _usage(100), "2": _usage(100), "3": _usage7(0.0, 79.0),
+        }) is TickOutcome.SWITCHED
 
     def test_an_unset_reserve_leaves_ranking_untouched(self, temp_home):
         """Regression guard: without the setting, `best` still takes slot 3."""

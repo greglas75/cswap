@@ -502,6 +502,22 @@ def relevant_windows(
     return windows
 
 
+def weekly_life(usage: dict | None, models: Sequence[str] = ()) -> float | None:
+    """Percent left in the tightest WEEKLY window (7d and any configured
+    per-model weekly window), ignoring the 5-hour one; None when no weekly
+    window is known.
+
+    The reserve floor reads this: the owner's rule is "the reserve may be
+    used until its weekly quota is 80% spent" (2026-09-30). Gating it on the
+    binding window instead held a reserve with 53% of its week left while
+    every other account was out, and the whole fleet stopped for 3 hours.
+    """
+    weekly = [pct for label, pct, _ in relevant_windows(usage, models) if label != "5h"]
+    if not weekly:
+        return None
+    return max(0.0, 100.0 - max(weekly))
+
+
 def account_headroom(
     usage: dict | None, models: Sequence[str] = (), *, weekly_shift: float = 0.0
 ) -> float | None:

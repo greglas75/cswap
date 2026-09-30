@@ -5417,11 +5417,12 @@ class ClaudeAccountSwitcher:
                 notes[num] = "(not usable now)"
                 unusable.append(row)
             elif num == reserve:
-                if life >= settings.reserve_min_life_pct:
+                week = oauth.weekly_life(entry.last_good, models)
+                if week is not None and week >= settings.reserve_min_life_pct:
                     notes[num] = "(reserve — last resort)"
                 else:
                     notes[num] = (
-                        f"(reserve — held: {life:.0f}% life < "
+                        f"(reserve — held: {week or 0:.0f}% of week < "
                         f"{settings.reserve_min_life_pct:.0f}%)"
                     )
                 reserve_rows.append(row)

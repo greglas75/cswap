@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from claude_swap.settings import set_setting
 from claude_swap.usage_store import UsageEntry
-from tests.test_autoswitch import EngineHarness, _usage
+from tests.test_autoswitch import EngineHarness, _usage, _usage7
 
 
 def _row(num, email, active=False):
@@ -26,7 +26,7 @@ def test_active_then_most_life_then_reserve_then_unusable(temp_home):
         "1": UsageEntry(last_good=_usage(90)),   # home, 10% life: below the return margin
         "2": UsageEntry(last_good=_usage(50)),
         "3": UsageEntry(last_good=_usage(20)),   # 80% life
-        "4": UsageEntry(last_good=_usage(50)),   # reserve, 50% life: held
+        "4": UsageEntry(last_good=_usage7(0, 85)),  # reserve, 15% of its week: held
         "5": UsageEntry(sentinel="re-login needed"),
     }
     ordered, notes = h.switcher._in_switch_order(rows, entries, h.switcher._get_sequence_data())

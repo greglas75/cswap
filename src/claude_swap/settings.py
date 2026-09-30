@@ -130,11 +130,12 @@ class AutoSwitchSettings:
     home_mode: str = "pin"
     # Reserve: the owner's main account, to be touched LAST. It leaves the
     # ordinary pool entirely and is only ever a landing when nothing else
-    # qualifies — and then only while its binding window still holds
-    # `reserve_min_life_pct` of life, so "last resort" never means "burn the
-    # account that has to stay usable". None = no reserve (default).
+    # qualifies — and then only while its WEEKLY windows still hold
+    # `reserve_min_life_pct` (default 20: usable until 80% of the week is
+    # spent), so "last resort" never means "burn the account that has to stay
+    # usable". The 5h window follows the normal threshold. None = no reserve.
     reserve_account: str | None = None
-    reserve_min_life_pct: float = 80.0
+    reserve_min_life_pct: float = 20.0
     # Pre-freshen: once the ACTIVE account's binding window crosses this
     # utilization, refresh the idle candidates' tokens in the background, so
     # the switch at `threshold` never has to wait on a network refresh. The

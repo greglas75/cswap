@@ -2451,7 +2451,11 @@ class AutoSwitchEngine:
                 # sends the operator hunting for quota that is sitting right
                 # there, deliberately untouched.
                 reserve = self._reserve_slot(settings)
-                reserve_h = headroom.get(reserve) if reserve else None
+                reserve_h = (
+                    oauth.weekly_life(usage.get(reserve), self._models)
+                    if reserve
+                    else None
+                )
                 reserve_floor_blocked = (
                     reserve is not None
                     and reserve_h is not None
@@ -2467,8 +2471,8 @@ class AutoSwitchEngine:
                             reason="reserve-protected",
                             detail=(
                                 f"Account-{reserve} is the only candidate left "
-                                f"but holds {reserve_h:.0f}% life, under the "
-                                f"{settings.reserve_min_life_pct:.0f}% reserve "
+                                f"but holds {reserve_h:.0f}% of its week, under "
+                                f"the {settings.reserve_min_life_pct:.0f}% reserve "
                                 "floor; lower autoswitch.reserveMinLifePct or "
                                 "switch to it by hand to release it"
                             ),
@@ -2890,16 +2894,17 @@ class AutoSwitchEngine:
         # touched LAST. Applied after the loop so no strategy's ordering can
         # reach it: it drops out whenever anything else qualifies, and when it
         # is the only one left it still has to hold `reserveMinLifePct` of
-        # life. Headroom is the BINDING window (the worse of 5h/7d), so one
-        # threshold guards both — an account with an empty 5h window can still
-        # be out of weekly quota.
+        # WEEKLY life (owner, 2026-09-30: usable until 80% of its week is
+        # spent). The 5h window is left to the normal threshold gate above —
+        # a floor on the binding window held a reserve with 53% of its week
+        # left and stopped the whole fleet.
         reserve = self._reserve_slot(settings)
         if reserve is not None and any(num == reserve for _, num in qualifying):
             others = [entry for entry in qualifying if entry[1] != reserve]
             if others:
                 qualifying = others
             else:
-                reserve_h = headroom.get(reserve)
+                reserve_h = oauth.weekly_life(usage.get(reserve), self._models)
                 if reserve_h is None or reserve_h < settings.reserve_min_life_pct:
                     qualifying = []
         # Ascending by the strategy's key; list order (sequence order) breaks ties.
