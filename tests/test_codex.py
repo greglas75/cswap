@@ -157,3 +157,62 @@ class TestAutoTick:
         self._two(env)
         monkeypatch.setattr(codex, "fetch_usage", lambda auth, timeout=20.0: _usage(0, error="URLError"))
         assert codex.auto_tick(env, 95.0, 99.0)["reason"] == "active-usage-unknown"
+
+
+class TestReserve:
+    def test_the_reserve_comes_last_even_with_the_most_room(self):
+        usages = {
+            "active@x.com": _usage(99),
+            "res@x.com": _usage(0, reset=10),      # soonest reset and empty: still last
+            "late@x.com": _usage(60, reset=5000),
+            "thin@x.com": _usage(95, reset=100),   # too thin, but ordinary: before the reserve
+        }
+        assert codex.rank(usages, "active@x.com", 95.0, 99.0, "RES@x.com", 30.0) == [
+            "late@x.com", "thin@x.com", "res@x.com",
+        ]
+
+    def test_a_reserve_under_30pct_of_its_week_drops_out(self):
+        usages = {"active@x.com": _usage(99), "res@x.com": _usage(71)}
+        assert codex.rank(usages, "active@x.com", 95.0, 99.0, "res@x.com", 30.0) == []
+        usages["res@x.com"] = _usage(70)
+        assert codex.rank(usages, "active@x.com", 95.0, 99.0, "res@x.com", 30.0) == ["res@x.com"]
+
+    def test_an_active_reserve_is_left_once_its_floor_is_crossed(self, env, monkeypatch):
+        _login(_auth("b@x.com"))
+        codex.add(env)
+        _login(_auth("res@x.com"))
+        codex.add(env)
+        by_email = {"res@x.com": _usage(75), "b@x.com": _usage(20)}
+        monkeypatch.setattr(codex, "fetch_usage", lambda auth, timeout=20.0: by_email[codex.email_of(auth)])
+        event = codex.auto_tick(env, 95.0, 99.0, reserve="res@x.com", reserve_min_life=30.0)
+        assert (event["event"], event["to"]) == ("codex-switch", "b@x.com")
+
+
+class TestLogin:
+    def test_login_runs_in_a_throwaway_home_and_leaves_the_live_login(self, env, monkeypatch):
+        _login(_auth("live@x.com", refresh="keep"))
+        codex.add(env)
+        seen = {}
+
+        def fake_call(argv, env):
+            seen["argv"], seen["home"] = argv, env["CODEX_HOME"]
+            with open(os.path.join(env["CODEX_HOME"], "auth.json"), "w") as fh:
+                json.dump(_auth("new@x.com"), fh)
+            return 0
+
+        monkeypatch.setattr(codex.shutil, "which", lambda name: "/bin/codex")
+        monkeypatch.setattr(codex.subprocess, "call", fake_call)
+        assert codex.login(env) == ("new@x.com", "pro")
+        assert seen["argv"] == ["codex", "login", "--device-auth"]
+        assert seen["home"] != str(codex.codex_home())
+        assert not os.path.exists(seen["home"])           # cleaned up
+        live = codex.read_auth(codex.live_auth_path())
+        assert codex.email_of(live) == "live@x.com" and live["tokens"]["refresh_token"] == "keep"
+        assert codex.stored_accounts(env) == ["live@x.com", "new@x.com"]
+
+    def test_an_aborted_login_stores_nothing(self, env, monkeypatch):
+        monkeypatch.setattr(codex.shutil, "which", lambda name: "/bin/codex")
+        monkeypatch.setattr(codex.subprocess, "call", lambda argv, env: 1)
+        with pytest.raises(codex.CodexError):
+            codex.login(env)
+        assert codex.stored_accounts(env) == []

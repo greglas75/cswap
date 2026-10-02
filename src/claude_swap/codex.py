@@ -25,6 +25,8 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 import time
 import urllib.error
@@ -154,6 +156,37 @@ def add(backup_root: Path) -> tuple[str, str | None]:
     return email, plan_of(live)
 
 
+def login(backup_root: Path, extra_args: list[str] | None = None) -> tuple[str, str | None]:
+    """Log a NEW account in and store it, without touching the live login.
+
+    `codex login` over an existing login revokes that login's tokens
+    (measured 2026-10-02: logging greg@tgmpanel.com in on ryzen turned the
+    stored greg.laski@yahoo.com copy into a 401 ``token_revoked``, and that
+    login had revoked gregpaypal's before it). So the login runs in a
+    throwaway CODEX_HOME: the live file, and every stored copy, stay valid.
+    """
+    if shutil.which("codex") is None:
+        raise CodexError("codex is not on PATH")
+    tmp = Path(tempfile.mkdtemp(prefix="cswap-codex-login-"))
+    try:
+        os.chmod(tmp, 0o700)
+        env = {**os.environ, "CODEX_HOME": str(tmp)}
+        args = extra_args if extra_args else ["--device-auth"]
+        rc = subprocess.call(["codex", "login", *args], env=env)
+        auth = read_auth(tmp / "auth.json")
+        if rc != 0 or auth is None:
+            raise CodexError(f"codex login did not finish (exit {rc}) — nothing stored")
+        email = email_of(auth)
+        if email is None:
+            raise CodexError("that login is not a ChatGPT account — only ChatGPT logins rotate")
+        write_private(stored_path(backup_root, email), auth)
+        if read_auth(live_auth_path()) is None:
+            write_private(live_auth_path(), auth)
+        return email, plan_of(auth)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 @dataclass(frozen=True)
 class Usage:
     weekly_pct: float | None
@@ -169,6 +202,12 @@ class Usage:
         if self.weekly_pct is not None and self.weekly_pct >= weekly_threshold:
             return True
         return self.short_pct is not None and self.short_pct >= threshold
+
+    def weekly_life(self) -> float | None:
+        """Percent of the week left (100 - weekly use); None when unknown."""
+        if self.error is not None or self.weekly_pct is None:
+            return None
+        return max(0.0, 100.0 - self.weekly_pct)
 
     def life(self, threshold: float, weekly_threshold: float) -> float | None:
         """Points left before the nearest switch point (binding window)."""
@@ -231,7 +270,17 @@ def fetch_usage(auth: dict, timeout: float = 20.0) -> Usage:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return parse_usage(json.load(response))
     except urllib.error.HTTPError as e:
-        kind = "token expired — refreshes on the next switch to it" if e.code == 401 else f"http {e.code}"
+        try:
+            body = e.read(4096).decode("utf-8", "replace")
+        except Exception:
+            body = ""
+        if e.code == 401 and "token_revoked" in body:
+            # Dead for good — a later `codex login` on this machine revoked it.
+            kind = "login revoked — log in again: cswap codex login"
+        elif e.code == 401:
+            kind = "token expired — refreshes on the next switch to it"
+        else:
+            kind = f"http {e.code}"
         return Usage(None, None, None, None, False, error=kind)
     except Exception as e:  # network, JSON — reported, never fatal
         return Usage(None, None, None, None, False, error=type(e).__name__)
@@ -242,10 +291,17 @@ def rank(
     current: str | None,
     threshold: float,
     weekly_threshold: float,
+    reserve: str | None = None,
+    reserve_min_life: float = 0.0,
 ) -> list[str]:
     """Candidates in the order a switch would try them: accounts with real
     room by soonest weekly reset (the quota that expires first), then ones
-    with little room, then unreadable ones; exhausted accounts never."""
+    with little room, then unreadable ones; exhausted accounts never.
+
+    The reserve (owner, 2026-10-02: greg.laski@yahoo.com) always comes LAST,
+    and drops out once less than ``reserve_min_life`` pct of its week is left.
+    """
+    reserve = reserve.lower() if reserve else None
     keyed = []
     for email, usage in usages.items():
         if email == current:
@@ -253,8 +309,11 @@ def rank(
         life = usage.life(threshold, weekly_threshold)
         if life is not None and life <= 0:
             continue
+        if email == reserve and reserve_spent(usage, reserve_min_life):
+            continue
         keyed.append((
             (
+                email == reserve,
                 life is None,
                 life is not None and life < MIN_USEFUL_LIFE_PCT,
                 usage.weekly_reset_at if usage.weekly_reset_at is not None else float("inf"),
@@ -264,6 +323,11 @@ def rank(
         ))
     keyed.sort()
     return [email for _, email in keyed]
+
+
+def reserve_spent(usage: Usage, reserve_min_life: float) -> bool:
+    week = usage.weekly_life()
+    return week is not None and week < reserve_min_life
 
 
 def switch(backup_root: Path, email: str) -> str | None:
@@ -294,6 +358,8 @@ def auto_tick(
     threshold: float,
     weekly_threshold: float,
     *,
+    reserve: str | None = None,
+    reserve_min_life: float = 0.0,
     dry_run: bool = False,
     now: float | None = None,
 ) -> dict:
@@ -306,7 +372,11 @@ def auto_tick(
     live_usage = usages_for(backup_root, [current], current)[current]
     if live_usage.error is not None:
         return {"event": "codex-no-switch", "reason": "active-usage-unknown", "detail": live_usage.error}
-    if not live_usage.over(threshold, weekly_threshold):
+    reserve = reserve.lower() if reserve else None
+    # The reserve is left as soon as its week drops under the floor, not only
+    # at the switch threshold — and an ordinary account always beats it.
+    on_spent_reserve = current == reserve and reserve_spent(live_usage, reserve_min_life)
+    if not live_usage.over(threshold, weekly_threshold) and not on_spent_reserve:
         return {
             "event": "codex-no-switch",
             "reason": "below-threshold",
@@ -314,7 +384,10 @@ def auto_tick(
             "weeklyPct": live_usage.weekly_pct,
         }
     others = [e for e in emails if e != current]
-    ordered = rank(usages_for(backup_root, others, current), current, threshold, weekly_threshold)
+    ordered = rank(
+        usages_for(backup_root, others, current), current, threshold, weekly_threshold,
+        reserve, reserve_min_life,
+    )
     if not ordered:
         return {"event": "codex-no-switch", "reason": "no-candidate", "active": current}
     target = ordered[0]

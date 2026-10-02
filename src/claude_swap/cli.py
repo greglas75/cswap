@@ -965,7 +965,15 @@ def _codex_command(argv: list[str]) -> None:
             "then `cswap codex add` — once per account, per machine."
         ),
     )
-    sub = parser.add_subparsers(dest="action", metavar="{add,list,switch,auto}")
+    sub = parser.add_subparsers(dest="action", metavar="{login,add,list,switch,auto}")
+    p_login = sub.add_parser(
+        "login",
+        help="Log in another account and store it, leaving the live login intact",
+    )
+    p_login.add_argument(
+        "codex_args", nargs=argparse.REMAINDER,
+        help="Arguments for `codex login` (default: --device-auth)",
+    )
     sub.add_parser("add", help="Store the account Codex is logged in with now")
     sub.add_parser("list", help="Stored accounts with weekly usage, in switch order")
     p_switch = sub.add_parser("switch", help="Make a stored account the live login")
@@ -980,6 +988,8 @@ def _codex_command(argv: list[str]) -> None:
     settings = load_settings(root)
     threshold = settings.threshold
     weekly = settings.weekly_threshold or settings.threshold
+    reserve = (settings.codex_reserve_account or "").lower() or None
+    reserve_min_life = settings.codex_reserve_min_life_pct
 
     def in_time(ts: float | None) -> str:
         if ts is None:
@@ -989,7 +999,11 @@ def _codex_command(argv: list[str]) -> None:
         return f"resets in {days}d {rem // 3600}h" if days else f"resets in {rem // 3600}h {rem % 3600 // 60}m"
 
     try:
-        if args.action == "add":
+        if args.action == "login":
+            extra = [a for a in args.codex_args if a != "--"]
+            email, plan = codex.login(root, extra)
+            print(f"Stored Codex account {email}" + (f" ({plan})" if plan else ""))
+        elif args.action == "add":
             email, plan = codex.add(root)
             print(f"Stored Codex account {email}" + (f" ({plan})" if plan else ""))
         elif args.action == "switch":
@@ -1002,7 +1016,10 @@ def _codex_command(argv: list[str]) -> None:
         elif args.action == "auto":
             while True:
                 try:
-                    event = codex.auto_tick(root, threshold, weekly, dry_run=args.dry_run)
+                    event = codex.auto_tick(
+                        root, threshold, weekly, reserve=reserve,
+                        reserve_min_life=reserve_min_life, dry_run=args.dry_run,
+                    )
                 except Exception as e:  # one bad tick never ends the loop
                     event = {"event": "codex-error", "message": f"{type(e).__name__}: {e}"}
                 event["ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -1014,10 +1031,10 @@ def _codex_command(argv: list[str]) -> None:
             current = codex.sync_live(root)
             emails = codex.stored_accounts(root)
             if not emails:
-                print(dimmed("No Codex accounts stored — log in with `codex login`, then `cswap codex add`."))
+                print(dimmed("No Codex accounts stored — store the current login with `cswap codex add`, more with `cswap codex login`."))
                 return
             usages = codex.usages_for(root, emails, current)
-            order = codex.rank(usages, current, threshold, weekly)
+            order = codex.rank(usages, current, threshold, weekly, reserve, reserve_min_life)
             rest = [e for e in emails if e != current and e not in order]
             print(bolded("Codex accounts:") + " " + muted(f"(in the order they will be used; weekly switch at {weekly:g}%)"))
             for i, email in enumerate(([current] if current in emails else []) + order + rest):
@@ -1027,6 +1044,12 @@ def _codex_command(argv: list[str]) -> None:
                     tags.append(bold_accent("(active)"))
                 elif order and email == order[0]:
                     tags.append(muted("(next)"))
+                if email == reserve:
+                    week = u.weekly_life()
+                    if week is not None and week < reserve_min_life:
+                        tags.append(muted(f"(reserve — held: {week:.0f}% of week < {reserve_min_life:.0f}%)"))
+                    else:
+                        tags.append(muted("(reserve — last resort)"))
                 elif email in rest:
                     tags.append(muted("(exhausted)"))
                 print(f"  {email} {' '.join(tags)}".rstrip())
@@ -1038,7 +1061,7 @@ def _codex_command(argv: list[str]) -> None:
                 print(f"     └ week:  {u.weekly_pct if u.weekly_pct is not None else 0:5.0f}%   {in_time(u.weekly_reset_at)}")
             if current and current not in emails:
                 print()
-                warning(f"The live Codex login {current} is not stored — run `cswap codex add` before logging in with another account.")
+                warning(f"The live Codex login {current} is not stored — run `cswap codex add`; log other accounts in with `cswap codex login`, never a bare `codex login` (it revokes the current one).")
     except codex.CodexError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

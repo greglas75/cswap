@@ -136,6 +136,10 @@ class AutoSwitchSettings:
     # usable". The 5h window follows the normal threshold. None = no reserve.
     reserve_account: str | None = None
     reserve_min_life_pct: float = 20.0
+    # Codex (`cswap codex`): its own reserve — always last in the queue, and
+    # dropped once less than `codex_reserve_min_life_pct` of its week is left.
+    codex_reserve_account: str | None = None
+    codex_reserve_min_life_pct: float = 30.0
     # Pre-freshen: once the ACTIVE account's binding window crosses this
     # utilization, refresh the idle candidates' tokens in the background, so
     # the switch at `threshold` never has to wait on a network refresh. The
@@ -316,9 +320,18 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             "autoswitch", "reserveMinLifePct", "reserve_min_life_pct", "float",
             0.0, 100.0,
             help=(
-                "Skip the reserve once its binding window has less than this "
-                "much life left (headroom pct)"
+                "Skip the reserve once its weekly windows have less than this "
+                "much life left (pct)"
             ),
+        ),
+        SettingSpec(
+            "autoswitch", "codexReserveAccount", "codex_reserve_account", "string",
+            help="Codex account (email) used last, after every other Codex login",
+        ),
+        SettingSpec(
+            "autoswitch", "codexReserveMinLifePct", "codex_reserve_min_life_pct", "float",
+            0.0, 100.0,
+            help="Skip the Codex reserve once less than this pct of its week is left",
         ),
         SettingSpec(
             "ui", "theme", "theme", "choice", choices=("dark", "light", "auto"),
