@@ -254,3 +254,75 @@ class TestAfterSwitch:
         monkeypatch.setattr(codex.subprocess, "Popen", boom)
         event = codex.auto_tick(env, 95.0, 99.0, after_switch="restart-codex")
         assert event["event"] == "codex-switch" and event["afterSwitch"].startswith("failed")
+
+
+def _cr(weekly: float, credits: float | None, usable: bool = True) -> Usage:
+    return Usage(weekly, 1000.0, None, None, weekly >= 100, credits_balance=credits, credits_usable=usable)
+
+
+class TestCredits:
+    """Owner, 2026-10-04: credits must be spent by year end anyway — once no
+    account has quota (the reserve included), run on the biggest balance."""
+
+    def _three(self, env, monkeypatch, by_email):
+        for e in ("c@x.com", "b@x.com", "a@x.com"):
+            _login(_auth(e))
+            codex.add(env)
+        monkeypatch.setattr(codex, "fetch_usage", lambda auth, timeout=20.0: by_email[codex.email_of(auth)])
+        monkeypatch.setattr(codex.subprocess, "Popen", lambda *a, **kw: None)
+
+    def _live(self):
+        return codex.email_of(codex.read_auth(codex.live_auth_path()))
+
+    def test_no_quota_anywhere_lands_on_the_biggest_balance_reserve_included(self, env, monkeypatch):
+        by = {"a@x.com": _cr(100, 30000), "b@x.com": _cr(100, 34000), "c@x.com": _cr(100, 61000)}
+        self._three(env, monkeypatch, by)
+        event = codex.auto_tick(env, 95.0, 99.0, reserve="c@x.com", reserve_min_life=30.0)
+        assert (event["to"], event["mode"]) == ("c@x.com", "credits")
+        assert self._live() == "c@x.com"
+
+    def test_it_stays_on_its_credits_account_while_balances_shift(self, env, monkeypatch):
+        """Every switch restarts the daemon: no re-picking the biggest each tick."""
+        by = {"a@x.com": _cr(100, 30000), "b@x.com": _cr(100, 34000), "c@x.com": _cr(100, 61000)}
+        self._three(env, monkeypatch, by)
+        codex.auto_tick(env, 95.0, 99.0)
+        by["c@x.com"] = _cr(100, 20000)          # drained below b — still stays
+        assert codex.auto_tick(env, 95.0, 99.0)["reason"] == "on-credits"
+        assert self._live() == "c@x.com"
+
+    def test_an_empty_credits_account_hands_over_to_the_next_biggest(self, env, monkeypatch):
+        by = {"a@x.com": _cr(100, 30000), "b@x.com": _cr(100, 34000), "c@x.com": _cr(100, 61000)}
+        self._three(env, monkeypatch, by)
+        codex.auto_tick(env, 95.0, 99.0)
+        by["c@x.com"] = _cr(100, 10.0)
+        event = codex.auto_tick(env, 95.0, 99.0)
+        assert (event["to"], event["mode"]) == ("b@x.com", "credits")
+
+    def test_a_spend_cap_takes_an_account_out_of_the_credits_pool(self, env, monkeypatch):
+        by = {"a@x.com": _cr(100, 30000), "b@x.com": _cr(100, 34000), "c@x.com": _cr(100, 61000, usable=False)}
+        self._three(env, monkeypatch, by)
+        assert codex.auto_tick(env, 95.0, 99.0)["to"] == "b@x.com"
+
+    def test_a_week_that_resets_brings_it_back_off_credits(self, env, monkeypatch):
+        by = {"a@x.com": _cr(100, 30000), "b@x.com": _cr(100, 34000), "c@x.com": _cr(100, 61000)}
+        self._three(env, monkeypatch, by)
+        codex.auto_tick(env, 95.0, 99.0)
+        by["a@x.com"] = _cr(0, 30000)            # a's week reset
+        event = codex.auto_tick(env, 95.0, 99.0)
+        assert (event["to"], event["mode"]) == ("a@x.com", "quota")
+        assert codex._credits_account(env) is None
+
+    def test_staying_put_when_the_live_account_already_has_the_most(self, env, monkeypatch):
+        by = {"a@x.com": _cr(100, 90000), "b@x.com": _cr(100, 34000), "c@x.com": _cr(100, 61000)}
+        self._three(env, monkeypatch, by)
+        event = codex.auto_tick(env, 95.0, 99.0)
+        assert event["reason"] == "on-credits" and self._live() == "a@x.com"
+        assert codex._credits_account(env) == "a@x.com"
+
+    def test_parse_reads_balance_and_spend_cap(self):
+        u = codex.parse_usage({
+            "rate_limit": {"primary_window": {"used_percent": 100, "limit_window_seconds": 604800}},
+            "credits": {"has_credits": True, "balance": "32041.65", "overage_limit_reached": False},
+            "spend_control": {"reached": True},
+        })
+        assert u.credits_balance == 32041.65 and u.credits_usable is False

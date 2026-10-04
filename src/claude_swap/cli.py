@@ -1043,6 +1043,8 @@ def _codex_command(argv: list[str]) -> None:
                 tags = []
                 if email == current:
                     tags.append(bold_accent("(active)"))
+                    if codex._credits_account(root) == current:
+                        tags.append(bold_accent("(on credits)"))
                 elif order and email == order[0]:
                     tags.append(muted("(next)"))
                 if email == reserve:
@@ -1059,7 +1061,10 @@ def _codex_command(argv: list[str]) -> None:
                     continue
                 if u.short_pct is not None:
                     print(f"     ├ short: {u.short_pct:5.0f}%   {in_time(u.short_reset_at)}")
-                print(f"     └ week:  {u.weekly_pct if u.weekly_pct is not None else 0:5.0f}%   {in_time(u.weekly_reset_at)}")
+                credit_note = ""
+                if u.credits_balance is not None:
+                    credit_note = f"   credits {u.credits_balance:,.0f}" + ("" if u.credits_usable else " (blocked)")
+                print(f"     └ week:  {u.weekly_pct if u.weekly_pct is not None else 0:5.0f}%   {in_time(u.weekly_reset_at)}{muted(credit_note)}")
             if current and current not in emails:
                 print()
                 warning(f"The live Codex login {current} is not stored — run `cswap codex add`; log other accounts in with `cswap codex login`, never a bare `codex login` (it revokes the current one).")

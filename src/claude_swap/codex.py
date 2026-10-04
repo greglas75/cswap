@@ -39,6 +39,9 @@ MIN_USEFUL_LIFE_PCT = 10.0
 # A window this long or shorter is a "short" window (5h class); longer ones
 # are weekly.
 SHORT_WINDOW_MAX_S = 24 * 3600
+# Below this credit balance an account no longer counts as a credits landing.
+MIN_CREDITS = 50.0
+CREDITS_STATE = "credits-mode.json"
 
 
 class CodexError(Exception):
@@ -195,6 +198,16 @@ class Usage:
     short_reset_at: float | None
     limit_reached: bool
     error: str | None = None
+    credits_balance: float | None = None
+    # Credits are usable: the account has them and no spend cap stopped them.
+    credits_usable: bool = False
+
+    def on_credits_ok(self) -> bool:
+        return (
+            self.error is None
+            and self.credits_usable
+            and (self.credits_balance or 0.0) >= MIN_CREDITS
+        )
 
     def over(self, threshold: float, weekly_threshold: float) -> bool:
         if self.limit_reached:
@@ -244,7 +257,20 @@ def parse_usage(payload: dict) -> Usage:
         v = (w or {}).get("reset_at")
         return float(v) if isinstance(v, (int, float)) else None
 
+    credits = payload.get("credits") or {}
+    try:
+        balance = float(credits.get("balance")) if credits.get("balance") is not None else None
+    except (TypeError, ValueError):
+        balance = None
+    spend = payload.get("spend_control") or {}
+    usable = (
+        bool(credits.get("has_credits") or credits.get("unlimited"))
+        and not credits.get("overage_limit_reached")
+        and not spend.get("reached")
+    )
     return Usage(
+        credits_balance=balance,
+        credits_usable=usable,
         weekly_pct=pct(weekly),
         weekly_reset_at=reset(weekly),
         short_pct=pct(short),
@@ -389,13 +415,48 @@ def auto_tick(
         usages_for(backup_root, others, current), current, threshold, weekly_threshold,
         reserve, reserve_min_life,
     )
-    if not ordered:
-        return {"event": "codex-no-switch", "reason": "no-candidate", "active": current}
-    target = ordered[0]
+    mode = "quota"
+    if ordered:
+        target = ordered[0]
+        if not dry_run:
+            _set_credits_account(backup_root, None)
+    else:
+        # Every account is past its week (the reserve too). Credits have to be
+        # spent before year end anyway (owner, 2026-10-04), so run on credits:
+        # the account with the MOST of them — and then STAY on it until they
+        # run out, because every switch restarts the daemon and cuts every
+        # running session; re-picking the biggest balance each tick would flap.
+        usages = usages_for(backup_root, others, current)
+        usages[current] = live_usage
+        pinned = _credits_account(backup_root)
+        if pinned == current and live_usage.on_credits_ok():
+            return {
+                "event": "codex-no-switch",
+                "reason": "on-credits",
+                "active": current,
+                "credits": live_usage.credits_balance,
+            }
+        funded = sorted(
+            (e for e, u in usages.items() if u.on_credits_ok()),
+            key=lambda e: -(usages[e].credits_balance or 0.0),
+        )
+        if not funded:
+            return {"event": "codex-no-switch", "reason": "no-candidate", "active": current}
+        target, mode = funded[0], "credits"
+        if not dry_run:
+            _set_credits_account(backup_root, target)
+        if target == current:
+            return {
+                "event": "codex-no-switch",
+                "reason": "on-credits",
+                "active": current,
+                "credits": live_usage.credits_balance,
+            }
     event = {
         "event": "codex-switch",
         "from": current,
         "to": target,
+        "mode": mode,
         "weeklyPct": live_usage.weekly_pct,
         "dryRun": dry_run,
     }
@@ -404,6 +465,23 @@ def auto_tick(
         if after_switch:
             event["afterSwitch"] = run_after_switch(after_switch, current, target)
     return event
+
+
+def _credits_account(backup_root: Path) -> str | None:
+    data = read_auth(store_dir(backup_root) / CREDITS_STATE)
+    email = (data or {}).get("account")
+    return email if isinstance(email, str) else None
+
+
+def _set_credits_account(backup_root: Path, email: str | None) -> None:
+    path = store_dir(backup_root) / CREDITS_STATE
+    if email is None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    write_private(path, {"account": email, "since": time.time()})
 
 
 def run_after_switch(command: str, previous: str | None, target: str) -> str:
