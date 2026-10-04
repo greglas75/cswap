@@ -9,7 +9,8 @@
 #   cswap-ci ryzen list                     any cswap command, as gha (ryzen = ryzen-tf, waw = waw-tf)
 #   cswap-ci all list                       the same on both hosts
 #   cswap-ci ryzen codex list
-#   cswap-ci ryzen add-claude a@b.com       log a Claude account in as gha and add it to the rotation
+#   cswap-ci all add-claude a@b.com c@d.com log these Claude accounts in as gha, one after another,
+#                                           skipping any already in that host's rotation
 #   cswap-ci ryzen add-codex                log a Codex account in (cswap codex login, device code)
 #
 # add-claude logs in with `claude auth login` (open the link on the Mac, paste the code back)
@@ -34,8 +35,16 @@ for h in "${targets[@]}"; do
   [ ${#targets[@]} -gt 1 ] && echo "== $h"
   case "$1" in
     add-claude)
-      [ -n "${2:-}" ] || { echo "usage: cswap-ci $h add-claude <email>" >&2; exit 2; }
-      as_gha "$h" "unset CLAUDE_CODE_OAUTH_TOKEN; claude auth login --email $(printf %q "$2") && cswap add && cswap list" || rc=1 ;;
+      shift; [ $# -gt 0 ] || { echo "usage: cswap-ci <host|all> add-claude <email> [email ...]" >&2; exit 2; }
+      have=$(as_gha "$h" "cswap list" 2>/dev/null | grep -oiE '[[:alnum:]._%+-]+@[[:alnum:].-]+' | tr 'A-Z' 'a-z' | sort -u)
+      for e in "$@"; do
+        e=$(echo "$e" | tr 'A-Z' 'a-z')
+        if echo "$have" | grep -qxF "$e"; then echo "-- $h: $e already in the rotation, skipped"; continue; fi
+        echo; echo "== $h: $e — open the link in a browser signed in as $e, then paste the code here"
+        as_gha "$h" "unset CLAUDE_CODE_OAUTH_TOKEN; claude auth login --email $(printf %q "$e") && cswap add" || { echo "!! $h: $e not added"; rc=1; }
+      done
+      set -- add-claude "$@"
+      as_gha "$h" "cswap list" | grep -E '^ +[0-9]+:' ;;
     add-codex)
       as_gha "$h" "cswap codex login && cswap codex list" || rc=1 ;;
     *)
