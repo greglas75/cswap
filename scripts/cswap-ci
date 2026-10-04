@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# cswap-ci — the full cswap of the CI user (gha) on the runner hosts, from the Mac.
+#
+# Every runner on ryzen-tf and waw-tf (GitHub and Bitbucket alike) runs as gha with
+# HOME=/home/gha, so the ai-review step uses gha's claude/codex logins — rotated by the
+# cswap-auto / cswap-codex services there. Logging in as `tf` does not help: tf has no sudo
+# and the farm runs test code under it, so it never gets these tokens. This goes in as root.
+#
+#   cswap-ci ryzen list                     any cswap command, as gha (ryzen = ryzen-tf, waw = waw-tf)
+#   cswap-ci all list                       the same on both hosts
+#   cswap-ci ryzen codex list
+#   cswap-ci ryzen add-claude a@b.com       log a Claude account in as gha and add it to the rotation
+#   cswap-ci ryzen add-codex                log a Codex account in (cswap codex login, device code)
+#
+# add-claude logs in with `claude auth login` (open the link on the Mac, paste the code back)
+# and registers it with `cswap add`. The new login becomes gha's live one until cswap-auto
+# moves it — it has quota, so the running review jobs carry on.
+set -u
+HOSTS=(ryzen waw)
+[ $# -ge 2 ] || { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+target=$1; shift
+case "$target" in
+  all) targets=("${HOSTS[@]}") ;;
+  ryzen|ryzen-tf) targets=(ryzen) ;;
+  waw|waw-tf) targets=(waw) ;;
+  *) echo "cswap-ci: unknown host '$target' (ryzen | waw | all)" >&2; exit 2 ;;
+esac
+as_gha() {   # $1 host, $2 command line run in gha's login shell; interactive (-t)
+  local t=(); [ -t 0 ] && t=(-t)   # a terminal only when there is one (logins need it)
+  ssh "${t[@]}" -o ConnectTimeout=15 "$1" "sudo -u gha -H bash -lc $(printf %q "$2")"
+}
+rc=0
+for h in "${targets[@]}"; do
+  [ ${#targets[@]} -gt 1 ] && echo "== $h"
+  case "$1" in
+    add-claude)
+      [ -n "${2:-}" ] || { echo "usage: cswap-ci $h add-claude <email>" >&2; exit 2; }
+      as_gha "$h" "unset CLAUDE_CODE_OAUTH_TOKEN; claude auth login --email $(printf %q "$2") && cswap add && cswap list" || rc=1 ;;
+    add-codex)
+      as_gha "$h" "cswap codex login && cswap codex list" || rc=1 ;;
+    *)
+      as_gha "$h" "cswap $(printf '%q ' "$@")" || rc=1 ;;
+  esac
+done
+exit $rc
