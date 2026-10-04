@@ -1018,7 +1018,8 @@ def _codex_command(argv: list[str]) -> None:
                 try:
                     event = codex.auto_tick(
                         root, threshold, weekly, reserve=reserve,
-                        reserve_min_life=reserve_min_life, dry_run=args.dry_run,
+                        reserve_min_life=reserve_min_life,
+                        after_switch=settings.codex_after_switch, dry_run=args.dry_run,
                     )
                 except Exception as e:  # one bad tick never ends the loop
                     event = {"event": "codex-error", "message": f"{type(e).__name__}: {e}"}

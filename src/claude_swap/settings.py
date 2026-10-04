@@ -140,6 +140,10 @@ class AutoSwitchSettings:
     # dropped once less than `codex_reserve_min_life_pct` of its week is left.
     codex_reserve_account: str | None = None
     codex_reserve_min_life_pct: float = 30.0
+    # Shell command run (detached) after `cswap codex auto` switches the live
+    # Codex login. Running Codex processes keep the old login in memory, so a
+    # host with long-lived sessions restarts them here. None = nothing.
+    codex_after_switch: str | None = None
     # Pre-freshen: once the ACTIVE account's binding window crosses this
     # utilization, refresh the idle candidates' tokens in the background, so
     # the switch at `threshold` never has to wait on a network refresh. The
@@ -332,6 +336,13 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             "autoswitch", "codexReserveMinLifePct", "codex_reserve_min_life_pct", "float",
             0.0, 100.0,
             help="Skip the Codex reserve once less than this pct of its week is left",
+        ),
+        SettingSpec(
+            "autoswitch", "codexAfterSwitch", "codex_after_switch", "string",
+            help=(
+                "Shell command run after a Codex switch (running Codex sessions "
+                "keep the old login until restarted)"
+            ),
         ),
         SettingSpec(
             "ui", "theme", "theme", "choice", choices=("dark", "light", "auto"),

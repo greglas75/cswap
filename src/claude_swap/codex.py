@@ -360,6 +360,7 @@ def auto_tick(
     *,
     reserve: str | None = None,
     reserve_min_life: float = 0.0,
+    after_switch: str | None = None,
     dry_run: bool = False,
     now: float | None = None,
 ) -> dict:
@@ -391,12 +392,37 @@ def auto_tick(
     if not ordered:
         return {"event": "codex-no-switch", "reason": "no-candidate", "active": current}
     target = ordered[0]
-    if not dry_run:
-        switch(backup_root, target)
-    return {
+    event = {
         "event": "codex-switch",
         "from": current,
         "to": target,
         "weeklyPct": live_usage.weekly_pct,
         "dryRun": dry_run,
     }
+    if not dry_run:
+        switch(backup_root, target)
+        if after_switch:
+            event["afterSwitch"] = run_after_switch(after_switch, current, target)
+    return event
+
+
+def run_after_switch(command: str, previous: str | None, target: str) -> str:
+    """Start the host's after-switch hook, detached; never raises.
+
+    A running Codex process — and the shared app-server daemon every TUI
+    talks to — reads auth.json once, at start. Measured 2026-10-04 on
+    ryzen-old-1: two days after the switch, every thread still ran on the
+    old account at 100% of its week, paying ~1,470 credits an hour, while
+    the new live login sat at 2%. So the switch alone moves only NEW
+    processes; the hook (e.g. a daemon restart that relaunches the TUIs) is
+    what moves the running ones. Detached so the loop never waits on it.
+    """
+    env = {**os.environ, "CSWAP_CODEX_FROM": previous or "", "CSWAP_CODEX_TO": target}
+    try:
+        subprocess.Popen(
+            command, shell=True, env=env, start_new_session=True,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return "started"
+    except OSError as e:
+        return f"failed: {type(e).__name__}: {e}"

@@ -216,3 +216,41 @@ class TestLogin:
         with pytest.raises(codex.CodexError):
             codex.login(env)
         assert codex.stored_accounts(env) == []
+
+
+class TestAfterSwitch:
+    def _two(self, env, monkeypatch):
+        _login(_auth("b@x.com"))
+        codex.add(env)
+        _login(_auth("a@x.com"))
+        codex.add(env)
+        by_email = {"a@x.com": _usage(99), "b@x.com": _usage(20)}
+        monkeypatch.setattr(codex, "fetch_usage", lambda auth, timeout=20.0: by_email[codex.email_of(auth)])
+
+    def test_a_real_switch_starts_the_hook_with_both_accounts(self, env, monkeypatch):
+        """Running Codex keeps the old login in memory: the hook moves them."""
+        self._two(env, monkeypatch)
+        started = []
+        monkeypatch.setattr(
+            codex.subprocess, "Popen",
+            lambda cmd, **kw: started.append((cmd, kw["env"]["CSWAP_CODEX_FROM"], kw["env"]["CSWAP_CODEX_TO"])),
+        )
+        event = codex.auto_tick(env, 95.0, 99.0, after_switch="restart-codex")
+        assert event["afterSwitch"] == "started"
+        assert started == [("restart-codex", "a@x.com", "b@x.com")]
+
+    def test_a_dry_run_never_starts_it(self, env, monkeypatch):
+        self._two(env, monkeypatch)
+        monkeypatch.setattr(codex.subprocess, "Popen", lambda *a, **kw: pytest.fail("hook ran"))
+        event = codex.auto_tick(env, 95.0, 99.0, after_switch="restart-codex", dry_run=True)
+        assert "afterSwitch" not in event
+
+    def test_a_hook_that_cannot_start_is_reported_not_raised(self, env, monkeypatch):
+        self._two(env, monkeypatch)
+
+        def boom(*a, **kw):
+            raise FileNotFoundError("sh")
+
+        monkeypatch.setattr(codex.subprocess, "Popen", boom)
+        event = codex.auto_tick(env, 95.0, 99.0, after_switch="restart-codex")
+        assert event["event"] == "codex-switch" and event["afterSwitch"].startswith("failed")
