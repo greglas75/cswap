@@ -5288,7 +5288,6 @@ class ClaudeAccountSwitcher:
                     key = str(acc.get("number"))
                     acc["order"] = rank.get(key)
                     acc["note"] = notes.get(key)
-                    acc["disabled"] = bool(self._disabled_from_data(seq, key))
             except Exception:
                 pass
             return payload

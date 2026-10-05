@@ -8455,6 +8455,19 @@ class TestDisableEnableAccount:
         # Additive: absent (not False) on enabled rows.
         assert "disabled" not in rows[1]
 
+    def test_json_list_carries_switch_order_without_resorting(self, temp_home):
+        """The live status page shows the text list's order and notes."""
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        self._seed(s, 2, "b@example.com")
+        with patch.object(s, "_read_credentials", return_value=""), \
+             patch.object(s, "_read_account_credentials", return_value=""):
+            payload = s.list_accounts(json_output=True)
+        assert [r["number"] for r in payload["accounts"]] == [1, 2]   # slot order kept
+        orders = sorted(r["order"] for r in payload["accounts"])
+        assert orders == [0, 1]
+        assert all("note" in r for r in payload["accounts"])
+
 
 class TestSessionProfileEnvPoisoning:
     """cswap invoked from inside a cswap-spawned session profile (CON-713).
