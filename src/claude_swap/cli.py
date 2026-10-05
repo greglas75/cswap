@@ -975,7 +975,8 @@ def _codex_command(argv: list[str]) -> None:
         help="Arguments for `codex login` (default: --device-auth)",
     )
     sub.add_parser("add", help="Store the account Codex is logged in with now")
-    sub.add_parser("list", help="Stored accounts with weekly usage, in switch order")
+    p_list = sub.add_parser("list", help="Stored accounts with weekly usage, in switch order")
+    p_list.add_argument("--json", action="store_true", help="Machine-readable output")
     p_switch = sub.add_parser("switch", help="Make a stored account the live login")
     p_switch.add_argument("email")
     p_auto = sub.add_parser("auto", help="Switch at the weekly threshold (loop)")
@@ -1037,6 +1038,35 @@ def _codex_command(argv: list[str]) -> None:
             usages = codex.usages_for(root, emails, current)
             order = codex.rank(usages, current, threshold, weekly, reserve, reserve_min_life)
             rest = [e for e in emails if e != current and e not in order]
+            if getattr(args, "json", False):
+                on_credits = codex._credits_account(root) == current
+                rows = []
+                for email in ([current] if current in emails else []) + order + rest:
+                    u = usages[email]
+                    rows.append({
+                        "email": email,
+                        "active": email == current,
+                        "next": bool(order) and email == order[0],
+                        "exhausted": email in rest,
+                        "reserve": email == reserve,
+                        "onCredits": email == current and on_credits,
+                        "weeklyPct": u.weekly_pct,
+                        "weeklyResetAt": u.weekly_reset_at,
+                        "shortPct": u.short_pct,
+                        "shortResetAt": u.short_reset_at,
+                        "limitReached": u.limit_reached,
+                        "creditsBalance": u.credits_balance,
+                        "creditsUsable": u.credits_usable,
+                        "error": u.error,
+                    })
+                print(_json.dumps({
+                    "schemaVersion": 1,
+                    "weeklyThreshold": weekly,
+                    "reserve": reserve,
+                    "reserveMinLifePct": reserve_min_life,
+                    "accounts": rows,
+                }))
+                return
             print(bolded("Codex accounts:") + " " + muted(f"(in the order they will be used; weekly switch at {weekly:g}%)"))
             for i, email in enumerate(([current] if current in emails else []) + order + rest):
                 u = usages[email]
