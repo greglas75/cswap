@@ -5274,9 +5274,24 @@ class ClaudeAccountSwitcher:
         entries = self._collect_usage_entries(accounts_info, fetch=fetch)
 
         if json_output:
-            return self._build_list_payload(
+            payload = self._build_list_payload(
                 accounts_info, entries, token_status=show_token_status
             )
+            # The text list's switch order and notes ("(next)", "(reserve — …)",
+            # "(exhausted)"), as fields — added, never re-sorting `accounts`, so
+            # a reader keyed on slot order is unaffected (live status page, 2026-10-05).
+            try:
+                seq = self._get_sequence_data() or {}
+                ordered, notes = self._in_switch_order(list(accounts_info), entries, seq)
+                rank = {str(row[0]): i for i, row in enumerate(ordered)}
+                for acc in payload.get("accounts", []):
+                    key = str(acc.get("number"))
+                    acc["order"] = rank.get(key)
+                    acc["note"] = notes.get(key)
+                    acc["disabled"] = bool(self._disabled_from_data(seq, key))
+            except Exception:
+                pass
+            return payload
 
         seq_data = self._get_sequence_data() or {}
         accounts_info, order_notes = self._in_switch_order(

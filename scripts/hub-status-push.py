@@ -35,9 +35,13 @@ DROP = {"organizationUuid", "organizationName"}   # not needed on the page
 
 
 def parse(text):
+    # `cswap list --json` is pretty-printed over many lines; a login shell may print a banner first.
+    i = text.find("{")
+    if i < 0:
+        return None
     try:
-        return json.loads(text.strip().splitlines()[-1]) if text.strip() else None
-    except (ValueError, IndexError):
+        return json.loads(text[i:])
+    except ValueError:
         return None
 
 
@@ -75,7 +79,9 @@ def owner_password():
 def put(token, doc):
     body = json.dumps({"app": APP, "col": "status", "id": doc["host"], "body": doc}).encode()
     req = urllib.request.Request(HUB + "/api/db", data=body, method="PUT",
-                                 headers={"Content-Type": "application/json", "Authorization": "Bearer " + token})
+                                 headers={"Content-Type": "application/json", "Authorization": "Bearer " + token,
+                                          # Cloudflare answers Python's default UA with 403 (error 1010).
+                                          "User-Agent": "cswap-hub-status/1"})
     with urllib.request.urlopen(req, timeout=30) as r:
         return r.status
 
