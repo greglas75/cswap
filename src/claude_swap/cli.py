@@ -988,7 +988,9 @@ def _codex_command(argv: list[str]) -> None:
     root = paths.get_backup_root()
     settings = load_settings(root)
     threshold = settings.threshold
-    weekly = settings.weekly_threshold or settings.threshold
+    # Same rule as the Claude side (settings.weekly_shift): a weekly threshold
+    # below the 5h one is not honoured there, so not here either.
+    weekly = max(settings.weekly_threshold, settings.threshold) if settings.weekly_threshold else settings.threshold
     reserve = (settings.codex_reserve_account or "").lower() or None
     reserve_min_life = settings.codex_reserve_min_life_pct
 
@@ -1043,11 +1045,15 @@ def _codex_command(argv: list[str]) -> None:
                 rows = []
                 for email in ([current] if current in emails else []) + order + rest:
                     u = usages[email]
+                    held = email == reserve and codex.reserve_spent(u, reserve_min_life)
                     rows.append({
                         "email": email,
                         "active": email == current,
                         "next": bool(order) and email == order[0],
-                        "exhausted": email in rest,
+                        # A reserve held back by its weekly floor is out of the
+                        # order but not exhausted — the page must not say so.
+                        "exhausted": email in rest and not held and u.error is None,
+                        "held": held,
                         "reserve": email == reserve,
                         "onCredits": email == current and on_credits,
                         "weeklyPct": u.weekly_pct,
@@ -1084,7 +1090,7 @@ def _codex_command(argv: list[str]) -> None:
                     else:
                         tags.append(muted("(reserve — last resort)"))
                 elif email in rest:
-                    tags.append(muted("(exhausted)"))
+                    tags.append(muted("(unreadable)" if u.error else "(exhausted)"))
                 print(f"  {email} {' '.join(tags)}".rstrip())
                 if u.error:
                     print(f"     └ {muted('usage unknown: ' + u.error)}")

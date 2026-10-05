@@ -177,3 +177,12 @@ class TestSwitchTiming:
         ev = next((e for e in h.events if isinstance(e, SwitchEvent)), None)
         assert ev is not None
         assert {"freshenMs", "freshenAttempts"} <= set(ev.timing)
+
+
+def test_a_disabled_slot_is_not_prefreshened(temp_home):
+    """review 2026-10-05: not a rotation candidate, so its refresh token stays put."""
+    h = engine(temp_home)
+    h.switcher.set_account_disabled("3", True)
+    calls = spy(h)
+    h.tick_with_usage(IN_BAND)
+    assert [n for n, _ in calls] == ["2"]

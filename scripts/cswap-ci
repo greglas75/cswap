@@ -18,7 +18,7 @@
 # moves it — it has quota, so the running review jobs carry on.
 set -u
 HOSTS=(ryzen waw)
-[ $# -ge 2 ] || { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+[ $# -ge 2 ] || { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 target=$1; shift
 case "$target" in
   all) targets=("${HOSTS[@]}") ;;
@@ -28,14 +28,15 @@ case "$target" in
 esac
 as_gha() {   # $1 host, $2 command line run in gha's login shell; interactive (-t)
   local t=(); [ -t 0 ] && t=(-t)   # a terminal only when there is one (logins need it)
-  ssh "${t[@]}" -o ConnectTimeout=15 "$1" "sudo -u gha -H bash -lc $(printf %q "$2")"
+  ssh ${t[@]+"${t[@]}"} -o ConnectTimeout=15 "$1" "sudo -u gha -H bash -lc $(printf %q "$2")"
 }
+verb=$1; shift   # once, before the host loop: no arm may shift "$@" per host
 rc=0
 for h in "${targets[@]}"; do
   [ ${#targets[@]} -gt 1 ] && echo "== $h"
-  case "$1" in
+  case "$verb" in
     add-claude)
-      shift; [ $# -gt 0 ] || { echo "usage: cswap-ci <host|all> add-claude <email> [email ...]" >&2; exit 2; }
+      [ $# -gt 0 ] || { echo "usage: cswap-ci <host|all> add-claude <email> [email ...]" >&2; exit 2; }
       have=$(as_gha "$h" "cswap list" 2>/dev/null | grep -oiE '[[:alnum:]._%+-]+@[[:alnum:].-]+' | tr 'A-Z' 'a-z' | sort -u)
       for e in "$@"; do
         e=$(echo "$e" | tr 'A-Z' 'a-z')
@@ -43,12 +44,11 @@ for h in "${targets[@]}"; do
         echo; echo "== $h: $e — open the link in a browser signed in as $e, then paste the code here"
         as_gha "$h" "unset CLAUDE_CODE_OAUTH_TOKEN; claude auth login --email $(printf %q "$e") && cswap add" || { echo "!! $h: $e not added"; rc=1; }
       done
-      set -- add-claude "$@"
       as_gha "$h" "cswap list" | grep -E '^ +[0-9]+:' ;;
     add-codex)
       as_gha "$h" "cswap codex login && cswap codex list" || rc=1 ;;
     *)
-      as_gha "$h" "cswap $(printf '%q ' "$@")" || rc=1 ;;
+      as_gha "$h" "cswap $(printf '%q ' "$verb" "$@")" || rc=1 ;;
   esac
 done
 exit $rc

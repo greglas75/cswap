@@ -23,6 +23,8 @@ least MIN_USEFUL_LIFE_PCT of life — the same rule the Claude side uses.
 from __future__ import annotations
 
 import base64
+import contextlib
+import fcntl
 import json
 import os
 import shutil
@@ -115,7 +117,31 @@ def write_private(path: Path, data: dict) -> None:
 
 
 def stored_path(backup_root: Path, email: str) -> Path:
-    return store_dir(backup_root) / f"{email.lower()}.auth.json"
+    # The email comes from a CLI argument or an unverified JWT claim: never let
+    # it name a path outside the store.
+    email = email.lower()
+    if not email or "/" in email or "\\" in email or ".." in email or email.startswith("."):
+        raise CodexError(f"not a usable account name: {email!r}")
+    return store_dir(backup_root) / f"{email}.auth.json"
+
+
+@contextlib.contextmanager
+def store_lock(backup_root: Path):
+    """One writer at a time over the stored copies and the live auth.json.
+
+    The daemon and a hand-run `cswap codex switch/add/login` each write
+    atomically, but sync-then-switch is a read-modify-write: without this a
+    refresh token Codex rotated between the two could be lost.
+    """
+    d = store_dir(backup_root)
+    d.mkdir(parents=True, exist_ok=True)
+    os.chmod(d, 0o700)
+    with open(d / ".lock", "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def stored_accounts(backup_root: Path) -> list[str]:
@@ -130,6 +156,12 @@ def stored_accounts(backup_root: Path) -> list[str]:
 
 
 def sync_live(backup_root: Path) -> str | None:
+    """Locked :func:`_sync_live` (see there)."""
+    with store_lock(backup_root):
+        return _sync_live(backup_root)
+
+
+def _sync_live(backup_root: Path) -> str | None:
     """Copy the live login over its account's stored copy; return its email.
 
     Only for accounts already stored (``add`` registers new ones), so a stray
@@ -155,7 +187,8 @@ def add(backup_root: Path) -> tuple[str, str | None]:
             "the current Codex login is not a ChatGPT account (API key?) — "
             "only ChatGPT logins rotate"
         )
-    write_private(stored_path(backup_root, email), live)
+    with store_lock(backup_root):
+        write_private(stored_path(backup_root, email), live)
     return email, plan_of(live)
 
 
@@ -182,9 +215,14 @@ def login(backup_root: Path, extra_args: list[str] | None = None) -> tuple[str, 
         email = email_of(auth)
         if email is None:
             raise CodexError("that login is not a ChatGPT account — only ChatGPT logins rotate")
-        write_private(stored_path(backup_root, email), auth)
-        if read_auth(live_auth_path()) is None:
-            write_private(live_auth_path(), auth)
+        with store_lock(backup_root):
+            write_private(stored_path(backup_root, email), auth)
+            # The live file gets the new login too when there is none, or when
+            # it IS this account (a repair of a revoked/expired live login):
+            # otherwise the next sync would copy the old live tokens back
+            # over the fresh stored copy.
+            if email_of(read_auth(live_auth_path())) in (None, email):
+                write_private(live_auth_path(), auth)
         return email, plan_of(auth)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -322,7 +360,12 @@ def rank(
 ) -> list[str]:
     """Candidates in the order a switch would try them: accounts with real
     room by soonest weekly reset (the quota that expires first), then ones
-    with little room, then unreadable ones; exhausted accounts never.
+    with little room; exhausted and unreadable accounts never.
+
+    Unreadable is not a candidate: a revoked login (401 token_revoked) or a
+    transient error says nothing about room, and switching onto it left the
+    daemon parked on a dead login ("active-usage-unknown") instead of going
+    to credits (review 2026-10-05).
 
     The reserve (owner, 2026-10-02: greg.laski@yahoo.com) always comes LAST,
     and drops out once less than ``reserve_min_life`` pct of its week is left.
@@ -333,17 +376,16 @@ def rank(
         if email == current:
             continue
         life = usage.life(threshold, weekly_threshold)
-        if life is not None and life <= 0:
+        if life is None or life <= 0:
             continue
         if email == reserve and reserve_spent(usage, reserve_min_life):
             continue
         keyed.append((
             (
                 email == reserve,
-                life is None,
-                life is not None and life < MIN_USEFUL_LIFE_PCT,
+                life < MIN_USEFUL_LIFE_PCT,
                 usage.weekly_reset_at if usage.weekly_reset_at is not None else float("inf"),
-                -(life or 0.0),
+                -life,
             ),
             email,
         ))
@@ -358,11 +400,16 @@ def reserve_spent(usage: Usage, reserve_min_life: float) -> bool:
 
 def switch(backup_root: Path, email: str) -> str | None:
     """Make ``email`` the live Codex login; return the account it replaced."""
+    with store_lock(backup_root):
+        return _switch(backup_root, email)
+
+
+def _switch(backup_root: Path, email: str) -> str | None:
     email = email.lower()
     target = read_auth(stored_path(backup_root, email))
     if target is None:
         raise CodexError(f"{email} is not stored — log in with it and run: cswap codex add")
-    previous = sync_live(backup_root)
+    previous = _sync_live(backup_root)
     if previous == email:
         return previous
     write_private(live_auth_path(), target)
@@ -388,11 +435,26 @@ def auto_tick(
     reserve_min_life: float = 0.0,
     after_switch: str | None = None,
     dry_run: bool = False,
-    now: float | None = None,
 ) -> dict:
     """One decision: stay, or switch to the best-ranked stored account."""
-    now = time.time() if now is None else now
-    current = sync_live(backup_root)
+    with store_lock(backup_root):
+        return _auto_tick(
+            backup_root, threshold, weekly_threshold, reserve=reserve,
+            reserve_min_life=reserve_min_life, after_switch=after_switch, dry_run=dry_run,
+        )
+
+
+def _auto_tick(
+    backup_root: Path,
+    threshold: float,
+    weekly_threshold: float,
+    *,
+    reserve: str | None,
+    reserve_min_life: float,
+    after_switch: str | None,
+    dry_run: bool,
+) -> dict:
+    current = _sync_live(backup_root)
     emails = stored_accounts(backup_root)
     if current is None or current not in emails:
         return {"event": "codex-no-switch", "reason": "live-login-not-stored", "live": current}
@@ -404,6 +466,10 @@ def auto_tick(
     # at the switch threshold — and an ordinary account always beats it.
     on_spent_reserve = current == reserve and reserve_spent(live_usage, reserve_min_life)
     if not live_usage.over(threshold, weekly_threshold) and not on_spent_reserve:
+        # Back under the limit (its week reset): it no longer runs on credits,
+        # and a pin left behind would skip the biggest-balance choice next time.
+        if not dry_run and _credits_account(backup_root) == current:
+            _set_credits_account(backup_root, None)
         return {
             "event": "codex-no-switch",
             "reason": "below-threshold",
@@ -411,10 +477,8 @@ def auto_tick(
             "weeklyPct": live_usage.weekly_pct,
         }
     others = [e for e in emails if e != current]
-    ordered = rank(
-        usages_for(backup_root, others, current), current, threshold, weekly_threshold,
-        reserve, reserve_min_life,
-    )
+    usages = usages_for(backup_root, others, current)   # one fetch per tick, both paths
+    ordered = rank(usages, current, threshold, weekly_threshold, reserve, reserve_min_life)
     mode = "quota"
     if ordered:
         target = ordered[0]
@@ -426,7 +490,6 @@ def auto_tick(
         # the account with the MOST of them — and then STAY on it until they
         # run out, because every switch restarts the daemon and cuts every
         # running session; re-picking the biggest balance each tick would flap.
-        usages = usages_for(backup_root, others, current)
         usages[current] = live_usage
         pinned = _credits_account(backup_root)
         if pinned == current and live_usage.on_credits_ok():
@@ -461,7 +524,7 @@ def auto_tick(
         "dryRun": dry_run,
     }
     if not dry_run:
-        switch(backup_root, target)
+        _switch(backup_root, target)
         if after_switch:
             event["afterSwitch"] = run_after_switch(after_switch, current, target)
     return event

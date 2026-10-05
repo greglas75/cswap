@@ -111,8 +111,9 @@ class TestRank:
             "dead@x.com": _usage(100, reset=50),     # exhausted: never
             "blind@x.com": _usage(0, error="http 500"),
         }
+        # blind@ is unreadable: never a target (review 2026-10-05, BEHAV-1).
         assert codex.rank(usages, "active@x.com", 95.0, 99.0) == [
-            "soon@x.com", "late@x.com", "thin@x.com", "blind@x.com",
+            "soon@x.com", "late@x.com", "thin@x.com",
         ]
 
 
@@ -326,3 +327,68 @@ class TestCredits:
             "spend_control": {"reached": True},
         })
         assert u.credits_balance == 32041.65 and u.credits_usable is False
+
+
+class TestReviewFixes:
+    """zuvo:review 2026-10-05 on the codex rotation."""
+
+    def _accounts(self, env, monkeypatch, by_email, calls=None):
+        for e in sorted(by_email, reverse=True):
+            _login(_auth(e))
+            codex.add(env)
+        _login(_auth("a@x.com"))
+
+        def fetch(auth, timeout=20.0):
+            if calls is not None:
+                calls.append(codex.email_of(auth))
+            return by_email[codex.email_of(auth)]
+
+        monkeypatch.setattr(codex, "fetch_usage", fetch)
+        monkeypatch.setattr(codex.subprocess, "Popen", lambda *a, **kw: None)
+
+    def test_a_revoked_account_is_never_switched_to_credits_win_instead(self, env, monkeypatch):
+        """A revoked login used to outrank credits; the daemon then sat on it
+        forever answering active-usage-unknown."""
+        dead = Usage(None, None, None, None, False, error="login revoked — log in again: cswap codex login")
+        self._accounts(env, monkeypatch, {"a@x.com": _cr(100, 30000), "b@x.com": dead})
+        event = codex.auto_tick(env, 95.0, 99.0)
+        assert event["reason"] == "on-credits"
+        assert codex.email_of(codex.read_auth(codex.live_auth_path())) == "a@x.com"
+
+    def test_the_credits_pin_goes_when_the_week_resets(self, env, monkeypatch):
+        by = {"a@x.com": _cr(100, 30000), "b@x.com": _cr(100, 100)}
+        self._accounts(env, monkeypatch, by)
+        codex.auto_tick(env, 95.0, 99.0)
+        assert codex._credits_account(env) == "a@x.com"
+        by["a@x.com"] = _cr(3, 30000)               # a's week reset: on quota again
+        assert codex.auto_tick(env, 95.0, 99.0)["reason"] == "below-threshold"
+        assert codex._credits_account(env) is None
+
+    def test_usage_is_fetched_once_per_account_per_tick(self, env, monkeypatch):
+        calls: list[str] = []
+        self._accounts(env, monkeypatch, {"a@x.com": _cr(100, 30000), "b@x.com": _cr(100, 9000),
+                                          "c@x.com": _cr(100, 50000)}, calls)
+        codex.auto_tick(env, 95.0, 99.0)
+        assert sorted(calls) == ["a@x.com", "b@x.com", "c@x.com"]
+
+    def test_re_logging_the_live_account_replaces_the_live_tokens(self, env, monkeypatch):
+        """Otherwise the next sync copies the old (revoked) live tokens back."""
+        _login(_auth("a@x.com", refresh="old"))
+        codex.add(env)
+
+        def fake_call(argv, env):
+            with open(os.path.join(env["CODEX_HOME"], "auth.json"), "w") as fh:
+                json.dump(_auth("a@x.com", refresh="new"), fh)
+            return 0
+
+        monkeypatch.setattr(codex.shutil, "which", lambda name: "/bin/codex")
+        monkeypatch.setattr(codex.subprocess, "call", fake_call)
+        codex.login(env)
+        assert codex.read_auth(codex.live_auth_path())["tokens"]["refresh_token"] == "new"
+        codex.sync_live(env)
+        assert codex.read_auth(codex.stored_path(env, "a@x.com"))["tokens"]["refresh_token"] == "new"
+
+    @pytest.mark.parametrize("name", ["../x", "a/b@x.com", ".hidden", ""])
+    def test_an_account_name_cannot_leave_the_store(self, env, name):
+        with pytest.raises(codex.CodexError):
+            codex.stored_path(env, name)

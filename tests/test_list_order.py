@@ -49,3 +49,22 @@ def test_home_with_room_comes_first(temp_home):
                "3": UsageEntry(last_good=_usage(0))}
     ordered, _ = h.switcher._in_switch_order(rows, entries, h.switcher._get_sequence_data())
     assert [r[0] for r in ordered] == [2, 1, 3]
+
+
+def test_without_a_home_the_list_follows_best_most_headroom(temp_home):
+    """review 2026-10-05: the engine ranks by soonest reset only with a prefer
+    home (or consume-first); plain `best` takes the most headroom."""
+    from tests.test_autoswitch import _R_LATER, _R_SOON, _usage7
+    h = EngineHarness(temp_home)
+    for n, e in [(1, "a@x.com"), (2, "roomy@x.com"), (3, "soon@x.com")]:
+        h.seed(n, e)
+    h.make_live("a@x.com", 1)
+    rows = [_row(1, "a@x.com", True), _row(2, "roomy@x.com"), _row(3, "soon@x.com")]
+    entries = {
+        "1": UsageEntry(last_good=_usage(50)),
+        "2": UsageEntry(last_good=_usage7(5, 20, _R_LATER)),   # 80% room, resets later
+        "3": UsageEntry(last_good=_usage7(5, 60, _R_SOON)),    # 40% room, resets sooner
+    }
+    ordered, notes = h.switcher._in_switch_order(rows, entries, h.switcher._get_sequence_data())
+    assert [r[0] for r in ordered] == [1, 2, 3]
+    assert notes["2"] == "(next)"

@@ -71,6 +71,17 @@ class TestUnreadableHomeNearTheThreshold:
         assert self._tick(h, 91) is TickOutcome.SWITCHED
         assert h.active_number() == 2
 
+    def test_an_old_reading_does_not_push_the_home_off(self, temp_home):
+        """review 2026-10-05: a reading older than TRUST_MAX_AGE_S may predate a
+        weekly reset; it must not evict a home on a Keychain blip."""
+        h = owner_settings(temp_home, live=1)
+        assert h.tick_with_entries({
+            "1": UsageEntry(sentinel=USAGE_KEYCHAIN_UNAVAILABLE, last_good=_usage(94), age_s=7200.0),
+            "2": _entry_for(_usage(20), h.clock.now),
+            "3": _entry_for(_usage(50), h.clock.now),
+        }) is TickOutcome.NO_ACTION
+        assert h.active_number() == 1
+
     def test_last_reading_with_room_still_holds_the_pin(self, temp_home):
         h = owner_settings(temp_home, live=1)
         assert self._tick(h, 60) is TickOutcome.NO_ACTION
@@ -106,3 +117,25 @@ class TestUngatedSwitchScansAfterTheSwap:
         (event,) = switches(h)
         assert event.gate == "quiet"  # still measured, just after the swap
         assert event.timing["quietScanMs"] == 0
+
+    def test_the_label_scan_runs_after_the_switch_is_recorded(self, temp_home):
+        """review 2026-10-05: lastSwitchAt (the cooldown) and the drain2 marker
+        must be on disk before the transcript walk that only labels the event."""
+        import json as _json
+        h = owner_settings(temp_home, live=2)
+        seen = []
+        original_scan = mod.latest_session_activity_ts
+
+        def scan(*_a, **_k):
+            try:
+                seen.append(_json.loads(h.engine.state_path.read_text()).get("lastSwitchAt"))
+            except Exception:
+                seen.append(None)
+            return None
+
+        mod.latest_session_activity_ts = scan
+        try:
+            h.tick_with_usage({"1": _usage(100), "2": _usage(100), "3": _usage(10)})
+        finally:
+            mod.latest_session_activity_ts = original_scan
+        assert seen and seen[-1] is not None

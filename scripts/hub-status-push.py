@@ -61,6 +61,9 @@ def collect(tid):
     except subprocess.TimeoutExpired:
         doc["errors"]["host"] = "timed out after 90 s"
         return doc
+    except OSError as e:          # one machine's failure never drops the round
+        doc["errors"]["host"] = "could not run: %s" % e
+        return doc
     claude_txt, _, codex_txt = p.stdout.partition("@@CODEX@@")
     doc["claude"] = scrub(parse(claude_txt))
     doc["codex"] = scrub(parse(codex_txt))
@@ -74,6 +77,19 @@ def collect(tid):
 def owner_password():
     return subprocess.run(["security", "find-generic-password", "-s", "tgm-mockups-hub", "-a", "tgm", "-w"],
                           capture_output=True, text=True, check=True).stdout.strip()
+
+
+def previous_docs(token):
+    """The hub's current documents, so a half that failed this round keeps its
+    last good value instead of being overwritten with nothing."""
+    req = urllib.request.Request("%s/api/db?app=%s&since=0" % (HUB, APP),
+                                 headers={"Authorization": "Bearer " + token, "User-Agent": "cswap-hub-status/1"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return {d["id"]: d["body"] for d in json.load(r).get("docs", []) if d.get("col") == "status" and d.get("body")}
+    except Exception as e:  # noqa: BLE001 — best-effort; without it a failed half is sent as null
+        print(time.strftime("%F %T ") + "could not read previous documents: %s" % e, file=sys.stderr)
+        return {}
 
 
 def put(token, doc):
@@ -94,8 +110,14 @@ def main():
         print(json.dumps(docs, indent=1)[:4000])
         return 0
     token = owner_password()
+    prev = previous_docs(token)
     rc = 0
     for d in docs:
+        old = prev.get(d["host"]) or {}
+        for half in ("claude", "codex"):
+            if d[half] is None and old.get(half) is not None:
+                d[half] = old[half]
+                d.setdefault("stale", {})[half] = old.get("at")   # the page shows how old that half is
         if d["claude"] is None and d["codex"] is None:
             print(time.strftime("%F %T ") + "%s: nothing collected (%s) — its last document stays" % (d["host"], d["errors"]), file=sys.stderr)
             rc = 1

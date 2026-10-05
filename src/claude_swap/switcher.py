@@ -5288,8 +5288,10 @@ class ClaudeAccountSwitcher:
                     key = str(acc.get("number"))
                     acc["order"] = rank.get(key)
                     acc["note"] = notes.get(key)
-            except Exception:
-                pass
+            except Exception as e:
+                # Additive fields: the list still renders without them, but a
+                # silent miss here hid every ordering bug from the status page.
+                self._logger.debug("list --json: switch order unavailable: %r", e, exc_info=True)
             return payload
 
         seq_data = self._get_sequence_data() or {}
@@ -5382,14 +5384,15 @@ class ClaudeAccountSwitcher:
         slot order, so no consumer of it changes.
         """
         from claude_swap.autoswitch import (
-            HOME_RETURN_MIN_HEADROOM_PCT,
             MIN_USEFUL_LIFE_PCT,
+            _home_return_margin,
             _seven_day_reset_ts,
         )
 
         try:
             settings = load_settings(self.backup_dir)
-        except Exception:
+        except Exception as e:
+            self._logger.debug("list order: settings unreadable, slot order kept: %r", e)
             return accounts_info, {}
         models = parse_model_names(settings.model)
 
@@ -5398,15 +5401,17 @@ class ClaudeAccountSwitcher:
                 return None
             try:
                 return self.resolve_account(ident)[0]
-            except Exception:
+            except Exception as e:
+                self._logger.debug("list order: cannot resolve %r: %r", ident, e)
                 return None
 
         home = slot_of(settings.home_account) if settings.home_mode == "prefer" else None
         reserve = slot_of(settings.reserve_account)
-        home_margin = max(
-            HOME_RETURN_MIN_HEADROOM_PCT,
-            100.0 - settings.threshold + settings.hysteresis_pct,
-        )
+        home_margin = _home_return_margin(settings)
+        # The engine ranks by soonest weekly reset only in prefer mode with a
+        # home (and under consume-first); plain `best` takes the most headroom.
+        # The list must say what the daemon will do, not one fixed rule.
+        by_reset = bool(home) or getattr(settings, "strategy", "best") == "consume-first"
 
         active, ranked, reserve_rows, unusable = [], [], [], []
         notes: dict[str, str] = {}
@@ -5456,7 +5461,7 @@ class ClaudeAccountSwitcher:
                         life < MIN_USEFUL_LIFE_PCT,
                         reset if reset is not None else float("inf"),
                         -life,
-                    ),
+                    ) if by_reset else (first, -life),
                     row,
                 ))
         ranked.sort(key=lambda item: item[0])

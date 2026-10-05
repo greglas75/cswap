@@ -133,3 +133,24 @@ class TestScanCache:
             assert len(calls) == 3
         finally:
             mod.latest_session_activity_ts = original
+
+
+class TestEarlyExitVerdict:
+    def test_a_slow_early_exit_scan_still_reads_as_active(self, temp_home):
+        """review 2026-10-05: the scan stops at the FIRST file inside the window,
+        which may be the oldest one there; aged by the scan's own duration it
+        flipped the verdict to quiet while sessions were writing."""
+        h = _harness(temp_home, live=1, strategy="best", threshold=97.0)
+        import claude_swap.autoswitch as mod
+
+        def slow_scan(_d, *, stop_at=None):
+            h.clock.advance(20)          # a 20 s walk on a loaded tree
+            return stop_at               # the oldest write still inside the window
+
+        original = mod.latest_session_activity_ts
+        mod.latest_session_activity_ts = slow_scan
+        try:
+            quiet, _ = h.engine._session_quiet(force=True)
+        finally:
+            mod.latest_session_activity_ts = original
+        assert quiet is False

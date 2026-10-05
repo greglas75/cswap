@@ -77,6 +77,7 @@ from claude_swap.adopt_snapshot import default_adopt_snapshot
 from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.usage_store import (
     PERMANENT_AUTH_ERRORS,
+    TRUST_MAX_AGE_S,
     due_candidate,
     plan_oversleeps_interval,
 )
@@ -1457,10 +1458,18 @@ class AutoSwitchEngine:
         # could spend the whole per-tick budget on the one account the switch
         # is built to avoid.
         reserve = self._reserve_slot(self.settings)
+        # Disabled slots are not rotation candidates: freshening them would
+        # rotate a refresh token (and risk a quarantine) the switch never uses.
+        try:
+            switchable = set(self.switcher.switchable_account_numbers())
+        except Exception as e:  # noqa: BLE001 — best-effort, never breaks a tick
+            _logger.debug("pre-freshen: switchable slots unreadable: %r", e)
+            switchable = set(headroom)
         pending = sorted(
             (
                 n for n, h in headroom.items()
                 if n != current and h is not None and h > 0 and n not in quarantined
+                and n in switchable
             ),
             key=lambda n: (n == reserve, -(headroom.get(n) or 0.0)),
         )
@@ -1921,7 +1930,11 @@ class AutoSwitchEngine:
                     {current: last.last_good}, self._models, self.settings.weekly_shift
                 )
                 .get(current)
+                # Only a reading young enough to still describe this window:
+                # a days-old 85% from before a weekly reset would push a
+                # healthy home off its pin on the first Keychain blip.
                 if last is not None and last.last_good is not None
+                and (last.age_s is None or last.age_s <= TRUST_MAX_AGE_S)
                 else None
             )
             # The band is the same one the return refuses to come back into
@@ -3266,9 +3279,11 @@ class AutoSwitchEngine:
                 return TickOutcome.NO_ACTION
 
             if not gated:
-                # Landed; now the label (see above). ``quiet_s`` stays the
-                # pre-swap cost, which for an ungated trigger is zero.
-                quiet, _ = self._session_quiet(force=True)
+                # The label comes AFTER the switch is recorded (below): at the
+                # limit the walk never exits early — tens of seconds, 350 s
+                # measured on a loaded host — and it used to run here, before
+                # lastSwitchAt, the cooldown and the drain2 marker were written.
+                quiet = False   # provisional until the label scan below
             state["schemaVersion"] = STATE_SCHEMA_VERSION
             state["lastSwitchAt"] = self.clock()
             state["lastSwitchTo"] = number
@@ -3291,6 +3306,13 @@ class AutoSwitchEngine:
                 )
             except OSError as e:
                 _logger.debug("drain2 switch marker write failed: %r", e)
+            if not gated:
+                # Now only a label: everything that matters is on disk. The
+                # cached answer is enough when there is one (no force).
+                quiet, _ = self._session_quiet()
+                if quiet:
+                    state["lastSwitchGate"] = "quiet"
+                    atomic_write_json(self.state_path, state)
 
         timing = dict(pre_timing)
         timing["quietScanMs"] = int(quiet_s * 1000)
@@ -4765,9 +4787,16 @@ class AutoSwitchEngine:
             and 0 <= now - cached[0] < SESSION_SCAN_CACHE_S
         ):
             return cached[1]
-        latest = latest_session_activity_ts(
-            self.claude_projects_dir, stop_at=now - QUIET_WINDOW_S
-        )
+        stop_at = now - QUIET_WINDOW_S
+        latest = latest_session_activity_ts(self.claude_projects_dir, stop_at=stop_at)
+        if latest is not None and latest >= stop_at:
+            # An early exit proves only "something was written inside the
+            # window" — the file it stopped at may be the OLDEST such write.
+            # Ageing that value by the scan's own duration (seconds to
+            # minutes on a loaded tree) or by the cache's lifetime could flip
+            # the verdict to quiet while a session wrote a second ago, so the
+            # answer is pinned to the scan's end: active as of then.
+            latest = max(latest, self.clock())
         self._session_scan_cache = (now, latest)
         return latest
 
