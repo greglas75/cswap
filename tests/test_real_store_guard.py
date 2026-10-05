@@ -24,21 +24,32 @@ def fake_real_home(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("email,expected", [
-    ("a@x.com", True), ("b@example.com", True), ("c@example.org", True), ("d@host.test", True),
+    ("b@example.com", True), ("c@example.org", True), ("d@host.test", True), ("u@localhost", True),
     ("e@mail.example.com", True), ("tatiana@tgmresearch.com", False), ("greg.laski@gmail.com", False),
-    ("", False), (None, False), (123, False), ("someone@notx.com", False),
+    ("a@x.com", False),   # a real mail domain: blocked only in a test context
+    ("", False), (None, False), (123, False),
 ])
 def test_test_domains(email, expected):
     assert is_test_email(email) is expected
 
 
-def test_refused_under_the_real_home_allowed_elsewhere(fake_real_home, tmp_path):
+def test_in_a_test_context_nothing_may_be_written_under_the_real_home(fake_real_home, tmp_path):
+    """This IS a test context (pytest): even a real-looking account is refused."""
+    assert real_store_guard.in_test_context()
+    for path in (fake_real_home / ".claude-swap-backup" / "sequence.json",
+                 fake_real_home / ".local" / "share" / "claude-swap",
+                 fake_real_home / ".claude.json"):
+        with pytest.raises(RealStoreGuardError):
+            refuse_test_identity("tatiana@tgmresearch.com", path)
+    refuse_test_identity("a@x.com", tmp_path / "scratch" / "sequence.json")   # scratch: fine
+
+
+def test_outside_tests_only_reserved_domains_are_refused(fake_real_home, monkeypatch):
+    monkeypatch.setattr(real_store_guard, "in_test_context", lambda: False)
     with pytest.raises(RealStoreGuardError):
-        refuse_test_identity("a@x.com", fake_real_home / ".claude-swap-backup" / "sequence.json")
-    with pytest.raises(RealStoreGuardError):
-        refuse_test_identity("a@x.com", fake_real_home / ".local" / "share" / "claude-swap")
-    refuse_test_identity("a@x.com", tmp_path / "scratch" / "sequence.json")          # scratch: fine
-    refuse_test_identity("tatiana@tgmresearch.com", fake_real_home / ".claude-swap-backup")  # real: fine
+        refuse_test_identity("b@example.com", fake_real_home / ".claude-swap-backup")
+    refuse_test_identity("someone@x.com", fake_real_home / ".claude-swap-backup")       # real domain
+    refuse_test_identity("tatiana@tgmresearch.com", fake_real_home / ".claude-swap-backup")
 
 
 def test_the_switcher_will_not_seed_a_fixture_into_the_real_store(fake_real_home, temp_home):
