@@ -80,8 +80,9 @@ def owner_password():
 
 
 def previous_docs(token):
-    """The hub's current documents, so a half that failed this round keeps its
-    last good value instead of being overwritten with nothing."""
+    """The hub's current documents (None if they could not be read), so a half
+    that failed this round keeps its last good value instead of being
+    overwritten with nothing."""
     req = urllib.request.Request("%s/api/db?app=%s&since=0" % (HUB, APP),
                                  headers={"Authorization": "Bearer " + token, "User-Agent": "cswap-hub-status/1"})
     try:
@@ -89,7 +90,7 @@ def previous_docs(token):
             return {d["id"]: d["body"] for d in json.load(r).get("docs", []) if d.get("col") == "status" and d.get("body")}
     except Exception as e:  # noqa: BLE001 — best-effort; without it a failed half is sent as null
         print(time.strftime("%F %T ") + "could not read previous documents: %s" % e, file=sys.stderr)
-        return {}
+        return None
 
 
 def put(token, doc):
@@ -118,11 +119,19 @@ def main():
               file=sys.stderr)
         return 1
     prev = previous_docs(token)
+    prev_known = prev is not None
+    prev = prev or {}
     rc = 0
     for d in docs:
         old = prev.get(d["host"]) or {}
         if d["claude"] is None and d["codex"] is None:
             print(time.strftime("%F %T ") + "%s: nothing collected (%s) — its last document stays" % (d["host"], d["errors"]), file=sys.stderr)
+            rc = 1
+            continue
+        if not prev_known and (d["claude"] is None or d["codex"] is None):
+            # Without the previous document a failed half would be sent as
+            # null over the good one on the hub: skip this host this round.
+            print(time.strftime("%F %T ") + "%s: partial and previous unknown — not sent" % d["host"], file=sys.stderr)
             rc = 1
             continue
         for half in ("claude", "codex"):

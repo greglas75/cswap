@@ -474,3 +474,38 @@ class TestCodexListJson:
         assert rows["a@x.com"]["active"] and rows["b@x.com"]["next"]
         assert rows["res@x.com"]["held"] and not rows["res@x.com"]["exhausted"]
         assert not rows["dead@x.com"]["exhausted"] and rows["dead@x.com"]["error"].startswith("login revoked")
+
+
+class TestReviewPass3:
+    """Third round of zuvo:review 2026-10-05 findings."""
+
+    def test_a_revoked_live_login_is_left_not_waited_on(self, env, monkeypatch):
+        revoked = Usage(None, None, None, None, False, error="login revoked — log in again: cswap codex login")
+        by = {"a@x.com": revoked, "b@x.com": _usage(20)}
+        for e in ("b@x.com", "a@x.com"):
+            _login(_auth(e))
+            codex.add(env)
+        monkeypatch.setattr(codex, "fetch_usage", lambda auth, timeout=20.0: by[codex.email_of(auth)])
+        event = codex.auto_tick(env, 95.0, 99.0)
+        assert (event["event"], event["to"]) == ("codex-switch", "b@x.com")
+
+    def test_switch_never_replaces_an_api_key_login(self, env):
+        _login(_auth("b@x.com"))
+        codex.add(env)
+        codex.live_auth_path().write_text(json.dumps({"OPENAI_API_KEY": "sk-test", "tokens": None}))
+        with pytest.raises(codex.CodexError, match="API key"):
+            codex.switch(env, "b@x.com")
+
+    def test_unlimited_credits_count_without_a_balance(self):
+        u = codex.parse_usage({
+            "rate_limit": {"primary_window": {"used_percent": 100, "limit_window_seconds": 604800}},
+            "credits": {"has_credits": True, "unlimited": True, "balance": None},
+        })
+        assert u.on_credits_ok()
+
+    def test_the_more_used_of_two_weekly_windows_binds(self):
+        u = codex.parse_usage({"rate_limit": {
+            "primary_window": {"used_percent": 80, "limit_window_seconds": 604800, "reset_at": 7},
+            "secondary_window": {"used_percent": 10, "limit_window_seconds": 604800, "reset_at": 9},
+        }})
+        assert u.weekly_pct == 80

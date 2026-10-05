@@ -3308,11 +3308,15 @@ class AutoSwitchEngine:
                 _logger.debug("drain2 switch marker write failed: %r", e)
             if not gated:
                 # Now only a label: everything that matters is on disk. The
-                # cached answer is enough when there is one (no force).
+                # cached answer is enough when there is one (no force), and a
+                # failed label write must not turn a landed switch into an error.
                 quiet, _ = self._session_quiet()
                 if quiet:
                     state["lastSwitchGate"] = "quiet"
-                    atomic_write_json(self.state_path, state)
+                    try:
+                        atomic_write_json(self.state_path, state)
+                    except OSError as e:
+                        _logger.warning("switch landed; gate label not saved: %r", e)
 
         timing = dict(pre_timing)
         timing["quietScanMs"] = int(quiet_s * 1000)
@@ -4797,7 +4801,9 @@ class AutoSwitchEngine:
             # the verdict to quiet while a session wrote a second ago, so the
             # answer is pinned to the scan's end: active as of then.
             latest = max(latest, self.clock())
-        self._session_scan_cache = (now, latest)
+        # Keyed on when the scan ENDED: keyed on its start, a scan slower than
+        # the cache lifetime expired on arrival and the next ask walked again.
+        self._session_scan_cache = (self.clock(), latest)
         return latest
 
     def _session_quiet(self, *, force: bool = False) -> tuple[bool, str]:

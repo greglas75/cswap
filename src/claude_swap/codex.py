@@ -244,13 +244,17 @@ class Usage:
     credits_balance: float | None = None
     # Credits are usable: the account has them and no spend cap stopped them.
     credits_usable: bool = False
+    credits_unlimited: bool = False
 
     def on_credits_ok(self) -> bool:
         return (
             self.error is None
             and self.credits_usable
-            and (self.credits_balance or 0.0) >= MIN_CREDITS
+            and (self.credits_unlimited or (self.credits_balance or 0.0) >= MIN_CREDITS)
         )
+
+    def revoked(self) -> bool:
+        return self.error is not None and self.error.startswith("login revoked")
 
     def over(self, threshold: float, weekly_threshold: float) -> bool:
         if self.limit_reached:
@@ -292,9 +296,13 @@ def parse_usage(payload: dict) -> Usage:
         if not isinstance(window, dict):
             continue
         length = window.get("limit_window_seconds") or 0
+        used = window.get("used_percent") if isinstance(window.get("used_percent"), (int, float)) else -1
         if length and length <= SHORT_WINDOW_MAX_S:
-            short = window
-        else:
+            if short is None or used > (short.get("used_percent") or -1):
+                short = window
+        elif weekly is None or used > (weekly.get("used_percent") or -1):
+            # Two weekly-length windows: the more used one binds (a later one
+            # used to overwrite the first whatever its value).
             weekly = window
 
     def pct(w: dict | None) -> float | None:
@@ -319,6 +327,7 @@ def parse_usage(payload: dict) -> Usage:
     return Usage(
         credits_balance=balance,
         credits_usable=usable,
+        credits_unlimited=bool(credits.get("unlimited")),
         weekly_pct=pct(weekly),
         weekly_reset_at=reset(weekly),
         short_pct=pct(short),
@@ -426,7 +435,10 @@ def _switch(backup_root: Path, email: str) -> str | None:
         raise CodexError(f"{email} is not stored — log in with it and run: cswap codex add")
     if email_of(target) != email:
         raise CodexError(f"the stored copy for {email} belongs to {email_of(target) or 'no ChatGPT account'}")
-    live_email = email_of(read_auth(live_auth_path()))
+    live = read_auth(live_auth_path())
+    live_email = email_of(live)
+    if live is not None and live_email is None:
+        raise CodexError("the live Codex login is not a ChatGPT account (API key?) — switching would replace it")
     if live_email is not None and live_email != email and not stored_path(backup_root, live_email).exists():
         # Overwriting it would lose that login for good (its refresh token
         # exists nowhere else).
@@ -481,13 +493,15 @@ def _auto_tick(
     if current is None or current not in emails:
         return {"event": "codex-no-switch", "reason": "live-login-not-stored", "live": current}
     live_usage = usages_for(backup_root, [current], current)[current]
-    if live_usage.error is not None:
+    if live_usage.error is not None and not live_usage.revoked():
         return {"event": "codex-no-switch", "reason": "active-usage-unknown", "detail": live_usage.error}
+    # A revoked live login never comes back by waiting (every session on it is
+    # failing): treat it as spent and move on, below.
     reserve = reserve.lower() if reserve else None
     # The reserve is left as soon as its week drops under the floor, not only
     # at the switch threshold — and an ordinary account always beats it.
     on_spent_reserve = current == reserve and reserve_spent(live_usage, reserve_min_life)
-    if not live_usage.over(threshold, weekly_threshold) and not on_spent_reserve:
+    if not live_usage.revoked() and not live_usage.over(threshold, weekly_threshold) and not on_spent_reserve:
         # Back under the limit (its week reset): it no longer runs on credits,
         # and a pin left behind would skip the biggest-balance choice next time.
         if not dry_run and _credits_account(backup_root) == current:
