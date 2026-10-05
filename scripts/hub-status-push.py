@@ -10,8 +10,15 @@ Runs on the Mac every minute (LaunchAgent com.greglas.cswap-hub-status): the hub
 stays in the Mac's keychain and never goes to a host. A machine that does not answer keeps
 its last document; the page shows how old each one is.
 
-    scripts/hub-status-push.py            # one round
-    scripts/hub-status-push.py --print    # collect and print, send nothing
+The same round also shares usage readings (`cswap import-usage`): the Mac's Claude list goes
+to every host with a hold of SHARE_HOLD_S, so the hosts stop polling the accounts the Mac
+already polls (four machines polling one account hit the usage endpoint's 429 budget), and
+each host's list comes back to the Mac without a hold. While the Mac sleeps no hold is
+renewed, and the hosts poll for themselves again once it lapses.
+
+    scripts/hub-status-push.py               # one round
+    scripts/hub-status-push.py --print       # collect and print, send nothing, share nothing
+    scripts/hub-status-push.py --no-share    # send to the hub, share no readings
 """
 import concurrent.futures
 import json
@@ -25,12 +32,21 @@ APP = "claude-account-switcher--cswap-guide"
 BOTH = "cswap list --json 2>/dev/null; echo '@@CODEX@@'; cswap codex list --json 2>/dev/null"
 SSH = ["ssh", "-o", "ConnectTimeout=15", "-o", "BatchMode=yes"]
 TARGETS = {
-    # id: (label, argv producing "<claude json>@@CODEX@@<codex json>")
-    "mac": ("Mac", ["bash", "-lc", BOTH]),
-    "ryzen-dev": ("ryzen-dev", SSH + ["ryzen-dev", "bash -lc " + json.dumps(BOTH)]),
-    "ryzen-tf": ("ryzen-tf (CI)", SSH + ["ryzen", "sudo -u gha -H bash -lc " + json.dumps(BOTH)]),
-    "waw-tf": ("waw-tf (CI)", SSH + ["waw", "sudo -u gha -H bash -lc " + json.dumps(BOTH)]),
+    # id: (label, cmd -> argv running a shell command as that machine's cswap user)
+    "mac": ("Mac", lambda cmd: ["bash", "-lc", cmd]),
+    "ryzen-dev": ("ryzen-dev", lambda cmd: SSH + ["ryzen-dev", "bash -lc " + json.dumps(cmd)]),
+    "ryzen-tf": ("ryzen-tf (CI)", lambda cmd: SSH + ["ryzen", "sudo -u gha -H bash -lc " + json.dumps(cmd)]),
+    "waw-tf": ("waw-tf (CI)", lambda cmd: SSH + ["waw", "sudo -u gha -H bash -lc " + json.dumps(cmd)]),
 }
+# Three rounds of the one-minute LaunchAgent: one missed round does not hand
+# polling back to the hosts, a sleeping Mac does within three minutes.
+SHARE_HOLD_S = 180
+# A held row must be one somebody measured lately. The Mac's list also carries
+# readings it adopted from a host; sent back with a hold they would stop that
+# host polling while nobody else does, renewed every round for up to the
+# store's one-hour trust ceiling. Past this age a row goes without a hold, so
+# the hold lapses and the host polls again: at most about 8 minutes stale.
+SHARE_MAX_AGE_S = 300
 DROP = {"organizationUuid", "organizationName"}   # not needed on the page
 
 
@@ -54,10 +70,10 @@ def scrub(o):
 
 
 def collect(tid):
-    label, argv = TARGETS[tid]
+    label, run_as = TARGETS[tid]
     doc = {"host": tid, "label": label, "at": time.time(), "claude": None, "codex": None, "errors": {}}
     try:
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=90)
+        p = subprocess.run(run_as(BOTH), capture_output=True, text=True, timeout=90)
     except subprocess.TimeoutExpired:
         doc["errors"]["host"] = "timed out after 90 s"
         return doc
@@ -65,13 +81,48 @@ def collect(tid):
         doc["errors"]["host"] = "could not run: %s" % e
         return doc
     claude_txt, _, codex_txt = p.stdout.partition("@@CODEX@@")
-    doc["claude"] = scrub(parse(claude_txt))
+    # Unscrubbed for import-usage, which matches rows by organizationUuid;
+    # main() drops it before anything goes to the hub.
+    doc["raw_claude"] = parse(claude_txt)
+    doc["claude"] = scrub(doc["raw_claude"])
     doc["codex"] = scrub(parse(codex_txt))
     if doc["claude"] is None:
         doc["errors"]["claude"] = (p.stderr.strip().splitlines() or ["no output from cswap list --json"])[-1][:300]
     if doc["codex"] is None:
         doc["errors"]["codex"] = "no output from cswap codex list --json (no Codex accounts, or an older cswap)"
     return doc
+
+
+def import_into(tid, raw, hold_s):
+    """Hand one machine's `cswap list --json` to another machine's usage store."""
+    cmd = "cswap import-usage -" + (" --hold %d" % hold_s if hold_s else "")
+    try:
+        p = subprocess.run(TARGETS[tid][1](cmd), input=json.dumps(raw), capture_output=True, text=True, timeout=60)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return "%s: %s" % (tid, e)
+    if p.returncode != 0:
+        return "%s: %s" % (tid, (p.stderr.strip().splitlines() or ["exit %d" % p.returncode])[-1][:300])
+    return None
+
+
+def share_usage(docs):
+    """Mac readings to every host (held); each host's readings to the Mac (not held)."""
+    raws = {d["host"]: d["raw_claude"] for d in docs if isinstance(d.get("raw_claude"), dict)}
+    jobs = []
+    if "mac" in raws:
+        fresh = dict(raws["mac"], accounts=[
+            a for a in raws["mac"].get("accounts") or []
+            if isinstance(a, dict) and isinstance(a.get("usageAgeSeconds"), (int, float))
+            and a["usageAgeSeconds"] <= SHARE_MAX_AGE_S])
+        # Only machines that answered this round: an unreachable one would
+        # just burn another ssh timeout.
+        jobs += [(tid, fresh, SHARE_HOLD_S) for tid in raws if tid != "mac" and fresh["accounts"]]
+        jobs += [("mac", raw, 0) for tid, raw in raws.items() if tid != "mac"]
+    with concurrent.futures.ThreadPoolExecutor(max(1, len(jobs))) as ex:
+        failures = [f for f in ex.map(lambda j: import_into(*j), jobs) if f]
+    for f in failures:
+        print(time.strftime("%F %T ") + "import-usage failed on " + f, file=sys.stderr)
+    return not failures
 
 
 def owner_password():
@@ -107,6 +158,9 @@ def main():
     dry = "--print" in sys.argv
     with concurrent.futures.ThreadPoolExecutor(len(TARGETS)) as ex:
         docs = list(ex.map(collect, TARGETS))
+    shared = True if dry or "--no-share" in sys.argv else share_usage(docs)
+    for d in docs:
+        d.pop("raw_claude", None)   # carries organizationUuid: never to the hub
     if dry:
         print(json.dumps(docs, indent=1)[:4000])
         return 0
@@ -146,7 +200,7 @@ def main():
         except Exception as e:  # one machine's failure never stops the others
             print(time.strftime("%F %T ") + "%s: send failed: %s" % (d["host"], e), file=sys.stderr)
             rc = 1
-    return rc
+    return rc if shared else 1
 
 
 if __name__ == "__main__":
