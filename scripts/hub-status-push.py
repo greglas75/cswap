@@ -97,13 +97,13 @@ def main():
     rc = 0
     for d in docs:
         if d["claude"] is None and d["codex"] is None:
-            print("%s: nothing collected (%s) — its last document stays" % (d["host"], d["errors"]), file=sys.stderr)
+            print(time.strftime("%F %T ") + "%s: nothing collected (%s) — its last document stays" % (d["host"], d["errors"]), file=sys.stderr)
             rc = 1
             continue
         try:
             put(token, d)
         except Exception as e:  # one machine's failure never stops the others
-            print("%s: send failed: %s" % (d["host"], e), file=sys.stderr)
+            print(time.strftime("%F %T ") + "%s: send failed: %s" % (d["host"], e), file=sys.stderr)
             rc = 1
     return rc
 
