@@ -177,3 +177,34 @@ class TestReserveSettingsClamp:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"autoswitch": {"reserveAccount": "a@example.com"}}))
         assert load_settings(tmp_path).reserve_account == "a@example.com"
+
+
+class TestActiveReserveHandsOver:
+    """Owner, 2026-10-05: the reserve must keep its week. The floor only gated
+    LANDING on it, so a reserve that was already live (a manual switch, or the
+    last account standing earlier) burned on below the floor while healthy
+    peers sat idle."""
+
+    def test_a_live_reserve_steps_aside_for_a_healthy_peer(self, temp_home):
+        """Even with more headroom than the peer: the reserve is not a resting
+        place, only the account of last resort."""
+        h = reserved(temp_home, live=3)
+        assert h.tick_with_usage({
+            "1": _usage(100), "2": _usage(70), "3": _usage(10),
+        }) is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+
+    def test_with_nobody_to_take_over_it_stays_without_an_alert(self, temp_home):
+        h = reserved(temp_home, live=3)
+        assert h.tick_with_usage({
+            "1": _usage(100), "2": _usage(100), "3": _usage(10),
+        }) is TickOutcome.NO_ACTION
+        assert h.active_number() == 3
+        assert [e.reason for e in h.events if isinstance(e, NoSwitchEvent)] == ["reserve-active"]
+
+    def test_an_ordinary_live_account_under_the_threshold_still_stays(self, temp_home):
+        h = reserved(temp_home, live=2)
+        assert h.tick_with_usage({
+            "1": _usage(0), "2": _usage(70), "3": _usage(0),
+        }) is TickOutcome.NO_ACTION
+        assert h.active_number() == 2

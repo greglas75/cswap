@@ -2089,6 +2089,22 @@ class AutoSwitchEngine:
                     )
 
         early = False
+        # Sitting on the reserve is never a resting state (owner, 2026-10-05:
+        # "50% of its week has to stay"): the reserve is only for when nobody
+        # else has room, and the floor only ever gated LANDING on it, so once
+        # active it burned on below the floor. Treat it as over the threshold:
+        # the proactive path hands over to any healthy account, and with none
+        # it stays put quietly (below, no alert). The ranking judges peers
+        # against the threshold line rather than the reserve's own headroom,
+        # so a reserve with more room than a healthy peer still steps aside.
+        reserve = self._reserve_slot(settings)
+        on_reserve = reserve is not None and current == reserve
+
+        def rank_headroom(h: float | None) -> float | None:
+            if on_reserve and h is not None:
+                return min(h, 100.0 - settings.threshold)
+            return h
+
         if active_headroom is not None:
             self._unhealthy_ticks = 0
             self._idle_hold_since = None
@@ -2114,7 +2130,7 @@ class AutoSwitchEngine:
                     base_h = base_headroom.get(current)
                     if base_h is not None:
                         utilization = 100.0 - base_h
-                if utilization < settings.threshold:
+                if utilization < settings.threshold and not on_reserve:
                     early = self._early_swap_fires(utilization, settings, state)
                     if early:
                         # The park is small enough that leaving NOW is cheaper
@@ -2291,7 +2307,7 @@ class AutoSwitchEngine:
             headroom=headroom,
             base_headroom=base_headroom,
             current=current,
-            active_headroom=active_headroom,
+            active_headroom=rank_headroom(active_headroom),
             settings=settings,
             now=self.clock(),
             early=early,
@@ -2327,7 +2343,7 @@ class AutoSwitchEngine:
                 headroom=headroom,
                 base_headroom=base_headroom,
                 current=current,
-                active_headroom=active_headroom,
+                active_headroom=rank_headroom(active_headroom),
                 settings=settings,
                 now=self.clock(),
                 early=early,
@@ -2373,6 +2389,29 @@ class AutoSwitchEngine:
                 # ``_drain2_reconcile``: the gate stops refreshing the
                 # record, so it goes stale and is closed with a resume.
                 return TickOutcome.BLOCKED
+            if (
+                on_reserve
+                and trigger == "proactive"
+                and active_headroom is not None
+                and 100.0 - active_headroom < settings.threshold
+            ):
+                # Leaving the reserve is voluntary while it is under the
+                # threshold: nobody with room to take over is what the reserve
+                # is for, not a block — no last-account alert, no long wait.
+                # Past the threshold the ordinary paths below run.
+                self._emit(
+                    NoSwitchEvent(
+                        reason="reserve-active",
+                        detail=(
+                            f"Account-{current} is the reserve; no other "
+                            "account has room to take over yet"
+                        ),
+                    )
+                )
+                self._abandon_switch_intent(
+                    trigger, "no account to take over from the reserve", alert=False
+                )
+                return TickOutcome.NO_ACTION
             if early:
                 # Early opportunism that finds nothing better simply stays
                 # put: none of the must-move artifacts — the last-account
