@@ -22,6 +22,7 @@ renewed, and the hosts poll for themselves again once it lapses.
 """
 import concurrent.futures
 import json
+import shlex
 import subprocess
 import sys
 import time
@@ -33,10 +34,12 @@ BOTH = "cswap list --json 2>/dev/null; echo '@@CODEX@@'; cswap codex list --json
 SSH = ["ssh", "-o", "ConnectTimeout=15", "-o", "BatchMode=yes"]
 TARGETS = {
     # id: (label, cmd -> argv running a shell command as that machine's cswap user)
+    # shlex.quote, not json.dumps: the remote login shell expands $ and ` inside
+    # double quotes before bash -lc ever sees the command.
     "mac": ("Mac", lambda cmd: ["bash", "-lc", cmd]),
-    "ryzen-dev": ("ryzen-dev", lambda cmd: SSH + ["ryzen-dev", "bash -lc " + json.dumps(cmd)]),
-    "ryzen-tf": ("ryzen-tf (CI)", lambda cmd: SSH + ["ryzen", "sudo -u gha -H bash -lc " + json.dumps(cmd)]),
-    "waw-tf": ("waw-tf (CI)", lambda cmd: SSH + ["waw", "sudo -u gha -H bash -lc " + json.dumps(cmd)]),
+    "ryzen-dev": ("ryzen-dev", lambda cmd: SSH + ["ryzen-dev", "bash -lc " + shlex.quote(cmd)]),
+    "ryzen-tf": ("ryzen-tf (CI)", lambda cmd: SSH + ["ryzen", "sudo -u gha -H bash -lc " + shlex.quote(cmd)]),
+    "waw-tf": ("waw-tf (CI)", lambda cmd: SSH + ["waw", "sudo -u gha -H bash -lc " + shlex.quote(cmd)]),
 }
 # Three rounds of the one-minute LaunchAgent: one missed round does not hand
 # polling back to the hosts, a sleeping Mac does within three minutes.
@@ -105,21 +108,37 @@ def import_into(tid, raw, hold_s):
     return None
 
 
+def _measured_lately(row):
+    age = row.get("usageAgeSeconds") if isinstance(row, dict) else None
+    # bool is an int; a negative age is a clock-skewed reading, not a fresh one.
+    return isinstance(age, (int, float)) and not isinstance(age, bool) and 0 <= age <= SHARE_MAX_AGE_S
+
+
 def share_usage(docs):
-    """Mac readings to every host (held); each host's readings to the Mac (not held)."""
+    """Mac readings to every host (held); each host's readings to the Mac (not held).
+
+    Only machines that answered this round take part: an unreachable one would
+    just burn another ssh timeout. Jobs aimed at one machine run one after
+    another, so a store never has two importers at once.
+    """
     raws = {d["host"]: d["raw_claude"] for d in docs if isinstance(d.get("raw_claude"), dict)}
-    jobs = []
+    jobs = {}
     if "mac" in raws:
-        fresh = dict(raws["mac"], accounts=[
-            a for a in raws["mac"].get("accounts") or []
-            if isinstance(a, dict) and isinstance(a.get("usageAgeSeconds"), (int, float))
-            and a["usageAgeSeconds"] <= SHARE_MAX_AGE_S])
-        # Only machines that answered this round: an unreachable one would
-        # just burn another ssh timeout.
-        jobs += [(tid, fresh, SHARE_HOLD_S) for tid in raws if tid != "mac" and fresh["accounts"]]
-        jobs += [("mac", raw, 0) for tid, raw in raws.items() if tid != "mac"]
+        fresh = dict(raws["mac"], accounts=[a for a in raws["mac"].get("accounts") or [] if _measured_lately(a)])
+        if fresh["accounts"]:
+            for tid in raws:
+                if tid != "mac":
+                    jobs.setdefault(tid, []).append((fresh, SHARE_HOLD_S))
+    # Host readings reach the Mac even when the Mac's own list failed this round.
+    for tid, raw in raws.items():
+        if tid != "mac":
+            jobs.setdefault("mac", []).append((raw, 0))
+
+    def run(tid):
+        return [f for f in (import_into(tid, raw, hold) for raw, hold in jobs[tid]) if f]
+
     with concurrent.futures.ThreadPoolExecutor(max(1, len(jobs))) as ex:
-        failures = [f for f in ex.map(lambda j: import_into(*j), jobs) if f]
+        failures = [f for fs in ex.map(run, jobs) for f in fs]
     for f in failures:
         print(time.strftime("%F %T ") + "import-usage failed on " + f, file=sys.stderr)
     return not failures
