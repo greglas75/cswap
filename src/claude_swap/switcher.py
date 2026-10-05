@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from claude_swap import macos_keychain
+from claude_swap.real_store_guard import refuse_test_identity
 
 from claude_swap.exceptions import (
     AccountNotFoundError,
@@ -427,6 +428,12 @@ class ClaudeAccountSwitcher:
 
     def _write_json(self, path: Path, data: dict) -> None:
         """Write JSON file with validation."""
+        if path == self.sequence_file:
+            # A test helper pointed at the real home must not land its fixture
+            # accounts in the real sequence (2026-10-05, see real_store_guard).
+            for acct in (data.get("accounts") or {}).values():
+                if isinstance(acct, dict):
+                    refuse_test_identity(acct.get("email"), path)
         content = json.dumps(data, indent=2)
 
         # Write to temp file first
@@ -604,6 +611,7 @@ class ClaudeAccountSwitcher:
         so ``_post_backup_write`` (the session-invalidation chokepoint) runs exactly
         once and only after a successful write.
         """
+        refuse_test_identity(email, self.backup_dir)
         self._store._write_account_credentials(account_num, email, credentials)
         self._post_backup_write(account_num, email)
 
@@ -685,6 +693,7 @@ class ClaudeAccountSwitcher:
         self, account_num: str, email: str, config: str
     ) -> None:
         """Write account config to backup."""
+        refuse_test_identity(email, self.configs_dir)
         config_file = self.configs_dir / f".claude-config-{account_num}-{email}.json"
         config_file.write_text(config, encoding="utf-8")
         if sys.platform != "win32":

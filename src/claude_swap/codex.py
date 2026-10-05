@@ -37,6 +37,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from claude_swap.real_store_guard import refuse_test_identity
+
 USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 MIN_USEFUL_LIFE_PCT = 10.0
 # A window this long or shorter is a "short" window (5h class); longer ones
@@ -101,6 +103,8 @@ def plan_of(auth: dict | None) -> str | None:
 def write_private(path: Path, data: dict) -> None:
     """Atomic 0600 write (temp file in the same directory, then rename)."""
     path = Path(path)
+    # A test login (fixture domains) never lands in the real ~/.codex or store.
+    refuse_test_identity(email_of(data) or (data.get("account") if isinstance(data, dict) else None), path)
     if not path.parent.is_dir():
         # Created here (the store): private. An existing directory — the
         # user's ~/.codex — keeps the mode its owner gave it.

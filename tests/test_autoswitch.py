@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import logging
 import math
 import os
@@ -87,6 +88,12 @@ class EngineHarness:
     """Seeded switcher + engine + captured events, on the Linux file backend."""
 
     def __init__(self, temp_home: Path, **settings_kwargs):
+        # Fixtures seed fake accounts: refuse anything but a scratch directory,
+        # whoever calls this (a script reusing the helper hit the real home on
+        # 2026-10-05).
+        scratch = Path(tempfile.gettempdir()).resolve()
+        if scratch not in Path(temp_home).resolve().parents:
+            raise RuntimeError(f"EngineHarness needs a temporary home, got {temp_home}")
         self.temp_home = temp_home
         self.switcher = ClaudeAccountSwitcher()
         self.switcher.platform = Platform.LINUX
