@@ -1040,6 +1040,11 @@ def _codex_command(argv: list[str]) -> None:
             current = codex.sync_live(root)
             emails = codex.stored_accounts(root)
             if not emails:
+                if getattr(args, "json", False):
+                    # Machine readers (hub-status-push) get a valid, empty list.
+                    print(_json.dumps({"schemaVersion": 1, "weeklyThreshold": weekly, "reserve": reserve,
+                                       "reserveMinLifePct": reserve_min_life, "accounts": []}))
+                    return
                 print(dimmed("No Codex accounts stored — store the current login with `cswap codex add`, more with `cswap codex login`."))
                 return
             usages = codex.usages_for(root, emails, current)

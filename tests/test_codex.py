@@ -532,3 +532,10 @@ def test_unlimited_credits_go_first_in_credits_mode(env, monkeypatch):
     monkeypatch.setattr(codex, "fetch_usage", lambda auth, timeout=20.0: by[codex.email_of(auth)])
     monkeypatch.setattr(codex.subprocess, "Popen", lambda *a, **kw: None)
     assert codex.auto_tick(env, 95.0, 99.0)["to"] == "u@x.com"
+
+
+def test_list_json_with_no_accounts_is_still_json(env, monkeypatch, capsys):
+    from claude_swap import cli, paths
+    monkeypatch.setattr(paths, "get_backup_root", lambda: env)
+    cli._codex_command(["list", "--json"])
+    assert json.loads(capsys.readouterr().out)["accounts"] == []
