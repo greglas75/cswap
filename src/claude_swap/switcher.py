@@ -5209,7 +5209,7 @@ class ClaudeAccountSwitcher:
         accounts = []
         seq_data = self._get_sequence_data() or {}
         for info in accounts_info:
-            num, email, org_name, org_uuid, is_active, _, alias = info
+            num, email, org_name, org_uuid, is_active, creds, alias = info
             if is_active:
                 active_num = num
             entry = entries[str(num)]
@@ -5230,6 +5230,7 @@ class ClaudeAccountSwitcher:
                 next_poll_at=entry.next_poll_at,
                 token_expired_at=entry.token_expired_at,
                 inference_token=self.has_inference_token(email),
+                login_expires_at=oauth.login_expires_at_iso(creds or ""),
             )
             if token_status:
                 family = self._token_family_fields(info)

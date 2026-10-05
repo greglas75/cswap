@@ -300,6 +300,7 @@ def account_row(
     next_poll_at: float | None = None,
     token_expired_at: float | None = None,
     inference_token: bool = False,
+    login_expires_at: str | None = None,
 ) -> dict:
     """A full account row for ``--list``."""
     status, usage = usage_fields(usage_entry, usage_fetched_at)
@@ -319,6 +320,11 @@ def account_row(
     text = status_note(status, last_error, consecutive_failures)
     if text is not None:
         row["usageStatusText"] = text
+    # Additive (upstream 8d7547b): when the stored login's refresh token
+    # expires, so a dashboard can say "log in again before X" ahead of the
+    # relogin_required that follows. Absent when the login recorded none.
+    if login_expires_at:
+        row["loginExpiresAt"] = login_expires_at
     # Additive: when the expired state was first measured (CON-1024), so a
     # dashboard can render "Token expired · <age>" instead of guessing.
     if status == "token_expired" and token_expired_at is not None:
