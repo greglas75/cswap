@@ -32,6 +32,40 @@ SETTINGS_FILENAME = "settings.json"
 _logger = logging.getLogger("claude-swap")
 
 
+def parse_reserves(value: str | None, default_floor: float) -> list[tuple[str, float]]:
+    """``reserveAccount`` as ``[(identifier, floor_pct), ...]`` in use order.
+
+    Entries are comma-separated; ``ident:pct`` sets that reserve's own weekly
+    floor (0-100). A suffix that is not a number in range is part of nothing
+    an account could be called, so the entry falls back to the default floor
+    rather than being dropped: a typo must never un-reserve the account.
+    """
+    out: list[tuple[str, float]] = []
+    for part in (value or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        ident, sep, pct = part.rpartition(":")
+        floor = default_floor
+        if sep:
+            try:
+                parsed = float(pct)
+            except ValueError:
+                parsed = None
+            if parsed is not None and 0.0 <= parsed <= 100.0:
+                floor = parsed
+            elif parsed is not None:
+                _logger.warning("settings.json: reserve floor %r out of 0-100; using %s", part, default_floor)
+            else:
+                ident = part   # no numeric suffix: the whole entry is the identifier
+        else:
+            ident = part
+        ident = ident.strip()
+        if ident and ident not in (i for i, _ in out):
+            out.append((ident, floor))
+    return out
+
+
 @dataclass(frozen=True)
 class AutoSwitchSettings:
     """Policy knobs for the auto-switch engine (``cswap auto``).
@@ -134,6 +168,10 @@ class AutoSwitchSettings:
     # `reserve_min_life_pct` (default 20: usable until 80% of the week is
     # spent), so "last resort" never means "burn the account that has to stay
     # usable". The 5h window follows the normal threshold. None = no reserve.
+    # Several reserves (owner, 2026-10-05): a comma-separated list, used in
+    # list order, each entry optionally carrying its own floor —
+    # "greg@tgmresearch.com:40, greg.laski@yahoo.com:50". An entry without
+    # one takes reserve_min_life_pct. See reserves().
     reserve_account: str | None = None
     reserve_min_life_pct: float = 20.0
     # Codex (`cswap codex`): its own reserve — always last in the queue, and
@@ -299,8 +337,9 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         SettingSpec(
             "autoswitch", "reserveAccount", "reserve_account", "string",
             help=(
-                "Hold this slot (num or email) back as the reserve: a landing "
-                "only when no other account qualifies"
+                "Hold these slots (num or email, comma-separated, used in "
+                "order; 'email:40' gives one its own floor) back as reserves: "
+                "a landing only when no other account qualifies"
             ),
         ),
         SettingSpec(

@@ -5427,7 +5427,14 @@ class ClaudeAccountSwitcher:
                 return None
 
         home = slot_of(settings.home_account) if settings.home_mode == "prefer" else None
-        reserve = slot_of(settings.reserve_account)
+        # Several reserves, in use order, each with its own floor (2026-10-05).
+        from claude_swap.settings import parse_reserves
+
+        reserves: dict[str, float] = {}
+        for ident, floor in parse_reserves(settings.reserve_account, settings.reserve_min_life_pct):
+            slot = slot_of(ident)
+            if slot is not None and slot not in reserves:
+                reserves[slot] = floor
         home_margin = _home_return_margin(settings)
         # The engine ranks by soonest weekly reset only in prefer mode with a
         # home (and under consume-first); plain `best` takes the most headroom.
@@ -5456,14 +5463,15 @@ class ClaudeAccountSwitcher:
             elif dead or life is None:
                 notes[num] = "(not usable now)"
                 unusable.append(row)
-            elif num == reserve:
+            elif num in reserves:
+                floor = reserves[num]
                 week = oauth.weekly_life(entry.last_good, models)
-                if week is not None and week >= settings.reserve_min_life_pct:
+                if week is not None and week >= floor:
                     notes[num] = "(reserve — last resort)"
                 else:
                     notes[num] = (
                         f"(reserve — held: {week or 0:.0f}% of week < "
-                        f"{settings.reserve_min_life_pct:.0f}%)"
+                        f"{floor:.0f}%)"
                     )
                 reserve_rows.append(row)
             elif life <= 0:
@@ -5486,6 +5494,8 @@ class ClaudeAccountSwitcher:
                     row,
                 ))
         ranked.sort(key=lambda item: item[0])
+        order = list(reserves)
+        reserve_rows.sort(key=lambda row: order.index(str(row[0])))
         ordered = active + [row for _, row in ranked] + reserve_rows + unusable
         if ranked:
             notes.setdefault(str(ranked[0][1][0]), "(next)")

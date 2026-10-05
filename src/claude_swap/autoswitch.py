@@ -69,6 +69,7 @@ from claude_swap.settings import (
     AutoSwitchSettings,
     atomic_write_json,
     parse_model_names,
+    parse_reserves,
     read_settings,
     settings_path,
     with_overrides,
@@ -1457,7 +1458,7 @@ class AutoSwitchEngine:
         # the MOST headroom — sorted naively it would be freshened first and
         # could spend the whole per-tick budget on the one account the switch
         # is built to avoid.
-        reserve = self._reserve_slot(self.settings)
+        reserves = self._reserve_slots(self.settings)
         # Disabled slots are not rotation candidates: freshening them would
         # rotate a refresh token (and risk a quarantine) the switch never uses.
         try:
@@ -1471,7 +1472,7 @@ class AutoSwitchEngine:
                 if n != current and h is not None and h > 0 and n not in quarantined
                 and n in switchable
             ),
-            key=lambda n: (n == reserve, -(headroom.get(n) or 0.0)),
+            key=lambda n: (n in reserves, -(headroom.get(n) or 0.0)),
         )
         # The budget bounds how many refreshes START in this tick, not how long
         # one takes: a single refresh is bounded by its own network timeout.
@@ -2097,8 +2098,7 @@ class AutoSwitchEngine:
         # it stays put quietly (below, no alert). The ranking judges peers
         # against the threshold line rather than the reserve's own headroom,
         # so a reserve with more room than a healthy peer still steps aside.
-        reserve = self._reserve_slot(settings)
-        on_reserve = reserve is not None and current == reserve
+        on_reserve = current in self._reserve_slots(settings)
 
         def rank_headroom(h: float | None) -> float | None:
             if on_reserve and h is not None:
@@ -2502,31 +2502,31 @@ class AutoSwitchEngine:
                 # protected reserve it reads as "everyone is exhausted" and
                 # sends the operator hunting for quota that is sitting right
                 # there, deliberately untouched.
-                reserve = self._reserve_slot(settings)
-                reserve_h = (
-                    oauth.weekly_life(usage.get(reserve), self._models)
-                    if reserve
-                    else None
-                )
-                reserve_floor_blocked = (
-                    reserve is not None
-                    and reserve_h is not None
-                    and reserve_h < settings.reserve_min_life_pct
-                    and all(
-                        n == reserve or (headroom.get(n) or 0) <= 0
-                        for n in oauth_candidates
-                    )
+                reserves = self._reserve_slots(settings)
+                held = {
+                    n: (life, floor)
+                    for n, floor in reserves.items()
+                    if n in oauth_candidates
+                    and (life := oauth.weekly_life(usage.get(n), self._models)) is not None
+                    and life < floor
+                }
+                reserve_floor_blocked = bool(held) and all(
+                    n in held or (headroom.get(n) or 0) <= 0
+                    for n in oauth_candidates
                 )
                 if reserve_floor_blocked:
+                    what = "; ".join(
+                        f"Account-{n} holds {life:.0f}% of its week, under its "
+                        f"{floor:.0f}% reserve floor"
+                        for n, (life, floor) in held.items()
+                    )
                     self._emit(
                         NoSwitchEvent(
                             reason="reserve-protected",
                             detail=(
-                                f"Account-{reserve} is the only candidate left "
-                                f"but holds {reserve_h:.0f}% of its week, under "
-                                f"the {settings.reserve_min_life_pct:.0f}% reserve "
-                                "floor; lower autoswitch.reserveMinLifePct or "
-                                "switch to it by hand to release it"
+                                f"only protected reserves are left: {what}; "
+                                "lower the floor in autoswitch.reserveAccount / "
+                                "reserveMinLifePct or switch by hand to release one"
                             ),
                         )
                     )
@@ -2950,15 +2950,21 @@ class AutoSwitchEngine:
         # spent). The 5h window is left to the normal threshold gate above —
         # a floor on the binding window held a reserve with 53% of its week
         # left and stopped the whole fleet.
-        reserve = self._reserve_slot(settings)
-        if reserve is not None and any(num == reserve for _, num in qualifying):
-            others = [entry for entry in qualifying if entry[1] != reserve]
+        # Several reserves (2026-10-05) go in their configured order, each
+        # held by its own floor.
+        reserves = self._reserve_slots(settings)
+        if reserves and any(num in reserves for _, num in qualifying):
+            others = [entry for entry in qualifying if entry[1] not in reserves]
             if others:
                 qualifying = others
             else:
-                reserve_h = oauth.weekly_life(usage.get(reserve), self._models)
-                if reserve_h is None or reserve_h < settings.reserve_min_life_pct:
-                    qualifying = []
+                order = list(reserves)
+                kept = []
+                for key, num in qualifying:
+                    life = oauth.weekly_life(usage.get(num), self._models)
+                    if life is not None and life >= reserves[num]:
+                        kept.append(((order.index(num),), num))
+                qualifying = kept
         # Ascending by the strategy's key; list order (sequence order) breaks ties.
         qualifying.sort(key=lambda t: t[0])
         return [num for _, num in qualifying], any_known, active_reset_ts
@@ -3452,8 +3458,23 @@ class AutoSwitchEngine:
             self._home_warned = None
         return number
 
-    def _reserve_slot(self, settings: AutoSwitchSettings) -> str | None:
-        """Resolve ``autoswitch.reserveAccount`` to a managed slot, or None.
+    def _reserve_slots(self, settings: AutoSwitchSettings) -> dict[str, float]:
+        """Every reserve as ``{slot: weekly floor pct}``, in use order.
+
+        ``autoswitch.reserveAccount`` may name several (``parse_reserves``);
+        an identifier naming no managed account is skipped, as before.
+        """
+        out: dict[str, float] = {}
+        for ident, floor in parse_reserves(
+            settings.reserve_account, settings.reserve_min_life_pct
+        ):
+            num = self._resolve_reserve(ident)
+            if num is not None and num not in out:
+                out[num] = floor
+        return out
+
+    def _resolve_reserve(self, ident: str) -> str | None:
+        """Resolve one reserve identifier to a managed slot, or None.
 
         Pure — no emits, no state writes — because ``_rank_candidates`` is
         replayed twice per tick under consume-first. A value naming no managed
@@ -3466,7 +3487,6 @@ class AutoSwitchEngine:
         but it is a write, and a future reader comparing this docstring against
         the call chain deserves to find that here rather than discover it.
         """
-        ident = settings.reserve_account
         if not ident:
             return None
         try:

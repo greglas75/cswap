@@ -208,3 +208,54 @@ class TestActiveReserveHandsOver:
             "1": _usage(0), "2": _usage(70), "3": _usage(0),
         }) is TickOutcome.NO_ACTION
         assert h.active_number() == 2
+
+
+class TestSeveralReserves:
+    """Owner, 2026-10-05: greg@ usable to 60% of its week, greg.laski@yahoo.com
+    to 50% — two reserves, used in the configured order, each held by its own
+    floor."""
+
+    def test_parse_reserves(self):
+        from claude_swap.settings import parse_reserves
+
+        assert parse_reserves("greg@x.com:40, yahoo@x.com:50, 7", 20.0) == [
+            ("greg@x.com", 40.0), ("yahoo@x.com", 50.0), ("7", 20.0),
+        ]
+        # A bad floor never un-reserves the account: it takes the default.
+        assert parse_reserves("a@x.com:abc, b@x.com:150, , b@x.com:5", 20.0) == [
+            ("a@x.com:abc", 20.0), ("b@x.com", 20.0),   # first mention of b wins
+        ]
+        assert parse_reserves(None, 20.0) == []
+
+    def test_reserves_are_used_in_their_order_each_held_by_its_own_floor(self, temp_home):
+        # Slot 1 spent: the reserves 3 then 2 are all that is left.
+        h = reserved(temp_home, reserve_account="3:40, 2:50", reserve_min_life_pct=20.0)
+        assert h.tick_with_usage({
+            "1": _usage(100), "2": _usage7(0, 10), "3": _usage7(0, 30),
+        }) is TickOutcome.SWITCHED
+        assert h.active_number() == 3   # listed first, 70% of its week >= 40
+
+    def test_a_reserve_under_its_own_floor_is_passed_over(self, temp_home):
+        h = reserved(temp_home, reserve_account="3:40, 2:50", reserve_min_life_pct=20.0)
+        assert h.tick_with_usage({
+            "1": _usage(100), "2": _usage7(0, 10), "3": _usage7(0, 65),
+        }) is TickOutcome.SWITCHED
+        assert h.active_number() == 2   # 3 holds 35% < 40; 2 holds 90% >= 50
+
+    def test_both_under_their_floors_block_and_name_them(self, temp_home):
+        h = reserved(temp_home, reserve_account="3:40, 2:50", reserve_min_life_pct=20.0)
+        assert h.tick_with_usage({
+            "1": _usage(100), "2": _usage7(0, 55), "3": _usage7(0, 65),
+        }) is TickOutcome.BLOCKED
+        assert h.active_number() == 1
+        detail = next(e.detail for e in h.events
+                      if isinstance(e, NoSwitchEvent) and e.reason == "reserve-protected")
+        assert "Account-3" in detail and "40% reserve floor" in detail
+        assert "Account-2" in detail and "50% reserve floor" in detail
+
+    def test_a_live_second_reserve_hands_over_too(self, temp_home):
+        h = reserved(temp_home, live=2, reserve_account="3:40, 2:50", reserve_min_life_pct=20.0)
+        assert h.tick_with_usage({
+            "1": _usage(10), "2": _usage7(0, 10), "3": _usage7(0, 10),
+        }) is TickOutcome.SWITCHED
+        assert h.active_number() == 1
