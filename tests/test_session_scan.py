@@ -154,3 +154,20 @@ class TestEarlyExitVerdict:
         finally:
             mod.latest_session_activity_ts = original
         assert quiet is False
+
+
+def test_the_scan_stops_at_the_first_recent_transcript(tmp_path, monkeypatch):
+    """review 2026-10-05: the old early-exit test passed for a full scan too.
+    Here a second directory blows up if the walk ever reaches it."""
+    import claude_swap.autoswitch as mod
+
+    now = time.time()
+    first = tmp_path / "a"
+    transcripts(first, {"recent": 10}, now)
+
+    def walk(_root):
+        yield str(first), [], ["recent.jsonl"]
+        raise AssertionError("walked past a transcript inside the window")
+
+    monkeypatch.setattr(mod.os, "walk", walk)
+    assert latest_session_activity_ts(tmp_path, stop_at=now - QUIET_WINDOW_S) is not None

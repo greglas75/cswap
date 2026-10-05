@@ -420,3 +420,57 @@ class TestReviewPass2:
         codex.write_private(codex.stored_path(env, "c@x.com"), _auth("b@x.com"))
         with pytest.raises(codex.CodexError, match="belongs to"):
             codex.switch(env, "c@x.com")
+
+
+class TestFetchUsageErrors:
+    """rank() keys on these strings: a revoked login must never read as expired."""
+
+    def _http(self, monkeypatch, code, body):
+        import io
+        import urllib.error
+
+        def boom(*a, **kw):
+            raise urllib.error.HTTPError("u", code, "x", {}, io.BytesIO(body))
+
+        monkeypatch.setattr(codex.urllib.request, "urlopen", boom)
+
+    def test_a_revoked_token_is_not_refreshable(self, monkeypatch):
+        self._http(monkeypatch, 401, b'{"error":{"code":"token_revoked"}}')
+        u = codex.fetch_usage(_auth("a@x.com"))
+        assert u.error.startswith("login revoked") and not u.refreshable()
+
+    def test_an_expired_token_is_refreshable(self, monkeypatch):
+        self._http(monkeypatch, 401, b'{"error":{"code":"token_expired"}}')
+        assert codex.fetch_usage(_auth("a@x.com")).refreshable()
+
+    def test_other_http_errors_are_neither(self, monkeypatch):
+        self._http(monkeypatch, 500, b"oops")
+        u = codex.fetch_usage(_auth("a@x.com"))
+        assert u.error == "http 500" and not u.refreshable()
+
+    def test_a_network_error_is_reported_not_raised(self, monkeypatch):
+        def down(*a, **kw):
+            raise OSError("no route")
+        monkeypatch.setattr(codex.urllib.request, "urlopen", down)
+        assert codex.fetch_usage(_auth("a@x.com")).error == "OSError"
+
+
+class TestCodexListJson:
+    def test_json_marks_held_reserve_and_unreadable_accounts(self, env, monkeypatch, capsys):
+        from claude_swap import cli, paths
+        from claude_swap.settings import set_setting
+        for e in ("res@x.com", "dead@x.com", "b@x.com", "a@x.com"):
+            _login(_auth(e))
+            codex.add(env)
+        _login(_auth("a@x.com"))
+        set_setting(env, "autoswitch.codexReserveAccount", "res@x.com")
+        set_setting(env, "autoswitch.codexReserveMinLifePct", "30")
+        by = {"a@x.com": _usage(50), "b@x.com": _usage(20), "res@x.com": _usage(80),
+              "dead@x.com": Usage(None, None, None, None, False, error="login revoked — log in again: cswap codex login")}
+        monkeypatch.setattr(codex, "fetch_usage", lambda auth, timeout=20.0: by[codex.email_of(auth)])
+        monkeypatch.setattr(paths, "get_backup_root", lambda: env)
+        cli._codex_command(["list", "--json"])
+        rows = {r["email"]: r for r in json.loads(capsys.readouterr().out)["accounts"]}
+        assert rows["a@x.com"]["active"] and rows["b@x.com"]["next"]
+        assert rows["res@x.com"]["held"] and not rows["res@x.com"]["exhausted"]
+        assert not rows["dead@x.com"]["exhausted"] and rows["dead@x.com"]["error"].startswith("login revoked")

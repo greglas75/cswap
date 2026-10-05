@@ -121,14 +121,16 @@ def main():
     rc = 0
     for d in docs:
         old = prev.get(d["host"]) or {}
-        for half in ("claude", "codex"):
-            if d[half] is None and old.get(half) is not None:
-                d[half] = old[half]
-                d.setdefault("stale", {})[half] = old.get("at")   # the page shows how old that half is
         if d["claude"] is None and d["codex"] is None:
             print(time.strftime("%F %T ") + "%s: nothing collected (%s) — its last document stays" % (d["host"], d["errors"]), file=sys.stderr)
             rc = 1
             continue
+        for half in ("claude", "codex"):
+            if d[half] is None and old.get(half) is not None:
+                d[half] = old[half]
+                # When that half was collected — carried over already, keep its
+                # original time, or a stale half would look a minute old forever.
+                d.setdefault("stale", {})[half] = (old.get("stale") or {}).get(half) or old.get("at")
         try:
             put(token, d)
         except Exception as e:  # one machine's failure never stops the others

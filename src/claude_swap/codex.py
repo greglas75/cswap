@@ -225,7 +225,8 @@ def login(backup_root: Path, extra_args: list[str] | None = None) -> tuple[str, 
             # it IS this account (a repair of a revoked/expired live login):
             # otherwise the next sync would copy the old live tokens back
             # over the fresh stored copy.
-            if email_of(read_auth(live_auth_path())) in (None, email):
+            live = read_auth(live_auth_path())
+            if live is None or email_of(live) == email:   # an API-key login is not ours to replace
                 write_private(live_auth_path(), auth)
         return email, plan_of(auth)
     finally:
