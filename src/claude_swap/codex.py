@@ -30,6 +30,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -100,8 +101,11 @@ def plan_of(auth: dict | None) -> str | None:
 def write_private(path: Path, data: dict) -> None:
     """Atomic 0600 write (temp file in the same directory, then rename)."""
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
+    if not path.parent.is_dir():
+        # Created here (the store): private. An existing directory — the
+        # user's ~/.codex — keeps the mode its owner gave it.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(path.parent, 0o700)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     try:
         os.fchmod(fd, 0o600)
@@ -254,6 +258,11 @@ class Usage:
             return True
         return self.short_pct is not None and self.short_pct >= threshold
 
+    def refreshable(self) -> bool:
+        """Unreadable only because the access token expired — usable again
+        once Codex refreshes it, which a switch onto it does."""
+        return self.error is not None and self.error.startswith("token expired")
+
     def weekly_life(self) -> float | None:
         """Percent of the week left (100 - weekly use); None when unknown."""
         if self.error is not None or self.weekly_pct is None:
@@ -365,7 +374,9 @@ def rank(
     Unreadable is not a candidate: a revoked login (401 token_revoked) or a
     transient error says nothing about room, and switching onto it left the
     daemon parked on a dead login ("active-usage-unknown") instead of going
-    to credits (review 2026-10-05).
+    to credits (review 2026-10-05). The one exception is an access token that
+    merely EXPIRED (an idle account, ~10 days): Codex refreshes it on use, so
+    it stays a candidate — after every account whose usage could be read.
 
     The reserve (owner, 2026-10-02: greg.laski@yahoo.com) always comes LAST,
     and drops out once less than ``reserve_min_life`` pct of its week is left.
@@ -376,16 +387,19 @@ def rank(
         if email == current:
             continue
         life = usage.life(threshold, weekly_threshold)
-        if life is None or life <= 0:
+        if life is not None and life <= 0:
+            continue
+        if life is None and not usage.refreshable():
             continue
         if email == reserve and reserve_spent(usage, reserve_min_life):
             continue
         keyed.append((
             (
                 email == reserve,
-                life < MIN_USEFUL_LIFE_PCT,
+                life is None,                       # expired token: after every readable one
+                life is not None and life < MIN_USEFUL_LIFE_PCT,
                 usage.weekly_reset_at if usage.weekly_reset_at is not None else float("inf"),
-                -life,
+                -(life or 0.0),
             ),
             email,
         ))
@@ -409,6 +423,13 @@ def _switch(backup_root: Path, email: str) -> str | None:
     target = read_auth(stored_path(backup_root, email))
     if target is None:
         raise CodexError(f"{email} is not stored — log in with it and run: cswap codex add")
+    if email_of(target) != email:
+        raise CodexError(f"the stored copy for {email} belongs to {email_of(target) or 'no ChatGPT account'}")
+    live_email = email_of(read_auth(live_auth_path()))
+    if live_email is not None and live_email != email and not stored_path(backup_root, live_email).exists():
+        # Overwriting it would lose that login for good (its refresh token
+        # exists nowhere else).
+        raise CodexError(f"the live login {live_email} is not stored — run `cswap codex add` first")
     previous = _sync_live(backup_root)
     if previous == email:
         return previous
@@ -560,10 +581,14 @@ def run_after_switch(command: str, previous: str | None, target: str) -> str:
     """
     env = {**os.environ, "CSWAP_CODEX_FROM": previous or "", "CSWAP_CODEX_TO": target}
     try:
-        subprocess.Popen(
+        proc = subprocess.Popen(
             command, shell=True, env=env, start_new_session=True,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
+        # Reaped in the background: `cswap codex auto` runs for weeks, and an
+        # unwaited child stays a zombie for all of them.
+        if hasattr(proc, "wait"):
+            threading.Thread(target=proc.wait, daemon=True).start()
         return "started"
     except OSError as e:
         return f"failed: {type(e).__name__}: {e}"

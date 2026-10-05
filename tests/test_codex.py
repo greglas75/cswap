@@ -392,3 +392,31 @@ class TestReviewFixes:
     def test_an_account_name_cannot_leave_the_store(self, env, name):
         with pytest.raises(codex.CodexError):
             codex.stored_path(env, name)
+
+
+class TestReviewPass2:
+    """Second round of zuvo:review 2026-10-05 findings."""
+
+    def test_an_expired_token_stays_a_candidate_after_readable_ones(self):
+        """An idle account's access token expires (~10 days); Codex refreshes it
+        on use, so excluding it would retire healthy accounts for good."""
+        expired = Usage(None, None, None, None, False, error="token expired — refreshes on the next switch to it")
+        revoked = Usage(None, None, None, None, False, error="login revoked — log in again: cswap codex login")
+        usages = {"active@x.com": _usage(99), "idle@x.com": expired, "dead@x.com": revoked,
+                  "ok@x.com": _usage(40)}
+        assert codex.rank(usages, "active@x.com", 95.0, 99.0) == ["ok@x.com", "idle@x.com"]
+
+    def test_switch_refuses_to_overwrite_an_unstored_live_login(self, env):
+        _login(_auth("b@x.com"))
+        codex.add(env)
+        _login(_auth("stray@x.com"))           # logged in by hand, never stored
+        with pytest.raises(codex.CodexError, match="not stored"):
+            codex.switch(env, "b@x.com")
+        assert codex.email_of(codex.read_auth(codex.live_auth_path())) == "stray@x.com"
+
+    def test_switch_refuses_a_stored_copy_of_another_account(self, env):
+        _login(_auth("b@x.com"))
+        codex.add(env)
+        codex.write_private(codex.stored_path(env, "c@x.com"), _auth("b@x.com"))
+        with pytest.raises(codex.CodexError, match="belongs to"):
+            codex.switch(env, "c@x.com")

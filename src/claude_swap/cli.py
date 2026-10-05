@@ -945,7 +945,7 @@ Defaults live in settings.json in the backup root; flags override them.
 
 
 def _codex_command(argv: list[str]) -> None:
-    """Handle `cswap codex {add,list,switch,auto}` — Codex CLI account rotation.
+    """Handle `cswap codex {login,add,list,switch,auto}` — Codex CLI account rotation.
 
     Pre-dispatched like `config`. See :mod:`claude_swap.codex` for the storage
     and the rotation rule.
@@ -1015,6 +1015,11 @@ def _codex_command(argv: list[str]) -> None:
                 print(f"{args.email} is already the live Codex login")
             else:
                 print(f"Codex login: {previous or 'none'} -> {args.email.lower()}")
+                # Same hook as the daemon's switch: running sessions keep the
+                # old login in memory until the host restarts them.
+                if settings.codex_after_switch:
+                    status = codex.run_after_switch(settings.codex_after_switch, previous, args.email.lower())
+                    print(dimmed(f"after-switch hook: {status}"))
                 print(dimmed("New codex processes use it; restart running sessions to move them."))
         elif args.action == "auto":
             while True:
@@ -1100,7 +1105,8 @@ def _codex_command(argv: list[str]) -> None:
                 credit_note = ""
                 if u.credits_balance is not None:
                     credit_note = f"   credits {u.credits_balance:,.0f}" + ("" if u.credits_usable else " (blocked)")
-                print(f"     └ week:  {u.weekly_pct if u.weekly_pct is not None else 0:5.0f}%   {in_time(u.weekly_reset_at)}{muted(credit_note)}")
+                week = f"{u.weekly_pct:5.0f}%" if u.weekly_pct is not None else "    ?"
+                print(f"     └ week:  {week}   {in_time(u.weekly_reset_at)}{muted(credit_note)}")
             if current and current not in emails:
                 print()
                 warning(f"The live Codex login {current} is not stored — run `cswap codex add`; log other accounts in with `cswap codex login`, never a bare `codex login` (it revokes the current one).")
@@ -1353,7 +1359,7 @@ Commands:
   %(prog)s switch                     rotate to the next account
   %(prog)s switch <num|email>         switch to a specific account
   %(prog)s add                        add the current account
-  %(prog)s codex {add,list,switch,auto}  rotate Codex CLI (ChatGPT) logins
+  %(prog)s codex {login,add,list,switch,auto}  rotate Codex CLI (ChatGPT) logins
   %(prog)s add-token [TOKEN|-]        register a setup-token or API key
   %(prog)s attach-token <num|email> [TOKEN|-]
                                    attach a year-long setup-token to a login slot:
