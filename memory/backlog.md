@@ -40,7 +40,7 @@ deferred — a localized fix belongs in the review's own fix loop, not here.
 Left undone in that session: on purpose, by accident, for lack of time, or
 because it was out of scope. Review-deferred items carry their review ID.
 
-- [ ] **B-import-usage** [feature, in progress] Port `cswap import-usage
+- [x] **B-import-usage** [feature — ported 1984bd4, sharing b61c571] Port `cswap import-usage
   <path|-> [--hold SECONDS]` from realiti4 `45fdcfc` + `ff1f1b2` (usage_store,
   transfer, cli, json_output, switcher + tests). Then distribute readings in
   `scripts/hub-status-push.py`: Mac → hosts with `--hold`, hosts → Mac
@@ -53,10 +53,30 @@ because it was out of scope. Review-deferred items carry their review ID.
   deployed with `scripts/deploy-hosts.sh`. The hub page (cswap-guide live
   tabs) does not show it yet: it should say "log in again before X".
 
-- [ ] **B-upstream-204** [investigation] Upstream #204 (`560dc8e`): past
-  `RECOVERY_HORIZON_S` (4 h), rank the over-threshold escape by headroom
-  instead of reset time. This has to be weighed against the owner's rule
-  "prefer the account whose week ends soonest". Not yet analysed.
+- [x] **B-upstream-204** [investigation — closed 2026-10-05, not ported]
+  Upstream #204 (`560dc8e`) bounds a bug in upstream #202 ("all over the
+  threshold: go where quota returns first"), which this fork never had (no
+  recovery axis in `autoswitch.py`). Our soonest-reset ordering already keeps
+  its lesson: it ranks only accounts with at least `MIN_USEFUL_LIFE_PCT` (10)
+  left, so it never trades real headroom for a reset days away; when nothing
+  qualifies the engine stays put and the all-exhausted wake switches at the
+  first reset. Re-check only if #202 is ever ported.
+
+- [ ] **B-fork-survey** [feature candidates] From the 2026-10-05 survey of
+  338 forks and 70 open upstream PRs (none cherry-pickable; each is a
+  re-implementation). Ranked: (1) when every account is out of the configured
+  model, keep working: PR #404 (fall back to an account with 5h/7d room) and
+  PR #379 (`autoswitch.fallbackModel`). (2) Stay put when the crossed window
+  resets within ~15 min and won't hit 100% first (wonjun-lab `5588c385`):
+  each switch costs a full cache rebuild. (3) When none is usable, move to the
+  exhausted account resetting soonest (PR #432). (4) A guard against writing
+  one account's credentials into another's slot (PR #405, or
+  fabriciomirandabr `bbe36d20`). (5) 5h-window priming (wonjun-lab
+  `9f639523`), which may be against the consumer terms, so it is the owner's
+  call. (6) Usage from Claude Code's statusline (gwthm-in `100795e2`).
+  (7) sondt99 measured the usage budget per account/org, not per token.
+  (8) `cswap wrap` (ivanhernandez `4bba7f11`). (9) PR #406 and PR #422
+  (small refresh fixes).
 
 - [ ] **B-upstream-drift** [ops] The fork (based on 0.24.0b1) and realiti4
   (0.27.0b1) share no history (`git merge-base` is empty), so every upstream
@@ -137,3 +157,15 @@ because it was out of scope. Review-deferred items carry their review ID.
   leak left it, kept as evidence. It may contain live tokens. Delete it once
   the owner agrees. The same goes for `~/.ssh/config.bak-2026-10-05` and the
   `.bashrc` backup on ryzen-dev.
+
+- [ ] **B-hub-stderr-dropped** [pre-existing, review of b61c571] `BOTH` in
+  `scripts/hub-status-push.py` runs both lists with `2>/dev/null`, so a failing
+  `cswap list --json` (lock held, PATH miss) is reported only as "no output",
+  the same as having no accounts. `parse()` also trusts the first `{`, so a
+  banner with a brace hides a good answer. Keep stderr per command and use
+  `json.JSONDecoder().raw_decode` over successive braces.
+
+- [ ] **B-ci-claude-accounts** [ops] On 2026-10-05, ryzen-tf and waw-tf (gha)
+  hold only 2 Claude accounts, against 8-9 on the Mac and ryzen-dev. The owner
+  asked for all of them on CI (`cswap-ci all add-claude …`); each one needs
+  their browser login, so it can't be done for them.
