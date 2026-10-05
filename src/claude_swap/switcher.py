@@ -428,7 +428,7 @@ class ClaudeAccountSwitcher:
 
     def _write_json(self, path: Path, data: dict) -> None:
         """Write JSON file with validation."""
-        if path == self.sequence_file:
+        if Path(path).resolve() == Path(self.sequence_file).resolve():
             # A test helper pointed at the real home must not land its fixture
             # accounts in the real sequence (2026-10-05, see real_store_guard).
             for acct in (data.get("accounts") or {}).values():

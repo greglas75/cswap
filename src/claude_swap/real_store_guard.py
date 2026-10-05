@@ -28,9 +28,17 @@ class RealStoreGuardError(RuntimeError):
     """A test identity was about to be written into the real account store."""
 
 
-def is_test_email(email: str | None) -> bool:
-    domain = (email or "").strip().lower().rpartition("@")[2]
-    return bool(domain) and (domain in TEST_DOMAINS or domain.endswith(TEST_SUFFIXES))
+def is_test_email(email: object) -> bool:
+    if not isinstance(email, str):
+        return False
+    domain = email.strip().lower().rpartition("@")[2]
+    if not domain:
+        return False
+    return (
+        domain in TEST_DOMAINS
+        or any(domain.endswith("." + d) for d in TEST_DOMAINS)   # mail.example.com
+        or domain.endswith(TEST_SUFFIXES)
+    )
 
 
 def _real_home() -> Path | None:
@@ -69,7 +77,7 @@ def inside_real_store(path: Path | str) -> bool:
     return False
 
 
-def refuse_test_identity(email: str | None, path: Path | str) -> None:
+def refuse_test_identity(email: object, path: Path | str) -> None:
     """Raise if a test-domain account is about to be written under the real home."""
     if is_test_email(email) and inside_real_store(path):
         raise RealStoreGuardError(

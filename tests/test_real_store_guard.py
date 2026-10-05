@@ -25,7 +25,8 @@ def fake_real_home(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("email,expected", [
     ("a@x.com", True), ("b@example.com", True), ("c@example.org", True), ("d@host.test", True),
-    ("tatiana@tgmresearch.com", False), ("greg.laski@gmail.com", False), ("", False), (None, False),
+    ("e@mail.example.com", True), ("tatiana@tgmresearch.com", False), ("greg.laski@gmail.com", False),
+    ("", False), (None, False), (123, False), ("someone@notx.com", False),
 ])
 def test_test_domains(email, expected):
     assert is_test_email(email) is expected
