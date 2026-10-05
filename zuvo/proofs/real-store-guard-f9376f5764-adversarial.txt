@@ -1,0 +1,1593 @@
+artifact_kind=adversarial-review
+created_at=2026-10-05T08:32:46Z
+status=partial
+mode=code
+output_format=text
+providers_used=cursor-agent, agy, openrouter-3, muse
+provider_count=4
+providers_attempted=5
+provider_outcomes=cursor-agent:ok,agy:ok,openrouter-3:ok,muse:ok,kimi:empty
+REVIEW BY: CURSOR-AGENT
+REVIEW BY: AGY
+REVIEW BY: OPENROUTER-3
+REVIEW BY: MUSE
+reviewed_blob=f3d16acbbf84b0a5cd763c4cec6f3ec36e791497
+reviewed_blob=840dbc95e3038ba7670419a38fa21b9fee130d79
+reviewed_blob=350dede44f0f286fb685bcede6cf86872d27de8c
+reviewed_blob=ccd2179c7b8a3296ef359be84288ef05f99b4549
+reviewed_blob=683c8db51bea5939a14945a71cb4a408eadd5595
+reviewed_blob=8f32cbdfd15442110d7fe07a9dad61f6bd9f59a3
+input_chars=10178
+input_chars_original=10178
+input_truncated=false
+total_findings=27
+critical=9
+warning=13
+info=5
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: cursor-agent, agy, openrouter-3, muse (4 total)
+Mode: code
+Input size: 10178 chars
+Date: 2026-10-05T08:32:46Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CURSOR-AGENT
+###############################################################
+
+**1**
+
+**SEVERITY:** CRITICAL  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/real_store_guard.py:32-33`  
+**ISSUE:** `is_test_email` only matches the exact domain after `@`, not subdomains of reserved/documentation domains.  
+**ATTACK VECTOR:** Identities like `a@mail.example.com`, `b@corp.example.com`, or `c@api.x.com` are treated as “real” and can be written under pwd-resolved stores (`~/.claude-swap-backup`, `~/.codex`, etc.) while still being obvious fixture/documentation addresses—recreating the original incident with slightly different emails.  
+**SUGGESTED FIX:** Treat RFC 2606/6761 names as test if `domain == d` or `domain.endswith("." + d)` for each entry in `TEST_DOMAINS`; keep suffix rules for `.test`/`.invalid`/etc.
+
+---
+
+**2**
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/switcher.py:431-435`  
+**ISSUE:** Sequence guard only runs when `path == self.sequence_file`, not when the write targets the same inode via a different path shape.  
+**ATTACK VECTOR:** Calling `_write_json` with an equivalent path (`Path("sequence.json")` vs absolute, `./` segments, or another spelling of the same file) skips the `accounts` loop entirely, so test-domain rows can land in the real `sequence.json` while other guarded entrypoints still look safe.  
+**SUGGESTED FIX:** Compare resolved paths (`path.resolve() == self.sequence_file.resolve()`) or use `path.samefile(self.sequence_file)` when the file exists (with a resolve fallback for not-yet-created targets).
+
+---
+
+**3**
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/switcher.py:433-435` (also `src/claude_swap/codex.py:106-107`)  
+**ISSUE:** Guards key off explicit `email`/`email_of` only; payloads with no email field are never classified as test.  
+**ATTACK VECTOR:** A helper or partial fixture can write `{"accounts": {"1": {"token": "..."}}}` or Codex auth blobs without an email key to real-store paths; `refuse_test_identity(None, …)` is a no-op and corrupts live rotation/login state without tripping the new guard.  
+**SUGGESTED FIX:** At minimum, refuse writes under the real store when email is missing but other known fixture markers exist; or require a non-empty email before any write to `inside_real_store` paths.
+
+---
+
+**4**
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/real_store_guard.py:37-43`  
+**ISSUE:** On non-POSIX or any `pwd`/passwd failure, `_real_home()` returns `None` and `inside_real_store` always returns `False`—the guard is fully disabled.  
+**ATTACK VECTOR:** Windows (called out in comments), containers/users without passwd entries, or unexpected `pwd` errors: test-domain writes to real profile locations behave exactly as before the change, with no error surfaced.  
+**SUGGESTED FIX:** On Windows (and optional fallback), resolve “real home” via an documented alternative (e.g. `USERPROFILE` + same root list); if home cannot be resolved, fail closed for writes that look like store paths or log and raise when classifying test emails.
+
+---
+
+**5**
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/real_store_guard.py:41-43`  
+**ISSUE:** Broad `except Exception` around `_real_home()` hides misconfiguration and turns protection off silently.  
+**ATTACK VECTOR:** Transient or environmental passwd issues during a test script run against the live machine: writes proceed, operators assume the 2026-10-05 guard is active because the module imported successfully.  
+**SUGGESTED FIX:** Catch only expected errors (e.g. `ImportError`, `KeyError`); log or re-raise unexpected exceptions instead of returning `None`.
+
+---
+
+**6**
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** medium  
+**FILE:** `tests/test_autoswitch.py:94-96`  
+**ISSUE:** `EngineHarness` requires `gettempdir()` to appear in `Path(temp_home).resolve().parents`, not in `temp_home` itself.  
+**ATTACK VECTOR:** A caller whose “isolated” home is exactly the system temp directory (or a path equal to the resolved temp root) gets `RuntimeError` and may bypass the harness and hit unguarded setup paths; conversely, `temp_home=/tmp/fake/Users/me` passes the check while looking like a user home under `/tmp` (lower risk if `$HOME` is still patched, but the check is weaker than “must be pytest tmp_path”).  
+**SUGGESTED FIX:** Require `temp_home.resolve().is_relative_to(scratch)` (Py3.9+) or `scratch in temp_home.resolve().parents or temp_home.resolve() == scratch / "…"` with an explicit allowlist of pytest-style roots.
+
+---
+
+**7**
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/switcher.py:614`  
+**ISSUE:** Credential guard passes `self.backup_dir` instead of the concrete path `_store._write_account_credentials` will write.  
+**ATTACK VECTOR:** If the store ever writes outside `backup_dir` while `backup_dir` is redirected outside pwd-home (custom layout), a test email could be refused incorrectly—or, if layout places secrets under a real-store root not covered by the dir check, the guard might not match the actual write target. Behavior depends on `_store` implementation not shown here.  
+**SUGGESTED FIX:** Call `refuse_test_identity(email, <actual destination path>)` inside the store layer at the single write chokepoint, same as `write_private` and config file paths.
+
+
+###############################################################
+###   PROVIDER: AGY
+###############################################################
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/codex.py:105
+ISSUE: Passing non-string `account` object to `is_test_email` crashes `write_private` with `AttributeError`.
+ATTACK VECTOR: When `data` passed to `write_private` has no email extracted by `email_of`, the code falls back to `data.get("account") if isinstance(data, dict) else None`. In OpenAI/ChatGPT authentication responses, `"account"` is frequently an object (e.g., `{"account_id": "...", ...}`) or an integer ID. Because `email` is not validated as a string, `(email or "")` evaluates to the truthy dictionary or integer. Inside `is_test_email`, `(email or "").strip()` immediately raises `AttributeError: 'dict' object has no attribute 'strip'`, crashing production credential writes.
+SUGGESTED FIX: Guard the type before calling string methods in `is_test_email`:
+```python
+def is_test_email(email: str | None) -> bool:
+    if not isinstance(email, str):
+        return False
+    domain = email.strip().lower().rpartition("@")[2]
+    ...
+```
+
+---
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/real_store_guard.py:23
+ISSUE: Hardcoding real commercial domain `x.com` as a test domain blocks legitimate production users.
+ATTACK VECTOR: `TEST_DOMAINS` includes `x.com` simply because the test suite fixtures use `a@x.com` and `b@x.com`. `x.com` is a live commercial domain (X Corp / Twitter). Any legitimate user or employee authenticating with an `@x.com` email address will be flagged by `is_test_email`, causing `refuse_test_identity` to raise `RealStoreGuardError` and preventing them from storing credentials or rotating logins in production.
+SUGGESTED FIX: Remove `x.com` from `TEST_DOMAINS` in production code. Update test fixtures to use RFC 2606 reserved domains (e.g. `example.com` or `.test`).
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/real_store_guard.py:31-33
+ISSUE: `is_test_email` fails to detect subdomains of test domains and bare RFC reserved domains like `localhost`.
+ATTACK VECTOR: 
+1. `domain in TEST_DOMAINS` checks exact domain equality only. Fixtures using subdomains (e.g. `user@sub.example.com`, `user@qa.example.org`) evaluate to `False` because `"sub.example.com"` is not in `TEST_DOMAINS`, and does not end with `.example`.
+2. `domain.endswith(TEST_SUFFIXES)` requires a leading dot (`.localhost`, `.test`). For bare RFC 6761 / RFC 2606 domains such as `admin@localhost` or `user@test`, `domain` is `"localhost"`. `"localhost".endswith(".localhost")` evaluates to `False` (length 9 vs 10).
+In both cases, test identities bypass `is_test_email` and overwrite real stores.
+SUGGESTED FIX: Check domain hierarchy and include bare reserved names:
+```python
+TEST_DOMAINS = frozenset({"example.com", "example.org", "example.net"})
+TEST_SUFFIXES = (".test", ".invalid", ".example", ".localhost", "localhost", "test", "invalid", "example")
+
+def is_test_email(email: str | None) -> bool:
+    if not isinstance(email, str):
+        return False
+    domain = email.strip().lower().rpartition("@")[2]
+    if not domain:
+        return False
+    return (
+        domain in TEST_DOMAINS
+        or any(domain.endswith(f".{d}") for d in TEST_DOMAINS)
+        or domain.endswith(TEST_SUFFIXES)
+    )
+```
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/switcher.py:431
+ISSUE: Unnormalized Path equality `path == self.sequence_file` allows bypass of the sequence guard.
+ATTACK VECTOR: `pathlib.Path` equality is syntactic and does not resolve relative segments, case differences, or symlinks (`Path("./sequence.json") == Path("sequence.json")` is `False`). If `_write_json` is called with a relative path, an unnormalized path, or a `str`, `path == self.sequence_file` evaluates to `False`. This completely bypasses `refuse_test_identity` for the sequence file.
+SUGGESTED FIX: Compare resolved paths or check against the store context:
+```python
+if Path(path).resolve() == self.sequence_file.resolve():
+```
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: tests/test_autoswitch.py:95
+ISSUE: `EngineHarness` rejects valid scratch directories not strictly nested under `tempfile.gettempdir()`.
+ATTACK VECTOR: `scratch not in Path(temp_home).resolve().parents` requires `scratch` to be a strict ancestor of `temp_home`. 
+1. If `temp_home` is `Path(tempfile.gettempdir())`, `scratch in scratch.parents` evaluates to `False` (a path is never in its own `.parents`).
+2. In CI pipelines, Docker containers, or environments using custom temp mounts (e.g. `pytest --basetemp=/dev/shm`), `scratch` will not be in `parents`, causing `EngineHarness` to raise `RuntimeError` on valid test sandboxes.
+SUGGESTED FIX: Allow equality and verify it is not inside the real store:
+```python
+temp_p = Path(temp_home).resolve()
+scratch = Path(tempfile.gettempdir()).resolve()
+if temp_p != scratch and scratch not in temp_p.parents:
+    raise RuntimeError(f"EngineHarness needs a temporary home, got {temp_home}")
+```
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/real_store_guard.py:45-54
+ISSUE: `_real_roots` omits `~/.claude.json` and desktop configuration locations.
+ATTACK VECTOR: The Anthropic Claude Code CLI stores active credentials in `~/.claude.json` directly under `$HOME`. Because `_real_roots` only contains directory `home / ".claude"`, checking `inside_real_store(home / ".claude.json")` checks if `home / ".claude"` is in `(home / ".claude.json").parents` (which are `[home, /]`). It returns `False`. A rogue test or script modifying `~/.claude.json` will not be blocked by the guard.
+SUGGESTED FIX: Add `home / ".claude.json"` to `_real_roots()`:
+```python
+return [
+    home / ".claude-swap-backup",
+    home / ".local" / "share" / "claude-swap",
+    home / ".codex",
+    home / ".claude",
+    home / ".claude.json",
+]
+```
+
+---
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/real_store_guard.py:36-42
+ISSUE: Silent fail-open when `pwd` lookup fails disables protection in containers and non-POSIX platforms.
+ATTACK VECTOR: In Windows or containerized Linux environments where the running UID lacks an entry in `/etc/passwd` (common in rootless or arbitrary-UID Kubernetes containers), `pwd.getpwuid(os.getuid())` raises `KeyError` or `ModuleNotFoundError`. `_real_home()` catches all exceptions and returns `None`, making `_real_roots()` empty and causing `inside_real_store` to always return `False`. The guard silently fails open without any fallback.
+SUGGESTED FIX: Fall back to standard home resolution methods if `pwd` is unavailable:
+```python
+def _real_home() -> Path | None:
+    try:
+        import pwd
+        return Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+    except Exception:
+        try:
+            return Path.home().resolve()
+        except Exception:
+            return None
+```
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-3
+###############################################################
+
+
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/real_store_guard.py:58
+ISSUE: `inside_real_store` silently allows writes if path resolution fails due to permission errors
+ATTACK VECTOR: An attacker with limited rights on `~/.claude-swap-backup` can manipulate permissions to trigger `OSError` during path resolution. The function catches this and returns `False`, bypassing the check so test accounts are written into real stores without raising.
+SUGGESTED FIX: Treat `OSError` as "unknown" rather than "not real": if resolution fails, check if the resolved parent path matches any known root by name, or require explicit allowlisting instead of silent bypass.
+
+---
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/switcher.py:431
+ISSUE: `_write_json` only validates `accounts` when writing to `sequence_file`
+ATTACK VECTOR: If a test helper writes other JSON files inside the real store (e.g., `sequence.json.bak` or `accounts.json`) that don't match `self.sequence_file` exactly, `refuse_test_identity` is never called and fixture data lands silently.
+SUGGESTED FIX: Validate all writes to `_real_roots()` in the switcher, not just `sequence_file`, or delegate validation to the guard at the filesystem layer.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/codex.py:107
+ISSUE: `refuse_test_identity` relies on `email_of(data)` returning a valid string
+ATTACK VECTOR: If `email_of` returns `None` or an empty string due to malformed data, `is_test_email` returns `False` and the guard skips checking the email, allowing test data to be written without raising.
+SUGGESTED FIX: Explicitly check if `email` is missing/empty in `write_private` and raise an error, since valid accounts should always have an email field.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/real_store_guard.py:58
+ISSUE: `_real_roots` is hardcoded and ignores configuration overrides
+ATTACK VECTOR: If production allows custom stores via environment variables (e.g., `CLAUDE_HOME`), this hardcoded list won't include those paths. Test identities can bypass the guard if a test script targets a real but customized store directory.
+SUGGESTED FIX: Read the active store paths from the shared configuration module (or env vars) instead of hardcoding paths.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/real_store_guard.py:10
+ISSUE: Domain list includes high-risk reserved names that may conflict with real users
+ATTACK VECTOR: Real companies might use `example.com` internally (dev domains), and `localhost` is often used in test configs that accidentally run against real stores. The guard will block valid production writes (false positive) and block real accounts during migration.
+SUGGESTED FIX: Move `TEST_DOMAINS` to a config file and add an allowlist for known production domains to avoid blocking legitimate users.
+
+---
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/switcher.py:428
+ISSUE: `refuse_test_identity` is called only once per file write despite multiple accounts
+ATTACK VECTOR: The `_write_json` method iterates `accounts` dict but calls `refuse_test_identity` once with the path, not per account. If the dict contains a mix of real and test emails, the error raises on the first test account but only after the file may have been opened (though `write_private` is atomic).
+SUGGESTED FIX: Validate all account emails upfront before writing the JSON file to ensure a single error message listing all offending accounts.
+
+---
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/real_store_guard.py:25
+ISSUE: `is_test_email` is not robust against domain encoding attacks
+ATTACK VECTOR: If a real user has an email like `user@xn--localhost` (IDN encoding), `.rpartition("@")` and `lower()` may not handle the punycode correctly, potentially letting test domains slip through if they use special characters.
+SUGGESTED FIX: Normalize the domain with `idna.encode()` before checking against `TEST_DOMAINS` to prevent punycode bypasses.
+
+
+###############################################################
+###   PROVIDER: MUSE
+###############################################################
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/switcher.py:431
+ISSUE: `_write_json` guard skipped unless `path == self.sequence_file` by exact `Path` equality.
+ATTACK VECTOR: Same file via relative path, `./`, `..`, symlink, or a separately-constructed `backup_dir / "sequence.json"` compares unequal, the `accounts` loop never runs, and a fixture (`a@x.com`) lands in the real `sequence.json`.
+SUGGESTED FIX: Compare normalized paths, e.g. `if Path(path).resolve() == self.sequence_file.resolve():` (guard OSError).
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/real_store_guard.py:30
+ISSUE: `_real_home()` returns `None` on failure and guard fails open with no log.
+ATTACK VECTOR: On Windows (`import pwd` fails) or no passwd entry, `_real_roots()` returns `[]`, `inside_real_store()` is always `False`, and every `refuse_test_identity()` is a no-op, replaying the 2026-10-05 overwrite silently.
+SUGGESTED FIX: Fail closed or warn: when home is unresolvable, either refuse test-domain writes outright or emit a loud warning and return a sentinel.
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/switcher.py:434
+ISSUE: Sequence guard only inspects `acct.get("email")`; missing/renamed email bypasses it.
+ATTACK VECTOR: A fixture account without `email` (different key, `None`, `""`) yields `is_test_email(None)==False`, so `_write_json` overwrites real slots 1/2 with email-less blobs and no error is raised.
+SUGGESTED FIX: When writing under the real store, scan all string values in each `acct` dict for test domains, or refuse ambiguous (non-string/missing) emails there.
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/real_store_guard.py:23
+ISSUE: `is_test_email` uses exact match for `TEST_DOMAINS`, so subdomains bypass.
+ATTACK VECTOR: `a@mail.x.com` or `a@sub.example.com` is not `in {"x.com",...}` and matches none of `TEST_SUFFIXES`, so `refuse_test_identity` passes and the fixture is written to the real store.
+SUGGESTED FIX: Also flag subdomains: `domain == d or domain.endswith("." + d)` for each test domain.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/codex.py:106
+ISSUE: `data.get("account")` (untyped `Any`) is passed directly to `is_test_email(str|None)`.
+ATTACK VECTOR: If `account` is a dict/bytes/list, `(email or "").strip()` raises `AttributeError`, turning a legitimate real-home write into a crash (availability) instead of a write or a `RealStoreGuardError`.
+SUGGESTED FIX: Type-check before calling: only pass through `str` emails, e.g. extract nested `account["email"]` if dict, else ignore non-strings.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: tests/test_autoswitch.py:91
+ISSUE: `EngineHarness` scratch check trusts `$TMPDIR` and constructor arg only.
+ATTACK VECTOR: Setting `TMPDIR` to the real home (or a parent) makes `scratch` equal it, and reassigning `switcher.backup_dir/sequence_file` after init (as the new test itself does) bypasses the check entirely, so a script reusing the helper still reaches the real home and relies solely on the product guard.
+SUGGESTED FIX: Resolve and pin `switcher.backup_dir/sequence_file/configs_dir` under `temp_home` after init, and resolve `scratch` from a fixed system temp rather than `tempfile.gettempdir()`.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
+
+=== APPENDED PASS 2026-10-05T08:40:09Z ===
+artifact_kind=adversarial-review
+created_at=2026-10-05T08:40:09Z
+status=ok
+mode=code
+output_format=text
+providers_used=cursor-agent, agy, codex-5.3, openrouter-4, qwen
+provider_count=5
+providers_attempted=5
+provider_outcomes=cursor-agent:ok,agy:ok,codex-5.3:ok,openrouter-4:ok,qwen:ok
+REVIEW BY: CURSOR-AGENT
+REVIEW BY: AGY
+REVIEW BY: CODEX-5.3
+REVIEW BY: OPENROUTER-4
+REVIEW BY: QWEN
+reviewed_blob=f3d16acbbf84b0a5cd763c4cec6f3ec36e791497
+reviewed_blob=840dbc95e3038ba7670419a38fa21b9fee130d79
+reviewed_blob=350dede44f0f286fb685bcede6cf86872d27de8c
+reviewed_blob=ccd2179c7b8a3296ef359be84288ef05f99b4549
+reviewed_blob=683c8db51bea5939a14945a71cb4a408eadd5595
+reviewed_blob=77aa3a48bd94c745c8f3234973a35025cbbf8352
+reviewed_blob=c51cc3417d9f021368792e714ca69dbaaa8de249
+input_chars=10544
+input_chars_original=10544
+input_truncated=false
+total_findings=29
+critical=5
+warning=19
+info=5
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: cursor-agent, agy, codex-5.3, openrouter-4, qwen (5 total)
+Mode: code
+Input size: 10544 chars
+Date: 2026-10-05T08:40:08Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CURSOR-AGENT
+###############################################################
+
+Adversarial review of the diff only (prior fixes and accepted behaviors excluded).
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/real_store_guard.py:66-77`  
+**ISSUE:** `inside_real_store` uses `Path.resolve()`, so a store directory that is a symlink to a path outside `pw_dir` roots is treated as *outside* the real store.  
+**ATTACK VECTOR:** `~/.claude-swap-backup` → `/tmp/cswap` (or an attacker-controlled target): `refuse_test_identity` sees a resolved path under `/tmp`, not under passwd home, and allows fixture emails while the app still uses the logical “backup” location—or the opposite confusion if layout and resolved paths diverge.  
+**SUGGESTED FIX:** Compare using `Path(path).expanduser()` and walk parents without following the final symlink (e.g. `os.path.commonpath` against each root’s string form), or resolve roots and use `samefile`/parent walk on existing components only.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/switcher.py:431-436`  
+**ISSUE:** Sequence guard only inspects `acct.get("email")`; account entries with no `email` key are not checked.  
+**ATTACK VECTOR:** A helper writes `{"accounts": {"1": {"id": "a@x.com", "name": "fixture"}}}` (or stale shapes) into the real `sequence.json` under a real-looking slot; guard passes, rotation/daemon logic still sees fixture identity data.  
+**SUGGESTED FIX:** Reject any sequence write under the real store if *any* account value looks like a test identity (scan agreed string fields / normalize to email before write), or validate the full schema and fail closed on missing `email`.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/codex.py:106-107`  
+**ISSUE:** `write_private` only passes `email_of(data)` or top-level `account` into `refuse_test_identity`; other auth payload shapes are unchecked.  
+**ATTACK VECTOR:** Fixture login JSON stores the test address only in nested or alternate keys (e.g. profile/user); guard sees `None`, write proceeds into real `~/.codex`, reproducing the original incident with a slightly different fixture blob.  
+**SUGGESTED FIX:** Centralize identity extraction (same helper as read path) and refuse if *any* extracted identifier is a test email, or refuse if the path is inside the real store and the payload matches known fixture fingerprints.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/real_store_guard.py:40-41`  
+**ISSUE:** `domain.endswith(TEST_SUFFIXES)` treats the `.test` gTLD (and similar suffix rules) as test-only, not only RFC 2606 reserved names.  
+**ATTACK VECTOR:** A legitimate account on a real `.test` hostname cannot be saved to the real store; backup/rotation fails with `RealStoreGuardError` in production while tests/fixtures remain protected—a false positive on a valid email boundary.  
+**SUGGESTED FIX:** Narrow suffix rules (e.g. require a single-label host ending in `.test`, or allowlist known corporate domains) or only treat suffixes as test when combined with another signal (fixture marker, env flag).
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/real_store_guard.py:66-69`  
+**ISSUE:** `inside_real_store` returns `False` on `OSError` during `path.resolve()`, so the guard fails open for that path.  
+**ATTACK VECTOR:** Unusual or transient path errors (permissions, race on missing component, EMFILE) during resolve skip the check; combined with a test email, the write continues into what was intended to be a protected location.  
+**SUGGESTED FIX:** On resolve failure for paths that *look* intended for a real root (prefix match without resolve), treat as inside real store or re-raise instead of returning `False`.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/switcher.py:693-699`  
+**ISSUE:** `_write_account_config` calls the guard then uses non-atomic `write_text`; `_write_json` / `write_private` use temp+rename.  
+**ATTACK VECTOR:** Crash or kill between guard and completed write leaves a truncated config under the real configs tree; next read may partially apply or confuse rotation without raising, while the guard already implied the write was “safe.”  
+**SUGGESTED FIX:** Reuse the same temp-in-directory + `replace` pattern as `_write_json`, with guard immediately before the atomic commit step.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** medium  
+**FILE:** `tests/test_autoswitch.py:94-96`  
+**ISSUE:** `EngineHarness` only requires `tempfile.gettempdir()` to be an ancestor of `temp_home`, not that `ClaudeAccountSwitcher` paths stay under that home.  
+**ATTACK VECTOR:** Matches the regression test pattern: valid temp `temp_home` plus repointing `backup_dir` / `sequence_file` to a passwd-backed “real” tree; guard on writes is the only latch—any future write path that omits `refuse_test_identity` reopens the 2026-10-05 class of bug without failing harness init.  
+**SUGGESTED FIX:** After constructing the switcher, assert `inside_real_store(switcher.backup_dir)` is false (or force backup paths under `temp_home`) unless the test explicitly patches `_real_home`.
+
+
+###############################################################
+###   PROVIDER: AGY
+###############################################################
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/real_store_guard.py:61
+ISSUE: `inside_real_store` omits `~/.claude.json`, leaving the primary live Claude login file unprotected.
+ATTACK VECTOR: `_real_roots()` registers `home / ".claude"` (a directory) as the live Claude root. However, Claude Code and `claude-swap` store active account identity and credentials in `$HOME/.claude.json`. When `inside_real_store` checks `p = home / ".claude.json"`, `home / ".claude"` is neither equal to `p` nor in `p.parents`. Any test script or helper writing to `~/.claude.json` returns `False`, completely bypassing the guard and overwriting the user's live login.
+SUGGESTED FIX: Include `home / ".claude.json"` in `_real_roots()` (or check `p == home / ".claude.json"`).
+
+---
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/real_store_guard.py:34
+ISSUE: `is_test_email` fails to match `@localhost` and bare RFC 6761 reserved domain names.
+ATTACK VECTOR: `TEST_SUFFIXES` is defined as `(".test", ".invalid", ".example", ".localhost")`. Every suffix begins with a `.`. When an email is `test@localhost`, `domain` is `"localhost"`. `"localhost".endswith(".localhost")` evaluates to `False` (9 chars vs 10 chars), and `"localhost"` is not in `TEST_DOMAINS`. The check returns `False`, allowing standard `@localhost` test fixtures to land in the real store without being blocked.
+SUGGESTED FIX: Strip any leading dot from `TEST_SUFFIXES` or check `domain in {"localhost", "test", "example", "invalid"} or domain.endswith(TEST_SUFFIXES)`.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/codex.py:107
+ISSUE: `write_private` silently allows test identities when `data["account"]` is a nested dictionary.
+ATTACK VECTOR: In OpenAI/Codex auth payloads, `data.get("account")` is frequently an object (e.g., `{"account": {"email": "test@example.com"}}`) rather than a string. If `email_of(data)` returns `None`, `refuse_test_identity` receives the dictionary `data.get("account")`. Inside `is_test_email`, `if not isinstance(email, str): return False` triggers, returning `False` and allowing test credentials to be written to the real `~/.codex` store.
+SUGGESTED FIX: Extract the nested email if `account` is a dictionary:
+```python
+acct = data.get("account") if isinstance(data, dict) else None
+email = email_of(data) or (acct.get("email") if isinstance(acct, dict) else acct if isinstance(acct, str) else None)
+refuse_test_identity(email, path)
+```
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: tests/test_autoswitch.py:94
+ISSUE: `EngineHarness` parent directory assertion breaks on `tempdir` itself or macOS `/tmp` and custom `pytest --basetemp`.
+ATTACK VECTOR: `scratch = Path(tempfile.gettempdir()).resolve()` followed by `if scratch not in Path(temp_home).resolve().parents` fails in multiple standard environments:
+1. `scratch` is never in `scratch.parents`, so passing `temp_home = Path(tempfile.gettempdir())` always raises `RuntimeError`.
+2. On macOS, `tempfile.gettempdir()` resolves under `/private/var/folders/.../T`, whereas directories created under `/tmp/...` resolve to `/private/tmp/...`, which does not have `/private/var/...` in its parents.
+3. Test invocations using `pytest --basetemp=<dir>` outside the system temp dir will fail prematurely.
+SUGGESTED FIX: Verify that `temp_home` does not point to the real store rather than constraining it to `tempfile.gettempdir()`:
+```python
+if inside_real_store(temp_home) or Path(temp_home).resolve() == _real_home():
+    raise RuntimeError(f"EngineHarness needs a temporary home, got {temp_home}")
+```
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/real_store_guard.py:34
+ISSUE: FQDN trailing dot in test email address (`user@example.com.`) bypasses domain matching.
+ATTACK VECTOR: Standard RFC 1035 / RFC 5321 fully-qualified domain names with a trailing dot produce `domain = "example.com."`. This string fails `domain in TEST_DOMAINS` and does not match `domain.endswith("." + d)` or `TEST_SUFFIXES`, completely bypassing the guard.
+SUGGESTED FIX: Strip trailing dots when extracting the domain:
+```python
+domain = email.strip().lower().rpartition("@")[2].rstrip(".")
+```
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/switcher.py:434
+ISSUE: `_write_json` raises uncaught `AttributeError` if `data["accounts"]` is a list.
+ATTACK VECTOR: In `_write_json`, `for acct in (data.get("accounts") or {}).values():` assumes `data.get("accounts")` is a dict. If `sequence.json` has been malformed or an operation passes `accounts` as a list (e.g. from an import or alternate schema format), `data.get("accounts")` evaluates to a list, and `.values()` crashes with `AttributeError: 'list' object has no attribute 'values'`.
+SUGGESTED FIX: Safely retrieve dictionary values:
+```python
+accounts = data.get("accounts")
+acct_iter = accounts.values() if isinstance(accounts, dict) else (accounts if isinstance(accounts, list) else [])
+for acct in acct_iter:
+    if isinstance(acct, dict):
+        refuse_test_identity(acct.get("email"), path)
+```
+
+---
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/switcher.py:434
+ISSUE: Validating entire file contents on write permanently blocks recovery when `sequence.json` is already corrupted.
+ATTACK VECTOR: `_write_json` iterates over all accounts in `data["accounts"]`. If a fixture account was already seeded into `sequence.json` (the exact production incident documented in the docstring), every call to `_write_json` for `self.sequence_file` will raise `RealStoreGuardError`. Any CLI attempt to remove or prune the invalid slot (e.g., `cswap remove 1`) will fail during the commit write, leaving the user locked out without manual file manipulation.
+SUGGESTED FIX: Allow writes if an existing test account is being removed or deleted, or provide an internal flag allowing cleanup operations to sanitize the file.
+
+
+###############################################################
+###   PROVIDER: CODEX-5.3
+###############################################################
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: `src/claude_swap/codex.py:106`  
+ISSUE: The guard can miss a test identity when `email_of(data)` returns a non-test email but `data["account"]` contains a test email.  
+ATTACK VECTOR: The `or` expression checks only the first truthy value, so the second identity can be written to the real Codex store without inspection.  
+SUGGESTED FIX: Check both identity fields independently before writing.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: `src/claude_swap/real_store_guard.py:28`  
+ISSUE: Malformed email strings can bypass the test-domain check.  
+ATTACK VECTOR: `rpartition("@")` accepts a value such as `a@x.com@other.com` and checks only `other.com`. If that value is later treated as an account identifier, a fixture identity reaches the real store.  
+SUGGESTED FIX: Require exactly one `@` and validate the parsed domain before applying the domain check.
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: `src/claude_swap/switcher.py:431`  
+ISSUE: Sequence writes are guarded only when the target path equals `self.sequence_file`.  
+ATTACK VECTOR: A caller that writes sequence data to another path inside a real store bypasses the account scan, although the guard’s stated protection covers writes anywhere under those roots.  
+SUGGESTED FIX: Apply the account scan to sequence-shaped data for every path under a real store.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-4
+###############################################################
+
+**Finding 1**  
+**SEVERITY:** CRITICAL  
+**CONFIDENCE:** high  
+**FILE:** tests/test_autoswitch.py:31‑38  
+**ISSUE:** The temporary‑home sanity check rejects a valid temporary directory.  
+```python
+scratch = Path(tempfile.gettempdir()).resolve()
+if scratch not in Path(temp_home).resolve().parents:
+    raise RuntimeError(...)
+```  
+`Path.parents` does **not** include the path itself, so when `temp_home` is exactly the system temp directory (or any temporary directory that isn’t a child of it, e.g. pytest’s `tmp_path` on macOS) the condition is true and a `RuntimeError` is raised.  
+
+**ATTACK VECTOR:** Production code that legitimately creates an `EngineHarness` with a proper temporary home will crash at start‑up, making the switcher unusable.  
+
+**SUGGESTED FIX:** Include the directory itself in the check (or use `Path.is_relative_to` on Python 3.9+). Example:  
+```python
+scratch = Path(tempfile.gettempdir()).resolve()
+temp_home_path = Path(temp_home).resolve()
+if not (temp_home_path == scratch or temp_home_path.is_relative_to(scratch)):
+    raise RuntimeError(...)
+```  
+
+---
+
+**Finding 2**  
+**SEVERITY:** CRITICAL  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/real_store_guard.py:30‑38  
+**ISSUE:** `is_test_email` treats any plain domain string as a test e‑mail.  
+```python
+domain = email.strip().lower().rpartition("@")[2]
+```
+If `email` lacks an “@” (e.g. `"example.com"`), `rpartition` returns the whole string as `domain`, which then matches `TEST_DOMAINS` and the function returns `True`.  
+
+**ATTACK VECTOR:** Code that passes a username, host name, or malformed e‑mail can be incorrectly flagged as a test identity, causing `RealStoreGuardError` and aborting legitimate writes.  
+
+**SUGGESTED FIX:** Ensure the string actually contains an “@” before extracting the domain:  
+```python
+if "@" not in email:
+    return False
+domain = email.strip().lower().rpartition("@")[2]
+```  
+
+---
+
+**Finding 3**  
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/codex.py:101‑108 & src/claude_swap/switcher.py:428‑435  
+**ISSUE:** TOCTOU race between the guard check and the atomic rename.  
+The guard (`refuse_test_identity`) validates the *target* path **before** the temporary file is written and renamed. An attacker who can replace the temporary file with a symlink after the guard passes could cause the final rename to land a test‑domain account inside the real store.  
+
+**ATTACK VECTOR:** A malicious script with write access to the temporary directory could bypass the guard and pollute the real account store.  
+
+**SUGGESTED FIX:** Perform the guard check **after** the rename on the final resolved path, or open the file with `os.O_EXCL` and re‑validate the destination before committing.  
+
+---
+
+**Finding 4**  
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/real_store_guard.py:66‑78  
+**ISSUE:** `inside_real_store` silently skips a root that cannot be resolved (e.g., due to permission errors) and returns `False`.  
+If a real‑store root directory is unreadable, the function treats any path under it as *outside* the real store, allowing test identities to be written there.  
+
+**ATTACK VECTOR:** On a system where the user’s home directory permissions are mis‑configured, the guard will be bypassed, re‑introducing the original bug that overwrote real accounts.  
+
+**SUGGESTED FIX:** Treat resolution failures of a real‑store root as a match (or raise) rather than ignoring them:  
+```python
+try:
+    root = root.resolve()
+except OSError:
+    return True   # cannot verify, assume it is a real store root
+```  
+
+---
+
+**Finding 5**  
+**SEVERITY:** INFO  
+**CONFIDENCE:** low  
+**FILE:** src/claude_swap/real_store_guard.py:23‑24  
+**ISSUE:** `RealStoreGuardError` subclasses `RuntimeError`. Callers that catch a broad `RuntimeError` may unintentionally swallow this specific guard failure, turning a protective abort into a silent failure.  
+
+**ATTACK VECTOR:** In larger codebases, a generic `except RuntimeError:` could hide the guard’s exception, leading to partial writes and inconsistent state without any alert.  
+
+**SUGGESTED FIX:** Derive `RealStoreGuardError` from a dedicated base class (e.g., `Exception`) and encourage callers to catch that specific type.  
+
+---
+
+
+###############################################################
+###   PROVIDER: QWEN
+###############################################################
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/real_store_guard.py (TEST_DOMAINS, new file ~line 23) + src/claude_switch/switcher.py:611,693 (`write_backup_credentials`, `write_backup_config`)
+ISSUE: The domain blocklist was moved into the *product* write path, so a legitimate user whose real address is `@x.com` (or any subdomain of it) can no longer back up, switch to, or save their own account — every path raises `RealStoreGuardError` with no override.
+ATTACK VECTOR: x.com is a live, globally used mail domain (it is not RFC 2606/6761 reserved — the module docstring asserts otherwise, which enshrines a false invariant in the design). The prior "Accepted" note only covers the *owner's* personal usage; this ships to all users. One real `@x.com` customer hits a hard, unrecoverable failure at the exact moment they try to persist credentials, and because the guard fires before the write there is no partial state to clean up — the account is simply unreachable. Conversely the guard does nothing for the actual root cause (a helper pointed at `$HOME`), which is a provenance problem, not a domain problem.
+SUGGESTED FIX: Gate the refusal on provenance, not on the address: refuse writes into a real-home store whenever the process is a test/script (explicit `CSWAP_ALLOW_REAL_HOME=0` default in test bootstrap, or `sys.modules`/`PYTEST_CURRENT_TEST` sentinel), and keep the product path unconditionally permissive for real domains. If the blocklist must stay, drop `x.com` from the shipped list and confine it to a test-only allow-set.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/real_store_guard.py (`is_test_email`, ~line 33)
+ISSUE: Domain extraction is a raw `rpartition` on the last `@`, so any address that isn't bare `local@domain` yields a "domain" with trailing punctuation and fails open — silently, in the dangerous direction.
+ATTACK VECTOR: `Foo Bar <a@example.com>` parses to `example.com>` — not equal to, and not a `.example.com` subdomain of, any test domain → returns False → fixture identity lands in the real store. Same for an FQDN form `a@example.com.` (trailing dot, common in API/IdP responses), `a@example.com,` in a multi-address field, and `a@localhost` (`.localhost` suffix requires the leading dot; bare `localhost` matches nothing). Since the whole guard is fail-open-by-default, every one of these produces the exact incident the module exists to prevent, with no log line.
+SUGGESTED FIX: `addr = email.utils.parseaddr(email)[1] or email`; then `domain = addr.rpartition("@")[2].strip().rstrip(".").strip(">\"' ")`, and add `{"localhost"}` to `TEST_DOMAINS`. Consider refusing on a real-store path when the field is present but unparseable rather than allowing.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/real_store_guard.py (`_real_home`, ~line 41)
+ISSUE: The "real home" is resolved only from `pwd.getpwuid(os.getuid())`, so the guard silently disables itself for container/CI uids and for `sudo`/`su`, and can also point at the wrong user.
+ATTACK VECTOR: Two concrete production/CI states: (a) uid with no passwd entry (Docker user-namespace remapping, `--user 1000` with a minimal `/etc/passwd`, NFS/NSS unavailable at import time) → the broad `except Exception` returns `None` → `_real_roots()` is `[]` → `inside_real_store()` returns False for *every* path, so the guard is inert and the test suite still passes; the accepted rationale says "Windows", but this is POSIX-only too. (b) Run the offending helper under `sudo` (a normal way to reproduce/repair a store) and `getuid()` is 0, so roots become `/root/...` while `$HOME`-derived writes still hit `/Users/owner` — unguarded. `os.getuid()` is also the *real* uid, not the effective one, so setuid paths disagree.
+SUGGESTED FIX: Union multiple candidates instead of one: `pwd` home, `os.environ["HOME"]`, `Path.home()`, and `pwd.getpwuid(os.geteuid()).pw_dir`. Only treat "no candidates" as unguarded on Windows, and emit a one-time warning when `_real_home()` fails on POSIX so inertness isn't silent.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/real_store_guard.py (`_real_roots`, ~line 49)
+ISSUE: The protected roots are four hardcoded directory names, but the guard is called with paths the switcher/codex actually derive from config — the two can disagree, leaving the real store unmonitored.
+ATTACK VECTOR: The tests only pass because the harness happens to set `backup_dir` to the hardcoded `~/.claude-swap-backup` string. Any user or CI job with a relocated store (`$CODEX_HOME`, a custom backup dir, a different XDG base) has a real store whose path isn't in `_real_roots()` → `inside_real_store()` False → fixture write lands. The mirror failure also exists: the list is broader than this project (`~/.codex`, `~/.claude`), so unrelated tools' files under those roots now inherit a refusal rule they never asked for.
+SUGGESTED FIX: Pass the guard the store root the object is actually using (e.g. `refuse_test_identity(email, path, store_root=self.backup_dir)`) and only fall back to `_real_roots()` as an extra check, so containment tracks configuration rather than a snapshot of paths.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/switcher.py:431 (`_write_json`)
+ISSUE: The chokepoint gate is `(path == self.sequence_file) and data["accounts"][*]["email"]`, so the same generic writer puts fixture data into the real backup directory through every other file and every other field shape.
+ATTACK VECTOR: `_write_json` is the shared JSON writer for the store; the identity check is skipped for any path whose resolved name differs from `sequence.json` (per-account credential files, backups/rotations of the sequence, temp names) and for emails stored under any other key or nesting (list of accounts, `{"slot": {"id": ...}}`, or an email only embedded in a filename/token). Those files are the higher-value target — credentials, not the slot list — and they land in `~/.claude-swap-backup` unopposed, reproducing the incident while the new test stays green. Secondary: `Path(self.sequence_file).resolve()` runs on *every* `_write_json` call, so a partially constructed switcher (`sequence_file` unset/None) or an ELOOP-prone path turns an unrelated write into `TypeError`/`OSError`.
+SUGGESTED FIX: Remove the path-equality condition — guard whenever `inside_real_store(path)`, and walk all string values of `data` (or the filename) with `is_test_email` instead of a fixed `["accounts"][k]["email"]` path; wrap the comparison in `try/except (TypeError, OSError)` so a misconfigured attribute can't break writes.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: tests/test_autoswitch.py:91 (`EngineHarness.__init__`)
+ISSUE: The test-side containment check compares against `tempfile.gettempdir()`, which is attacker/env-controlled, and never compares against the real home it is meant to protect.
+ATTACK VECTOR: `gettempdir()` honors `$TMPDIR`/`$TEMP`/`$TMP`, so `TMPDIR=~ pytest` (or a CI export of a workspace path) makes the scratch root the real home and `EngineHarness(real_home)` sails through — precisely the "script reusing the helper" case the comment cites. The check also only rejects the *positive* case (not under temp) rather than requiring the pytest tmp root (`tmp_path`/`basetemp`), so any pre-existing directory under `/tmp` (e.g. `/tmp/fixed-home` shared between concurrent CI jobs on one runner) passes and two jobs race on the same "scratch" store. And it protects one helper class in one module, leaving the `temp_home` fixture itself and other helpers unvalidated.
+SUGGESTED FIX: Assert against the same source of truth the product uses: `if _real_home() in Path(temp_home).resolve().parents or Path(temp_home).resolve() == _real_home(): raise`, plus require the resolved path to start with the pytest `basetemp`/`tmp_path` root rather than `gettempdir()`.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/codex.py:106 (`write_private`)
+ISSUE: A non-email field (`data.get("account")`) is fed into an email predicate as a fallback, in a third variant of the "where does the identity live" convention (vs. `acct.get("email")` in `switcher._write_json` and the bare `email` arg in the other two call sites).
+ATTACK VECTOR: `email_of(data) or data.get("account")` means an `account` value of `"1"`/`"default"`/a plan label is treated as an address; combined with the no-`@` case, a value like `"x.com"` (a plausible label/plan string) matches `TEST_DOMAINS` and blocks a legitimate write, while `account` as a dict/int silently yields False and skips the check. The three divergent field lookups also mean a rename of one field disables one guard without touching any test that asserts it.
+SUGGESTED FIX: One `identity_of(data) -> str | None` helper in `real_store_guard` used by all call sites, returning None (skip) rather than guessing from non-email keys, and only accept values containing `@`.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
+
+=== APPENDED PASS 2026-10-05T08:45:59Z ===
+artifact_kind=adversarial-review
+created_at=2026-10-05T08:45:59Z
+status=partial
+mode=code
+output_format=text
+providers_used=cursor-agent, agy, codex-5.3, muse
+provider_count=4
+providers_attempted=5
+provider_outcomes=cursor-agent:ok,agy:ok,codex-5.3:ok,openrouter-3:empty,muse:ok
+REVIEW BY: CURSOR-AGENT
+REVIEW BY: AGY
+REVIEW BY: CODEX-5.3
+REVIEW BY: MUSE
+reviewed_blob=f3d16acbbf84b0a5cd763c4cec6f3ec36e791497
+reviewed_blob=840dbc95e3038ba7670419a38fa21b9fee130d79
+reviewed_blob=350dede44f0f286fb685bcede6cf86872d27de8c
+reviewed_blob=ccd2179c7b8a3296ef359be84288ef05f99b4549
+reviewed_blob=683c8db51bea5939a14945a71cb4a408eadd5595
+reviewed_blob=3129ff2b166a72ff7455288c443d03d0869a988f
+reviewed_blob=c34c485d52ba76d013181ac06422922f2da5566c
+input_chars=12115
+input_chars_original=12115
+input_truncated=false
+total_findings=23
+critical=8
+warning=11
+info=4
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: cursor-agent, agy, codex-5.3, muse (4 total)
+Mode: code
+Input size: 12115 chars
+Date: 2026-10-05T08:45:58Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CURSOR-AGENT
+###############################################################
+
+**Finding 1**
+
+**SEVERITY:** CRITICAL  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/switcher.py` (in `_write_json`, per diff)  
+**ISSUE:** Real-store protection in `_write_json` runs only when `path` equals `sequence_file` and only inside the `accounts` loop, so test-context and reserved-email checks can be skipped entirely.  
+**ATTACK VECTOR:** Under pytest (or with any `tests.*` module loaded), a call like `_write_json(real_sequence_path, {"accounts": {}})` or `_write_json(other_json_under_real_backup, …)` never calls `refuse_test_identity`, so the real `sequence.json` or other backup JSON can still be created/overwritten—the same class of failure the guard was meant to stop.  
+**SUGGESTED FIX:** At the start of `_write_json`, always call `refuse_test_identity(None, path)` (or an explicit `inside_real_store(path) and in_test_context()` check) before writing; keep the per-account loop only for reserved-domain emails when not in test context.
+
+---
+
+**Finding 2**
+
+**SEVERITY:** CRITICAL  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/real_store_guard.py:59-65, 81-84`  
+**ISSUE:** On platforms without a usable `pwd` entry, `_real_home()` returns `None`, `_real_roots()` is empty, and `inside_real_store()` is always false—so the guard never runs.  
+**ATTACK VECTOR:** On Windows (as noted in the comment) or any environment where `pwd` fails, test helpers or reserved-domain identities can write to the live store under the patched `$HOME` with no refusal, repeating the original incident on that platform.  
+**SUGGESTED FIX:** Add a non-POSIX fallback for “real home” (e.g. canonical user profile via `USERPROFILE` / known folder APIs) and treat inability to resolve real roots as fail-closed for writes to default store paths, not fail-open.
+
+---
+
+**Finding 3**
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/real_store_guard.py:95-108` + `tests/test_real_store_guard.py:51-52`  
+**ISSUE:** Fixture emails on real domains (e.g. `a@x.com`) are refused only when `in_test_context()` is true; outside that, only reserved domains are blocked.  
+**ATTACK VECTOR:** A one-off script pointed at the real home that calls production APIs directly (no pytest, no `tests.*` import)—exactly the 2026-10-05 scenario—can still seed `a@x.com` / `b@x.com` into the real store; tests explicitly allow `someone@x.com` when `in_test_context` is patched false.  
+**SUGGESTED FIX:** If product policy allows, add an optional denylist for known fixture emails/domains used in-repo, or require an explicit env flag to write to real store paths from non-interactive entrypoints.
+
+---
+
+**Finding 4**
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/real_store_guard.py:63-65`  
+**ISSUE:** `_real_home()` uses a bare `except Exception` and returns `None`, disabling all real-store detection for any transient `pwd`/resolve failure, not only “no passwd entry.”  
+**ATTACK VECTOR:** During partial system stress, misconfigured NSS, or rare `resolve()` errors, production writes targeting the real store proceed unguarded while operators assume the guard is active—silent fail-open.  
+**SUGGESTED FIX:** Catch only expected errors (e.g. `ImportError`, `KeyError`); log and either re-raise or fail closed when guard cannot determine real roots.
+
+---
+
+**Finding 5**
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `tests/test_autoswitch.py:91-96`  
+**ISSUE:** `EngineHarness` requires `tempfile.gettempdir()` to appear in `Path(temp_home).resolve().parents`, not merely “not the real user home.”  
+**ATTACK VECTOR:** On macOS, `/tmp` vs `/private/tmp` (or custom `TMPDIR` vs pytest’s directory) can fail the check even for legitimate isolated homes, pushing developers to bypass the harness or use ad-hoc paths; conversely, a home under an unexpected temp layout might pass without being the harness’s intended isolation.  
+**SUGGESTED FIX:** Compare `temp_home.resolve()` against `_real_home()` from the guard (must differ), or require a pytest `tmp_path` fixture marker instead of parent-chain heuristics on `gettempdir()`.
+
+---
+
+**Finding 6**
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/real_store_guard.py:52-56`  
+**ISSUE:** `in_test_context()` treats any loaded module named exactly `conftest` or top-level `tests` as test context, with no tie to pytest or this project.  
+**ATTACK VECTOR:** A production process that imports an unrelated package named `tests` or `conftest` suddenly gets all real-store writes from `refuse_test_identity`/`write_private`/`switcher` paths raising `RealStoreGuardError`, causing confusing production outages unrelated to claude-swap tests.  
+**SUGGESTED FIX:** Narrow detection to pytest markers (`PYTEST_CURRENT_TEST`, `_pytest`) plus modules under this project’s `tests` package (e.g. prefix match on `__file__` or a dedicated env var set by your test runner).
+
+---
+
+**Finding 7**
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** low  
+**FILE:** `src/claude_swap/real_store_guard.py:39-48`  
+**ISSUE:** `is_test_email()` does not normalize IDNA/punycode domains, so Unicode lookalikes of reserved names may not match `RESERVED_DOMAINS` / suffix rules.  
+**ATTACK VECTOR:** A crafted “test” identity using homoglyph or punycode domain labels could slip past reserved-domain refusal when not in pytest context (unlikely for accidental fixture use, more relevant if inputs are adversarial).  
+**SUGGESTED FIX:** Normalize the domain with `encode("idna").decode("ascii")` (with safe fallback) before reserved/suffix checks.
+
+---
+
+**Note:** Finding 1 is the clearest defect relative to the stated goal (“in a TEST context … nothing may be written” to the real home): `_write_json` is a direct hole for non-sequence JSON and empty-account sequence updates. Finding 2 is the main cross-platform gap in the same module. Finding 3 is documented intentional tradeoff but leaves the original `x.com` fixture attack path open for non-pytest scripts.
+
+
+###############################################################
+###   PROVIDER: AGY
+###############################################################
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/switcher.py:431
+ISSUE: Empty accounts dict or non-sequence writes in `_write_json` bypass the real-store guard in test contexts.
+ATTACK VECTOR: In `_write_json`, `refuse_test_identity` is only called inside the loop `for acct in (data.get("accounts") or {}).values():`. If a test helper or script resets, initializes, or clears `sequence.json` by writing `{"accounts": {}}` or omitting `"accounts"`, the loop executes 0 times and `refuse_test_identity` is never called. The real user's `sequence.json` is wiped out from test code despite the invariant that "nothing may be written there at all from test code". Additionally, any non-sequence JSON file written by `_write_json` to the real store skips validation entirely because of `if Path(path).resolve() == Path(self.sequence_file).resolve():`.
+SUGGESTED FIX: Call `refuse_test_identity(None, path)` unconditionally at the start of `_write_json` whenever `path` is inside the real store, or check `refuse_test_identity` before the loop.
+
+---
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/real_store_guard.py:31
+ISSUE: Top-level RFC 2606/6761 reserved domains (`@test`, `@invalid`, `@example`) fail `is_test_email` due to mismatched dot-prefixed suffixes.
+ATTACK VECTOR: `TEST_SUFFIXES` is defined as `(".test", ".invalid", ".example", ".localhost")`. For an email using bare RFC 2606 reserved TLDs (e.g. `user@test`, `admin@invalid`, `user@example`), `domain` is extracted as `"test"`, `"invalid"`, or `"example"`. In Python, `"test".endswith(".test")` evaluates to `False` (a 4-char string cannot end with a 5-char string), and `"test"` is not in `RESERVED_DOMAINS` (`example.com`, `example.org`, `example.net`, `localhost`). Consequently, `is_test_email` returns `False` for standard reserved test domains, allowing them to bypass the guard outside of pytest.
+SUGGESTED FIX: Add bare reserved names to `RESERVED_DOMAINS` or check against stripped suffixes:
+```python
+RESERVED_DOMAINS = frozenset({"example.com", "example.org", "example.net", "localhost", "example", "test", "invalid"})
+```
+
+---
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/real_store_guard.py:52
+ISSUE: Standalone test scripts running as `__main__` bypass `in_test_context()`, allowing fixture domains to overwrite the real store.
+ATTACK VECTOR: The design rationale states that fixture domains (`a@x.com`, `b@x.com`) are real domains and are blocked only by provenance via `in_test_context()`. However, `in_test_context()` only checks `PYTEST_CURRENT_TEST`, `"pytest" in sys.modules`, or `sys.modules` keys matching `"tests"`/`"tests."`. If a test script, seeder, or benchmark is executed directly (`python scripts/seed_helper.py` or `python tests/run_test.py`), its module name is `"__main__"`, `pytest` is not imported, and `in_test_context()` returns `False`. Because `is_test_email("a@x.com")` is also `False`, the script sails past both checks and overwrites the real store—recreating the exact 2026-10-05 incident.
+SUGGESTED FIX: Inspect `sys.argv[0]` or the call stack for test script paths, or require an explicit environment variable (e.g. `ALLOW_REAL_STORE_WRITE=1`) before permitting writes to `inside_real_store(path)`.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: tests/test_autoswitch.py:94
+ISSUE: `EngineHarness` scratch validation fails on macOS `/tmp` paths and when `temp_home` equals `tempfile.gettempdir()`.
+ATTACK VECTOR: `EngineHarness` checks `if scratch not in Path(temp_home).resolve().parents: raise RuntimeError(...)`. First, `Path.parents` does not contain the path itself, so passing `temp_home = Path(tempfile.gettempdir())` crashes. Second, on macOS, `tempfile.gettempdir()` resolves to `/private/var/folders/...`, whereas tests or scripts allocating temporary workspaces under `/tmp` resolve to `/private/tmp`. Because `/private/var/folders/...` is not in `/private/tmp`'s parent hierarchy, valid temporary homes fail with `RuntimeError: EngineHarness needs a temporary home`.
+SUGGESTED FIX: Allow `temp_home == scratch` and allow standard system temporary roots:
+```python
+p = Path(temp_home).resolve()
+if p != scratch and scratch not in p.parents and not str(p).startswith(("/tmp", "/private/tmp")):
+    raise RuntimeError(f"EngineHarness needs a temporary home, got {temp_home}")
+```
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/switcher.py:611
+ISSUE: Restoring or switching active identities to the live store (`~/.claude.json` / `~/.claude`) lacks guard enforcement.
+ATTACK VECTOR: `_real_roots()` defines `home / ".claude"` and `home / ".claude.json"` as protected roots. However, in `switcher.py`, `refuse_test_identity` is only attached to backup writes (`self.backup_dir`, `self.configs_dir`) and `sequence.json`. When switching accounts, active credentials and configurations are written to the live `~/.claude.json` or `~/.claude`, but neither `switch_account` nor live identity writers invoke `refuse_test_identity`. A test identity activated during testing or rotation will overwrite live credentials without triggering the guard.
+SUGGESTED FIX: Add `refuse_test_identity(email, target_path)` inside the live Claude activation/switch method where `~/.claude.json` and `~/.claude` are written.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/codex.py:107
+ISSUE: Nested account dictionaries in `write_private` bypass `is_test_email` validation.
+ATTACK VECTOR: In `write_private`, the account fallback is `email_of(data) or (data.get("account") if isinstance(data, dict) else None)`. In OAuth/ChatGPT auth payloads where `email_of(data)` returns `None`, `data["account"]` is frequently a dictionary (e.g. `{"id": "...", "email": "test@example.com"}`). When passed a dictionary as `email`, `refuse_test_identity` calls `is_test_email(dict)`, which returns `False` immediately (`if not isinstance(email, str): return False`). Outside a pytest context, a test identity inside a nested account dictionary is written to `~/.codex/auth.json` unblocked.
+SUGGESTED FIX: Extract the email if `account` is a dictionary:
+```python
+acct = data.get("account") if isinstance(data, dict) else None
+email = email_of(data) or (acct.get("email") if isinstance(acct, dict) else acct)
+refuse_test_identity(email, path)
+```
+
+---
+
+SEVERITY: INFO
+CONFIDENCE: high
+FILE: src/claude_swap/real_store_guard.py:59
+ISSUE: Guard completely disables itself on Windows and in environments without `/etc/passwd`.
+ATTACK VECTOR: `_real_home()` relies exclusively on `pwd.getpwuid(os.getuid())`. On Windows (`pwd` does not exist) or in containerized Linux environments running with an unmapped UID (raising `KeyError`), `_real_home()` catches the exception and returns `None`. When `_real_home()` is `None`, `_real_roots()` returns `[]`, `inside_real_store(path)` always returns `False`, and `refuse_test_identity` returns immediately—silently bypassing both test context and reserved domain checks.
+SUGGESTED FIX: Fall back to `Path.home().resolve()` or `os.environ.get("USERPROFILE")` when `pwd` is unavailable:
+```python
+def _real_home() -> Path | None:
+    try:
+        import pwd
+        return Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+    except Exception:
+        try:
+            return Path.home().resolve()
+        except Exception:
+            return None
+```
+
+
+###############################################################
+###   PROVIDER: CODEX-5.3
+###############################################################
+
+SEVERITY: CRITICAL  
+CONFIDENCE: high  
+FILE: src/claude_swap/switcher.py:428  
+ISSUE: A real `sequence.json` write is allowed when `accounts` is empty.  
+ATTACK VECTOR: The guard runs only inside the account loop. A test helper can write `{"accounts": {}}` to the real sequence file and erase its account list without triggering the guard.  
+SUGGESTED FIX: Check the destination for test context before iterating accounts; keep the per-account check for reserved domains.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: src/claude_swap/real_store_guard.py:69  
+ISSUE: The guard trusts the password database home even when the target’s actual home differs.  
+ATTACK VECTOR: The documented incident involved the owner’s Mac, where the real account files are under `/Users/...`. If the password database returns a different home path, `inside_real_store` returns false and every guarded write proceeds.  
+SUGGESTED FIX: Resolve the protected roots from the actual account store location used by the application, with a stable real-home value captured before test isolation.
+
+
+###############################################################
+###   PROVIDER: MUSE
+###############################################################
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/switcher.py:431
+ISSUE: `_write_json` only mediates the sequence file; all other real-store JSON writes bypass the test-context block
+ATTACK VECTOR: Invariant in `real_store_guard.py` is "in a TEST context nothing may be written there at all". `_write_json` calls `refuse_test_identity` only when `path == sequence_file`. A test/helper writing any other file under `~/.claude-swap-backup`, `~/.codex`, `~/.claude` via the same writer succeeds in a test context and corrupts the live store.
+SUGGESTED FIX: Call `refuse_test_identity(None, path)` for every `_write_json` path under the real store, not only the sequence file; keep the per-account email loop as extra context.
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/real_store_guard.py:50
+ISSUE: Guard fails open when real roots are unknown or unresolvable
+ATTACK VECTOR: `_real_home()` returns `None` on Windows (`import pwd` fails), missing passwd entry, or `sudo` (`uid 0` -> `/var/root`, not the user's home). Then `_real_roots()` is `[]` and `inside_real_store()` is always `False`, so `refuse_test_identity` returns silently. Same fail-open on `OSError` from `Path.resolve()`. Production Windows / root runs have zero protection while tests (which monkeypatch `_real_home`) stay green.
+SUGGESTED FIX: Fail closed in test context: if roots are unknown and `in_test_context()` is true, raise instead of returning; on Windows resolve the home via `Path.home()`/env as fallback.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/switcher.py:696
+ISSUE: Guard checks parent dir but write uses unsanitized email in filename
+ATTACK VECTOR: `store_account_config` calls `refuse_test_identity(email, self.configs_dir)` then builds `configs_dir / f".claude-config-{account_num}-{email}.json"`. An email containing `/` or `..` escapes the checked directory: a guarded dir passes while the actual file lands outside it, or a scratch `configs_dir` with a crafted email lands inside the real store without ever being checked. Same check-vs-use gap for `backup_dir` vs the file written inside `_store._write_account_credentials`.
+SUGGESTED FIX: Validate/sanitize `email`/`account_num` for path separators and call `refuse_test_identity` on the final `config_file` path, not the directory.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/switcher.py:434
+ISSUE: Sequence scan only inspects dict entries' `email` field; other shapes bypass the reserved-domain check
+ATTACK VECTOR: Outside a test context only `is_test_email(email)` blocks. The loop skips non-dict `acct` values and passes `acct.get("email")` (possibly `None`/missing) to the guard. A sequence entry stored as a string, list, or dict without `email` (e.g. `{"1": "b@example.com"}`) is written to the real `sequence.json` with no error.
+SUGGESTED FIX: In the sequence-file branch, refuse on any account value that is not a dict with a non-reserved string email, or scan the serialized content for reserved domains.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/codex.py:106
+ISSUE: `write_private` extracts one email; nested/alternate shapes bypass the reserved-domain check
+ATTACK VECTOR: Guard sees only `email_of(data) or data.get("account")`. Outside a test context, a payload carrying the fixture address under another key or as a dict (e.g. `account` is a dict with an email inside) yields `None`/non-string to `is_test_email`, which returns `False`, so `b@example.com` is written to the real `~/.codex/auth.json`.
+SUGGESTED FIX: Pass the whole `data` payload (or its serialized form) to the guard, or check all string values for reserved test domains, not one extracted field.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/real_store_guard.py:44
+ISSUE: Test-context detection is evadable; `x.com` fixtures are then unblocked by design
+ATTACK VECTOR: `in_test_context()` requires `pytest`/`tests`/`conftest` in `sys.modules`. A script that copy-pastes the helper (no `tests` import) run with plain `python` outside pytest is not a "test context", and `a@x.com`/`b@x.com` are deliberately not reserved domains, so `write_private`/sequence writes to the real home succeed — the exact 2026-10-05 corruption recurs.
+SUGGESTED FIX: Additionally treat known fixture addresses or a marker (env var, fixture sender) as test identity anywhere, or require explicit opt-in to write fixture domains to real roots.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/real_store_guard.py:28
+ISSUE: `is_test_email` misses bare reserved TLDs like `user@test` / `user@invalid`
+ATTACK VECTOR: `TEST_SUFFIXES` only matches dotted suffixes (`.test`, `.invalid`); single-label `test`/`invalid`/`example`/`localhost` as the full domain falls through, so a fixture using `a@test` is written to the real store outside a test context.
+SUGGESTED FIX: Also block `domain in {"test", "invalid", "example", "localhost"}`.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
+
+=== APPENDED PASS 2026-10-05T08:52:26Z ===
+artifact_kind=adversarial-review
+created_at=2026-10-05T08:52:26Z
+status=ok
+mode=code
+output_format=text
+providers_used=cursor-agent, agy, codex-5.3, openrouter-4, qwen
+provider_count=5
+providers_attempted=5
+provider_outcomes=cursor-agent:ok,agy:ok,codex-5.3:ok,openrouter-4:ok,qwen:ok
+REVIEW BY: CURSOR-AGENT
+REVIEW BY: AGY
+REVIEW BY: CODEX-5.3
+REVIEW BY: OPENROUTER-4
+REVIEW BY: QWEN
+reviewed_blob=f3d16acbbf84b0a5cd763c4cec6f3ec36e791497
+reviewed_blob=840dbc95e3038ba7670419a38fa21b9fee130d79
+reviewed_blob=350dede44f0f286fb685bcede6cf86872d27de8c
+reviewed_blob=ccd2179c7b8a3296ef359be84288ef05f99b4549
+reviewed_blob=683c8db51bea5939a14945a71cb4a408eadd5595
+reviewed_blob=786c588c21ef11a454e8faa29979335ec9db91fb
+reviewed_blob=8bd450d33f0a146ecc97a83ae9b35ff2c870b641
+input_chars=2942
+input_chars_original=2942
+input_truncated=false
+total_findings=20
+critical=4
+warning=10
+info=6
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: cursor-agent, agy, codex-5.3, openrouter-4, qwen (5 total)
+Mode: code
+Input size: 2942 chars
+Date: 2026-10-05T08:52:26Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CURSOR-AGENT
+###############################################################
+
+Review is based only on the diff you provided; `real_store_guard.py` / `switcher.py` are not in this workspace, so guard internals (e.g. whether paths are resolved) are inferred where noted.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/switcher.py:428`  
+**ISSUE:** Path guard runs on the literal `path` while the sequence branch uses `Path(path).resolve()` — inconsistent normalization invites symlink/`..` bypass if `refuse_test_identity` does not resolve the same way.  
+**ATTACK VECTOR:** In tests (or any caller), `_write_json(temp_home/decoy → real store file, data)` passes a guard that keys off `$HOME`/prefix on the unresolved path, then `open()`/rename follows the symlink and mutates the real store; the new test uses a direct path under `fake_real_home`, so it would not catch this.  
+**SUGGESTED FIX:** In one shared helper used by both checks, normalize with `Path(path).expanduser().resolve(strict=False)` (and document policy on symlinks); call that from `refuse_test_identity` and the sequence-file branch.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/real_store_guard.py:31`  
+**ISSUE:** New reserved labels `test` / `invalid` are only covered in parametrize as lowercase (`f@test`, `g@invalid`); if matching is case-sensitive on the domain part, `user@TEST` / `user@Invalid` may not count as test identity.  
+**ATTACK VECTOR:** Test suite or harness uses mixed-case fixture emails; identity guard treats them as “real” while other test-context rules still assume reserved labels — inconsistent refusal (especially on code paths that key off email only, not `_write_json`).  
+**SUGGESTED FIX:** Normalize the domain with `.lower()` (and optionally IDNA/punycode) before `RESERVED_DOMAINS` / suffix checks; add parametrize cases for mixed-case domains.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** high  
+**FILE:** `tests/test_real_store_guard.py:79`  
+**ISSUE:** Regression test exercises a single target (`…/autoswitch_state.json`) and asserts refusal via `_write_json` only.  
+**ATTACK VECTOR:** Not a direct production bug by itself; if `refuse_test_identity(None, path)` or real-home detection ever special-cases certain relative paths or basenames, other JSON locations could regress without CI catching it.  
+**SUGGESTED FIX:** Add one parametrized case for another real JSON target the switcher writes (same `fake_real_home` + `EngineHarness(temp_home)` setup), or assert the guard predicate is purely “under configured real home” with no basename allowlist (unit test that predicate directly).
+
+---
+
+**Not reported (per your acceptance note):** standalone fixture copy without test imports, Windows/`passwd`, and non-`_write_json` write paths — out of scope for this artifact.
+
+**Not escalated:** Deliberate `refuse_test_identity(None, path)` (path-only in tests) is consistent with the comment; treating bare `test`/`invalid`/`example` as test identities matches RFC 2606-style use and your new parametrize expectations — no defect unless production code applies those rules outside a test context (not shown in the diff).
+
+If `refuse_test_identity` already resolves paths the same way as the sequence-file check and lowercases domains, finding 1 and/or 2 drop to **low** confidence false positives; the diff alone cannot confirm that.
+
+
+###############################################################
+###   PROVIDER: AGY
+###############################################################
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: tests/test_real_store_guard.py:82
+ISSUE: Phantom test creates false sense of security; `autoswitch_state.json` is written via `atomic_write_json`, which has no guard against writing to the real home.
+ATTACK VECTOR: In `test_any_json_write_under_the_real_home_is_refused_in_tests`, the author asserts that writing `autoswitch_state.json` under the real home is refused by testing `h.switcher._write_json(target, ...)`. But in actual application execution (`src/claude_swap/autoswitch.py:1321, 3298, 3317`), state mutations never call `switcher._write_json`; they write directly via `atomic_write_json(self.state_path, state)`. Because `atomic_write_json` in `settings.py` does not call `refuse_test_identity`, any test helper, script, or daemon run in test context that points to real home will write `autoswitch_state.json` directly into `~/.claude-swap-backup/`.
+SUGGESTED FIX: Add `refuse_test_identity(None, path)` directly inside `atomic_write_json(path, data)` in `src/claude_swap/settings.py`, and update the test to invoke the actual write path used by `autoswitch.py`.
+
+---
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/switcher.py:433
+ISSUE: In production, `_write_json` never validates accounts/emails when writing `~/.claude.json` (`config_path`).
+ATTACK VECTOR: Outside of test context (`not in_test_context()`), `refuse_test_identity(None, path)` at line 433 is a no-op because `is_test_email(None)` returns `False`. The subsequent loop validating account emails only runs `if Path(path).resolve() == Path(self.sequence_file).resolve():`. `ClaudeAccountSwitcher` calls `self._write_json(config_path, ...)` across multiple methods (`switcher.py:3069, 7013, 7262`) to update the live `~/.claude.json` identity. If an account has a test email (e.g. `user@test` or `admin@example.com`), `_write_json` does not inspect `config_path` payloads in production and writes the test identity directly into the real `~/.claude.json`.
+SUGGESTED FIX: In `_write_json`, inspect and validate the active OAuth email when `path` is `self._get_claude_config_path()` (e.g., checking `data.get("oauthAccount", {}).get("emailAddress")` against `refuse_test_identity`).
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/switcher.py:437
+ISSUE: Unhandled `AttributeError` when `data.get("accounts")` is a list instead of a dict.
+ATTACK VECTOR: The expression `for acct in (data.get("accounts") or {}).values():` assumes that if `accounts` is truthy, it is a dictionary with a `.values()` method. If `data["accounts"]` is a non-empty list (e.g. from an export schema, corrupted payload, or API-key account array as seen in `cli.py`), Python evaluates `(list_obj or {})` to `list_obj`. Invoking `.values()` raises `AttributeError: 'list' object has no attribute 'values'`, crashing the switcher before the JSON write or guard can run.
+SUGGESTED FIX: Guard the type explicitly before calling `.values()`:
+```python
+accounts = data.get("accounts")
+if isinstance(accounts, dict):
+    for acct in accounts.values():
+        if isinstance(acct, dict):
+            refuse_test_identity(acct.get("email"), path)
+```
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/real_store_guard.py:31
+ISSUE: Bare loopback IPs (`127.0.0.1`, `::1`) and host-port combinations bypass `is_test_email`.
+ATTACK VECTOR: `is_test_email` strips characters via `.strip(" .>")` and checks `domain in RESERVED_DOMAINS` or `endswith(TEST_SUFFIXES)`. If a test fixture or local mock OAuth server uses loopback identities such as `user@127.0.0.1`, `admin@[127.0.0.1]`, or `user@localhost:8080`, `is_test_email` returns `False` in production contexts because IP literals and port-affixed hostnames are not in `RESERVED_DOMAINS` and do not match `TEST_SUFFIXES`.
+SUGGESTED FIX: Include loopback IPs (`"127.0.0.1"`, `"::1"`) in `RESERVED_DOMAINS`, and strip brackets and port suffixes (`domain.partition(":")[0]`) before checking against `RESERVED_DOMAINS`.
+
+---
+
+SEVERITY: INFO
+CONFIDENCE: high
+FILE: tests/test_real_store_guard.py:28
+ISSUE: Test parameterization tests bare `test` and `invalid` but omits bare `example`.
+ATTACK VECTOR: `RESERVED_DOMAINS` was extended with `"test"`, `"invalid"`, and `"example"`. The test added `("f@test", True)` and `("g@invalid", True)` to `test_test_domains` but omitted `("h@example", True)`, leaving the third added bare domain untested.
+SUGGESTED FIX: Add `("h@example", True)` to the parameterized test cases in `test_test_domains`.
+
+
+###############################################################
+###   PROVIDER: CODEX-5.3
+###############################################################
+
+NO ISSUES FOUND.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-4
+###############################################################
+
+**SEVERITY:** CRITICAL  
+**CONFIDENCE:** high  
+**FILE:** src/claude_swap/switcher.py:432‑438  
+**ISSUE:** `_write_json` calls `refuse_test_identity(None, path)` – the first argument is supposed to be a user identifier (e.g., an email). Supplying `None` can raise a `TypeError` inside `refuse_test_identity` or, if the function silently treats a falsy value as “no check”, it bypasses the guard entirely, allowing arbitrary JSON writes to the real home directory.  
+**ATTACK VECTOR:** An attacker (or a mis‑behaving test) could invoke `_write_json` with a `None` identity and write malicious data to a location that should be protected, potentially overwriting user configuration or credential files.  
+**SUGGESTED FIX:** Pass the actual account identifier (or a dedicated “test‑mode” flag) to `refuse_test_identity`. If the function is intended to be called without an identity in test mode, add a dedicated wrapper that performs the same guard logic without mis‑using the API, e.g.:
+
+```python
+def _write_json(self, path: Path, data: dict) -> None:
+    if self._is_test_context():
+        refuse_test_identity(self.current_account.email, path)
+    else:
+        refuse_test_identity(self.current_account.email, path)
+    # …rest of method…
+```
+
+
+---
+
+**SEVERITY:** CRITICAL  
+**CONFIDENCE:** high  
+**FILE:** src/claude_swap/switcher.py:435‑438  
+**ISSUE:** The guard that should prevent writing to the real sequence file only *detects* the condition (`if Path(path).resolve() == Path(self.sequence_file).resolve():`) but does **not** abort the write operation (no `return` or `raise`). The comment suggests the intention is to block the write, yet the function will continue and later write to `self.sequence_file`.  
+**ATTACK VECTOR:** In a test environment that mistakenly points a fixture at the real home, the guard silently allows overwriting the production `sequence_file`, corrupting the user's account list.  
+**SUGGESTED FIX:** Add an early exit when the protected path is detected:
+
+```python
+if Path(path).resolve() == Path(self.sequence_file).resolve():
+    raise RealStoreGuardError("Refusing to write to real sequence file")
+```
+
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/real_store_guard.py:28‑30  
+**ISSUE:** `RESERVED_DOMAINS` now contains the bare string `"example"` in addition to `"example.com"` etc. If the domain‑checking logic performs a simple equality test, `"example"` will block any email whose domain is exactly `"example"` (which is fine), but many implementations mistakenly treat a domain as a suffix and will also block legitimate domains that *contain* the word “example” (e.g., `myexample.org`).  
+**ATTACK VECTOR:** Valid user emails could be rejected in production, causing unexpected login failures.  
+**SUGGESTED FIX:** Remove the bare `"example"` entry or ensure the check uses exact‑match semantics only:
+
+```python
+RESERVED_DOMAINS = frozenset({
+    "example.com", "example.org", "example.net",
+    "localhost", "test", "invalid"
+})
+```
+
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/real_store_guard.py:30‑31  
+**ISSUE:** `TEST_SUFFIXES` lists `".example"` but omits the more common `".example.com"` etc. If other parts of the code validate a domain by checking `domain.endswith(suffix)` against `TEST_SUFFIXES`, an email like `user@example.com` would **not** be caught as a test domain, even though it should be treated as reserved.  
+**ATTACK VECTOR:** Test fixtures using `example.com` could slip through the guard and be written to the real store.  
+**SUGGESTED FIX:** Add the full reserved suffixes:
+
+```python
+TEST_SUFFIXES = (".test", ".invalid", ".example", ".example.com",
+                 ".example.org", ".example.net", ".localhost")
+```
+
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** low  
+**FILE:** src/claude_swap/switcher.py:432‑438  
+**ISSUE:** `_write_json` does not explicitly close the file handle after writing (the snippet does not show the actual write). If the implementation uses `open(path, "w")` without a context manager, file descriptors could leak under heavy test loads.  
+**ATTACK VECTOR:** Accumulating open file descriptors may eventually hit OS limits, causing crashes in long‑running test suites.  
+**SUGGESTED FIX:** Ensure the JSON dump uses a `with` block:
+
+```python
+with open(path, "w", encoding="utf-8") as fp:
+    json.dump(data, fp, ensure_ascii=False, indent=2)
+```
+
+
+###############################################################
+###   PROVIDER: QWEN
+###############################################################
+
+NO ISSUES FOUND is not appropriate — here are the defects I can support from the artifact.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** high
+**FILE:** src/claude_swap/switcher.py:431
+**ISSUE:** The comment claims "Test code may not write ANY file under the real home," but the guard is bolted onto the `_write_json` leaf only — every other real-home mutation is still permitted.
+**ATTACK VECTOR:** The new test proves the hole itself: `target.parent.mkdir()` creates a directory inside the real home and nothing refuses it. Any fixture/helper that reaches the real home through a non-JSON path — `mkdir(parents=True)`, `shutil.copy` of fixture account files, `.lock`/`.tmp` siblings, direct `open()` writes — pollutes the user's real `~/.claude-swap*` tree while the guard stays silent. The 2026-10-05 incident this fix responds to (fixture data landing in the real store) is only closed for the JSON-writing subset, so the next fixture variant reintroduces the same class of damage. A test that passes here gives false assurance that the boundary is path-based and complete.
+**SUGGESTED FIX:** Move the check to the real-home entry seam (the object that hands out home/backup paths, or `EngineHarness`'s `__init__` already doing the "temporary home" check) so it covers directory creation and non-JSON writes, or wrap the real home in a fixture-time `Path` subclass/monkeypatch that refuses all writes. At minimum, downgrade the comment from "ANY file" to "any JSON file."
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** high
+**FILE:** tests/test_real_store_guard.py:85
+**ISSUE:** `pytest.raises(RealStoreGuardError)` with no `match=` — the exception type is shared by at least two other pre-existing checks, so the test can pass without ever reaching `refuse_test_identity(None, path)`.
+**ATTACK VECTOR:** The same function already raises `RealStoreGuardError` from the `sequence_file` comparison below the new line, and `EngineHarness` raises it for a non-temporary home (test at :74). If `home`/`realhome` bookkeeping in the harness ever makes `_write_json` bail for a different reason, or if someone deletes the new `refuse_test_identity` call while another check still trips on this particular path, the test stays green and the guard is unguarded by tests. Note the sibling test in this file does use `match="temporary home"` — this test is the weaker of the two, and it's the one validating the fix.
+**SUGGESTED FIX:** Pin the assertion to the new message (`match=` on a stable phrase from `refuse_test_identity`), or assert `real_store_guard.refuse_test_identity(None, target)` raises directly so the test targets the unit that was added rather than whatever in `_write_json` happens to throw first.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/real_store_guard.py:31
+**ISSUE:** The reserved special-use domain list is still incomplete — `.local`, `.internal`, `.localdomain`, `.home.arpa`, `.arpa` are absent from both `RESERVED_DOMAINS` and `TEST_SUFFIXES`, while the fix only patches three labels already implied by the suffix tuple.
+**ATTACK VECTOR:** Fixture identities on real dev machines overwhelmingly use `user@host.local` (mDNS/Bonjour) or `admin@api.internal`/`.localdomain`, not `@test`. Those strings are neither an exact `RESERVED_DOMAINS` member nor a `TEST_SUFFIXES` match, so a fixture account carrying one is classified as a real identity, and the only remaining barrier is whatever the path-based check covers — which, per finding 1, is JSON writes only. This is allowlist-drift: the set has to grow in lockstep with how fixture authors name things, and the test matrix only grows in lockstep with the set, so the gap is invisible to the suite.
+**SUGGESTED FIX:** Add `".local", ".internal", ".localdomain", ".home.arpa", ".onion", ".arpa"` to `TEST_SUFFIXES` and parametrise the existing test over the tuple itself (`*[(f"u@mail{s}", True) for s in TEST_SUFFIXES]`) so the suite asserts the list rather than a hand-picked sample.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/switcher.py:431
+**ISSUE:** The new call passes the **raw** `path` argument, while the very next line deliberately resolves both sides (`Path(path).resolve() == Path(self.sequence_file).resolve()`) — evidence the codebase already knows containment needs canonicalisation.
+**ATTACK VECTOR:** If `refuse_test_identity`'s containment test is string/`startswith`-based on an unresolved path, the guard is trivially bypassed: a relative path with cwd inside the real home, a symlink under `/tmp` pointing at `~/.claude-swap`, or a sibling directory sharing the home's name prefix (`/Users/dev` vs `/Users/dev-evil/x.json`) all read as "outside the real home." The new test cannot see any of these because it builds a canonical absolute child of `fake_real_home`. There is a mirrored failure on macOS: `tmp_path` lives under `/var/folders/...` while `resolve()` yields `/private/var/folders/...`, so comparing a resolved candidate against an unresolved recorded home (or vice versa) silently disables the check — the same asymmetry the fix depends on.
+**SUGGESTED FIX:** `refuse_test_identity(None, Path(path).resolve())` at the call site, and inside the guard use `Path.is_relative_to(home)` / `parts` comparison on two resolved paths instead of `str.startswith`.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/real_store_guard.py:31
+**ISSUE:** Promoting bare `"test"`, `"invalid"`, `"example"` into `RESERVED_DOMAINS` changes their semantics from *test-context-only* blocking to unconditional blocking, per this file's own convention.
+**ATTACK VECTOR:** The parametrised comment at tests/test_real_store_guard.py:30 states the rule explicitly: `("a @x.com", False), # a real mail domain: blocked only in a test context`. So `True` ⇒ blocked everywhere, including production. Internal directories do hand out such identities — `alice@test`, `svc@example`, an LDAP/AD UPN suffix — and those real accounts now hit `RealStoreGuardError` when the user switches accounts outside any test run. This converts a fixture-safety guard into a user-facing availability failure, and the failure mode is a hard refusal with no fallback, since the switcher's writes raise.
+**SUGGESTED FIX:** Keep `RESERVED_DOMAINS` limited to the always-refuse set, and treat the bare `test`/`invalid`/`example` labels as test-context-only — i.e. route them through the suffix/test-context branch rather than the unconditional reserved set.
+
+---
+
+**SEVERITY:** INFO
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/switcher.py:431
+**ISSUE:** Passing `None` as the identity is a sentinel-driven overload: `refuse_test_identity` now serves two contradictory contracts (per-account check and path-only check), and the `None` branch's *non*-refusing path is untested.
+**ATTACK VECTOR:** The test file asserts `is_reserved(None) is False` (:29), so on the reserved-identity axis `None` is explicitly "not a test identity" — the refusal must come entirely from the path/context axis. Every test that exercises `None` runs inside a test context with `fake_real_home`; nothing exercises `refuse_test_identity(None, <prod path>)` with no test context. If the function dereferences its first argument on the accept branch (building a log line, an error message, `email.split("@")`), then the *first real-world* account write crashes the switcher, and the suite never sees it.
+**SUGGESTED FIX:** Give the path-only case its own function (e.g. `refuse_real_home_write_in_tests(path)`) rather than overloading the identity parameter with `None`, and add a test that the call returns cleanly when no test context is active.
+
+---
+
+**SEVERITY:** INFO
+**CONFIDENCE:** high
+**FILE:** src/claude_swap/real_store_guard.py:31
+**ISSUE:** `RESERVED_DOMAINS` and `TEST_SUFFIXES` now encode the same labels twice (`test`/`.test`, `invalid`/`.invalid`, `example`/`.example`, `localhost`/`.localhost`) with no invariant linking them.
+**ATTACK VECTOR:** Adding a reserved TLD requires two coordinated edits in two data structures plus a third hand-written parametrize entry; the next author adds one and not the others, producing exactly the gap in finding 3 (`@sub.test` covered, bare `@test` not, or the reverse). The duplication is also why this fix had to touch both the set and the test matrix rather than deriving one from the other.
+**SUGGESTED FIX:** Keep a single source of reserved labels and derive the suffix tuple from it, e.g. `TEST_SUFFIXES = tuple("." + d for d in RESERVED_DOMAINS)`, with dotted entries (`example.com`) handled by exact match only.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
+
+=== APPENDED PASS 2026-10-05T09:00:18Z ===
+artifact_kind=adversarial-review
+created_at=2026-10-05T09:00:18Z
+status=ok
+mode=code
+output_format=text
+providers_used=cursor-agent, agy, openrouter-3, openrouter-4, muse
+provider_count=5
+providers_attempted=5
+provider_outcomes=cursor-agent:ok,agy:ok,openrouter-3:ok,openrouter-4:ok,muse:ok
+REVIEW BY: CURSOR-AGENT
+REVIEW BY: AGY
+REVIEW BY: OPENROUTER-3
+REVIEW BY: OPENROUTER-4
+REVIEW BY: MUSE
+reviewed_blob=f3d16acbbf84b0a5cd763c4cec6f3ec36e791497
+reviewed_blob=840dbc95e3038ba7670419a38fa21b9fee130d79
+reviewed_blob=350dede44f0f286fb685bcede6cf86872d27de8c
+reviewed_blob=ccd2179c7b8a3296ef359be84288ef05f99b4549
+reviewed_blob=683c8db51bea5939a14945a71cb4a408eadd5595
+reviewed_blob=bab3df10ceb0470feea956cf927e9f8387d6a84e
+reviewed_blob=e64dc3e4cbb22da27232539a29309771e440f029
+input_chars=1510
+input_chars_original=1510
+input_truncated=false
+total_findings=16
+critical=1
+warning=9
+info=6
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: cursor-agent, agy, openrouter-3, openrouter-4, muse (5 total)
+Mode: code
+Input size: 1510 chars
+Date: 2026-10-05T09:00:18Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CURSOR-AGENT
+###############################################################
+
+## Adversarial review (artifact-only)
+
+Reviewed the diff: `refuse_test_identity(None, path)` added at the **start** of `atomic_write_json` (before `mkdir` / `chmod` / any write), plus a negative test aligned with `test_any_json_write_under_the_real_home_is_refused_in_tests`.
+
+**NO ISSUES FOUND.**
+
+### Why nothing rises to a reported defect
+
+| Check | Result |
+|--------|--------|
+| **Ordering** | Guard runs before filesystem side effects; the new test’s `assert not target.exists()` matches that contract. |
+| **`None` identity** | The new test would fail if `refuse_test_identity(None, …)` were a no-op or skipped path checks for that layout; the fixture/path style matches the existing `_write_json` guard test, so `None` is at least valid for this scenario. |
+| **Bypass of this fix** | The change closes the obvious hole (state/settings via `atomic_write_json` while switcher `_write_json` was already guarded). Other write paths aren’t in the artifact, so claiming a remaining bypass would be out of scope per your rules. |
+| **Production** | Nothing in the diff shows refusal outside a test context; behavior of `refuse_test_identity` when not under pytest isn’t shown, so production breakage isn’t provable here. |
+
+### Not reported (weak or out of scope)
+
+- **Test only hits** `…/autoswitch_state.json`, not a separate settings path — coverage gap, not a shown code defect.
+- **Relative paths / symlinks / non-resolved `Path`** — would require `refuse_test_identity` implementation not in the artifact.
+- **Lazy import inside `atomic_write_json`** — startup vs first-write failure timing, not a logic bug in the guard itself.
+
+**conf: confirmed** — For this diff alone, the atomic_write guard placement and test are consistent; no deterministic CRITICAL/WARNING defect supported without inferring unseen code.
+
+
+###############################################################
+###   PROVIDER: AGY
+###############################################################
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** [`src/claude_swap/settings.py:731`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/settings.py#L731)  
+**ISSUE:** Hardcoded `email=None` in `atomic_write_json` bypasses RFC 2606 reserved domain checks for shared callers writing account credentials and cache entries.  
+**ATTACK VECTOR:**  
+[`real_store_guard.py`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/real_store_guard.py#L97-L110) enforces two distinct protection rules:
+1. In a test context (`in_test_context() == True`), all writes under the real home are refused.
+2. Anywhere (including production / long-running daemons / CLI), reserved test domains (`example.com`, `.test`, `.invalid`, `localhost`) are refused via `is_test_email(email)`.
+
+The docstring for `atomic_write_json` assumes it is only used for machine-local state files (`settings.json` and `autoswitch_state.json`). However, `atomic_write_json` is also used across the codebase to write account credentials and identity-bearing data under the real store:
+- [`src/claude_swap/switcher.py:1871`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/switcher.py#L1871) (`_spill_rotated_credentials` writes `.pending-rotation-<num>.json` containing `payload["email"]` and `payload["credentials"]`).
+- [`src/claude_swap/usage_store.py:494`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/usage_store.py#L494) (`UsageStore._write_rows` writes `cache/usage.json` containing account entries keyed by slot).
+
+In production (`in_test_context() == False`), `refuse_test_identity(None, path)` evaluates `is_test_email(None) -> False` and succeeds silently. If an account with a reserved test identity (e.g. `user@example.com` or `dev@test`) is rotated during lock contention or recorded in the usage cache, Rule 2 is completely bypassed and writes directly under `~/.claude-swap-backup`.  
+**SUGGESTED FIX:**  
+Extract the identity from `data` if present (e.g., `data.get("email")` or inspect `data.get("accounts")`), or accept an optional `email: str | None = None` in `atomic_write_json`:
+```python
+def atomic_write_json(path: Path, data: dict, *, email: object = None) -> None:
+    from claude_swap.real_store_guard import refuse_test_identity
+    identity = email if email is not None else data.get("email")
+    refuse_test_identity(identity, path)
+```
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** [`tests/test_real_store_guard.py:90-95`](file:///Users/greglas/DEV/claude-account-switcher/tests/test_real_store_guard.py#L90-L95)  
+**ISSUE:** `test_state_and_settings_writes_are_guarded_too` does not test settings writes, leaving actual settings persistence pathways unverified.  
+**ATTACK VECTOR:**  
+The test title claims `state_and_settings_writes_are_guarded_too`, but it only tests a direct call to `atomic_write_json` targeting `autoswitch_state.json`. It never exercises the public settings persistence APIs in [`src/claude_swap/settings.py`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/settings.py#L514-L663) (`save_settings`, `set_setting`, `unset_setting`). If `settings_path()` or callers construct paths that diverge from `_real_roots`, or if `settings.py` changes how it persists configurations, the test suite will remain green despite settings writes remaining unprotected.  
+**SUGGESTED FIX:**  
+Expand the test to assert that settings mutation functions also raise `RealStoreGuardError`:
+```python
+def test_state_and_settings_writes_are_guarded_too(fake_real_home):
+    from claude_swap.settings import atomic_write_json, save_settings, AutoSwitchSettings
+    backup_dir = fake_real_home / ".claude-swap-backup"
+    with pytest.raises(RealStoreGuardError):
+        atomic_write_json(backup_dir / "autoswitch_state.json", {"lastSwitchAt": 1})
+    with pytest.raises(RealStoreGuardError):
+        save_settings(AutoSwitchSettings(), backup_dir)
+```
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** high  
+**FILE:** [`src/claude_swap/settings.py:731`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/settings.py#L731)  
+**ISSUE:** Passing `None` to `refuse_test_identity` generates misleading exception diagnostics (`"refusing to write None into the real store"`).  
+**ATTACK VECTOR:**  
+When `refuse_test_identity(None, path)` triggers in a test context, the error message formats as:
+`refusing to write None into the real store (<path>) from test code: a test or a script using test helpers is pointed at your real home directory`
+Reporting `None` as the item being written conceals the nature of the rejected write (settings vs. autoswitch state vs. pending rotation), hindering triage when scripts fail.  
+**SUGGESTED FIX:**  
+Pass the target filename or a descriptive label instead of literal `None`, e.g. `refuse_test_identity(path.name, path)`, or handle `email is None` cleanly in `real_store_guard.py:102-105`.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-3
+###############################################################
+
+
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/settings.py:731
+ISSUE: Local import of `refuse_test_identity` inside hot-path function
+ATTACK VECTOR: `atomic_write_json` is a utility likely called frequently for state persistence. Importing modules inside function bodies causes the interpreter to resolve and import the module on every invocation, introducing non-trivial latency and increasing startup overhead for every call site.
+SUGGESTED FIX: Move `from claude_swap.real_store_guard import refuse_test_identity` to the module-level imports at the top of the file.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/settings.py:731
+ISSUE: Hardcoded `None` passed to identity guard function
+ATTACK VECTOR: `refuse_test_identity(None, path)` assumes `None` is safe. If the guard relies on context to distinguish test vs. production, or if it validates that a context object is present, this argument might silently bypass logic checks or trigger unexpected failures in non-test environments where context was expected.
+SUGGESTED FIX: Replace `None` with the actual invocation context or a sentinel constant specifically designed for production-safe calls (e.g., `CONTEXT_PRODUCTION`).
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/settings.py:731
+ISSUE: Utility function coupled to test-specific guard logic
+ATTACK VECTOR: `atomic_write_json` is a generic storage utility. Hardcoding a test-aware guard inside it mixes infrastructure concerns (test isolation) with data access, making the function harder to reuse in production contexts and increasing risk of logic drift if guard requirements change.
+SUGGESTED FIX: Extract the test-guard check into a decorator or a wrapper layer that callers use conditionally, rather than embedding it in the utility.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: tests/test_real_store_guard.py:89
+ISSUE: Test directly imports guarded utility instead of testing via service layer
+ATTACK VECTOR: Testing `atomic_write_json` directly bypasses higher-level application logic where this utility might actually be invoked in production. If a service layer adds extra validation before calling `atomic_write_json`, the guard behavior at the call site may still be unverified.
+SUGGESTED FIX: Add an integration test exercising the higher-level component that uses `atomic_write_json`, ensuring the guard is triggered through the normal entry point.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-4
+###############################################################
+
+**SEVERITY:** CRITICAL  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/settings.py:728  
+**ISSUE:** `atomic_write_json` unconditionally calls `refuse_test_identity`, which is intended only for test environments; in production this guard can raise `RealStoreGuardError` and block legitimate writes to the real settings/state files.  
+**ATTACK VECTOR:** When the application runs outside of the test suite (e.g., normal user start‑up), any attempt to persist settings or autoswitch state will be aborted with a guard exception, causing loss of state and a complete failure of core functionality.  
+**SUGGESTED FIX:** Guard the call with a runtime check that we are in a test environment (e.g., `if os.getenv("PYTEST_CURRENT_TEST"):`) or move the guard into a separate test‑only wrapper so production code never invokes it.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/settings.py:727  
+**ISSUE:** `refuse_test_identity` is imported inside the function body on every call, incurring repeated import overhead and risking circular‑import problems if `real_store_guard` itself imports `settings`.  
+**ATTACK VECTOR:** High‑frequency calls (e.g., writing many autoswitch state snapshots) could degrade performance or trigger import‑time side effects that were not intended to run repeatedly.  
+**SUGGESTED FIX:** Move the import to module top‑level (or lazy‑load once with a module‑level sentinel) and ensure the import does not create a circular dependency.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/settings.py:728  
+**ISSUE:** The first argument to `refuse_test_identity` is passed as `None`. If the guard expects a test‑identity token (e.g., a string identifier), this may cause a `TypeError` or make the guard behave unpredictably.  
+**ATTACK VECTOR:** In environments where the guard validates the identity value, passing `None` could either raise an exception immediately or silently bypass the intended check, leading to inconsistent protection.  
+**SUGGESTED FIX:** Pass an explicit identifier that reflects the current context, e.g., `refuse_test_identity("atomic_write_json", path)`, or adjust the guard’s signature to accept `None` safely.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** low  
+**FILE:** src/claude_swap/settings.py:730  
+**ISSUE:** The guard is invoked before the parent directory is created. If `refuse_test_identity` performs path resolution (e.g., follows symlinks) it may reject a path that would later resolve to a safe temporary location, causing false‑positive rejections.  
+**ATTACK VECTOR:** When callers intentionally write to a temporary directory that is a symlink into the real home, the guard could reject the write even though the final location is safe, leading to unnecessary failures.  
+**SUGGESTED FIX:** Perform the directory‑creation step first, then call the guard with the resolved absolute path (`refuse_test_identity(..., path.resolve())`).
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/settings.py:731‑733  
+**ISSUE:** On non‑Windows platforms the code attempts `os.chmod(path.parent, 0o700)` without handling possible `OSError` (e.g., insufficient permissions, immutable parent directory).  
+**ATTACK VECTOR:** In restricted environments (containerised CI, read‑only mount) the `chmod` call will raise, bubbling up as an uncaught exception and aborting the write operation.  
+**SUGGESTED FIX:** Wrap the `chmod` call in a try/except block that either logs and continues or re‑raises a more descriptive error, e.g.:
+
+```python
+try:
+    os.chmod(path.parent, 0o700)
+except OSError as exc:
+    logger.debug("Could not set directory permissions: %s", exc)
+```
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** low  
+**FILE:** src/claude_swap/settings.py (function body)  
+**ISSUE:** The function’s docstring mentions “any future machine‑local state files” but the guard is hard‑coded to refuse **all** writes under the real home when the test guard is active, potentially preventing legitimate future extensions that need to write elsewhere under the real home.  
+**ATTACK VECTOR:** Future features that store auxiliary data under the real home (outside of settings/autoswitch) would be blocked by the blanket guard, requiring code changes or test‑environment toggles.  
+**SUGGESTED FIX:** Refine the guard to accept an optional whitelist of allowed sub‑paths or file names, or expose a parameter to disable the guard for specific callers.
+
+
+###############################################################
+###   PROVIDER: MUSE
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: tests/test_real_store_guard.py
+ISSUE: Test name promises state+settings coverage but body only writes autoswitch_state.json
+ATTACK VECTOR: A settings.json-specific write path (different directory/filename, direct open(), or non-atomic_write_json caller) can write under the real home in tests while this test stays green, polluting/destroying real user state.
+SUGGESTED FIX: Add second case for the real settings.json target through atomic_write_json in the same test, or rename test to single-file scope.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: tests/test_real_store_guard.py
+ISSUE: Test asserts file absence but not parent-dir/chmod side effects
+ATTACK VECTOR: The safety property is ordering: guard must run before mkdir/chmod. If a later edit moves the guard after path.parent.mkdir()/os.chmod(parent,0o700), this test still passes (file never created) while test runs create/chmod directories under the real home.
+SUGGESTED FIX: Also assert not target.parent.exists() (or that a pre-existing parent mtime/mode is unchanged) after the refused write.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/settings.py
+ISSUE: Security check receives uncanonicalized Path with no resolve/normalization at call site
+ATTACK VECTOR: If refuse_test_identity does prefix matching, a path with .., relative components, symlinked parent, or non-resolved spelling can resolve under the real home while the string check misses, bypassing the guard and then mkdir+chmod 0o700 plus atomic replace damage real data.
+SUGGESTED FIX: Canonicalize once before the check (e.g. path = Path(os.path.realpath(path))) and have the guard compare resolved absolute paths; add a bypass test with a .. / symlink variant.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================

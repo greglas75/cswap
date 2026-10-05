@@ -1,0 +1,596 @@
+artifact_kind=adversarial-review
+created_at=2026-09-22T11:59:02Z
+status=ok
+mode=code
+output_format=text
+providers_used=cursor-agent, openrouter-alt, openrouter-3, openrouter-4, claude
+provider_count=5
+providers_attempted=5
+provider_outcomes=cursor-agent:ok,openrouter-alt:ok,openrouter-3:ok,openrouter-4:ok,claude:ok
+REVIEW BY: CURSOR-AGENT
+REVIEW BY: OPENROUTER-ALT
+REVIEW BY: OPENROUTER-3
+REVIEW BY: OPENROUTER-4
+REVIEW BY: CLAUDE
+reviewed_blob=4218cd4b4943ae88dd44f0c8ba9258cb5ce94b21
+reviewed_blob=6a8aede54c7d8577ea9919bb8c896efd63eb5d06
+reviewed_blob=4a6d308d429b5663b9cb0e411f1356936a287c2a
+reviewed_blob=dc12c4506468970aa4e4d3ea369b5bd1c7d30aa4
+input_chars=16884
+input_chars_original=16884
+input_truncated=false
+total_findings=28
+critical=4
+warning=14
+info=10
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: cursor-agent, openrouter-alt, openrouter-3, openrouter-4, claude (5 total)
+Mode: code
+Input size: 16884 chars
+Date: 2026-09-22T11:59:02Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CURSOR-AGENT
+###############################################################
+
+# Adversarial review (pre-freshen + switch timing)
+
+---
+
+**SEVERITY:** CRITICAL  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/autoswitch.py` (~1415–1425, `_pre_freshen` loop)  
+**ISSUE:** `PREFRESHEN_BUDGET_S` is only checked between loop iterations, not around `_freshen_target`, so one in-flight refresh can exceed the 3s budget by orders of magnitude.  
+**ATTACK VECTOR:** In the pre-band, the first candidate that actually hits the network (same class of work the docstring cites at 25–88s) runs to completion inside a “below-threshold” tick. The active slot keeps burning during that wall; you can lose margin before the real switch at `threshold`, which is exactly what pre-freshen was meant to prevent.  
+**SUGGESTED FIX:** Enforce a hard cap per call (e.g. remaining budget passed into freshen/HTTP, skip starting a refresh when `remaining <= 0`, or abort/timeout the refresh). Do not rely on a pre-loop check alone.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/autoswitch.py` (~2529–2533 set `_switch_timing`; ~3095–3105 / ~3115–3120 early returns; ~3134–3136 clear only on success)  
+**ISSUE:** `_switch_timing` is set before `_perform_with_drain2` but cleared only on the successful `SwitchEvent` path; `sessions-active`, failed `switch_to`, and similar exits leave it on the engine instance.  
+**ATTACK VECTOR:** A later swap that bypasses the freshen loop (`trigger == "consume-first"` or `early`) can still emit `SwitchEvent.timing` merged from stale `freshenMs` / `freshenAttempts` plus fresh `quietScanMs` / `switchMs`. Logs and burn reports attribute slowness to the wrong attempt/candidate and can send tuning in the wrong direction.  
+**SUGGESTED FIX:** Clear `_switch_timing` on every `_perform_with_drain2` exit (try/finally), or only attach timing after a confirmed switch; never carry partial state across ticks.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/autoswitch.py` (~1420–1422)  
+**ISSUE:** `_prefreshened[num] = now` is stamped before `_freshen_target` returns, including on transient failure.  
+**ATTACK VECTOR:** A failed pre-band refresh suppresses further pre-freshen for that slot for 120s even while utilization stays in `[pre_freshen_threshold, threshold)`. If the switch happens within that window (docstring: ~31s margin is plausible), you relied on pre-freshen but get no retry until switch-time freshen—partially negating the feature under flaky OAuth/network.  
+**SUGGESTED FIX:** Update throttle only on `"ok"` (and maybe skip/no-op paths); on `"transient"`, do not advance `_prefreshened` or use a shorter backoff.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/autoswitch.py` (~2017–2024 vs ~2520–2512)  
+**ISSUE:** Pre-freshen runs only when `settings.strategy != "consume-first"`, but the consume-first switch path skips the per-candidate freshen loop entirely.  
+**ATTACK VECTOR:** Fleets on `consume-first` still pay full switch-time refresh latency (the 25–88s problem) with no pre-band mitigation; behavior diverges by strategy without being obvious from settings alone.  
+**SUGGESTED FIX:** Either run `_pre_freshen` for consume-first when enabled, or document/limit the setting to strategies that use switch-time freshen (and reject/warn on incompatible combos).
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/autoswitch.py` (~1405–1406 vs ~1412–1413)  
+**ISSUE:** Throttle uses `self.clock()` (captured once as `now`) while the budget uses `time.monotonic()`.  
+**ATTACK VECTOR:** If `clock()` is wall time and steps backward (NTP) or jumps forward, slots can be re-freshened too often (OAuth rate limits / unnecessary token churn) or throttled too long (candidates still cold at switch).  
+**SUGGESTED FIX:** Use one time base for both throttle and budget (typically `time.monotonic()` for intervals), or document and test that `clock()` is monotonic for this engine.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/settings.py` (~282–288) / `autoswitch.py` (~2017–2020)  
+**ISSUE:** `pre_freshen_threshold` is capped at 99.9 with no enforced ordering vs `threshold`; if `pre_freshen_threshold >= threshold`, the below-threshold branch never runs pre-freshen before the switch fires.  
+**ATTACK VECTOR:** Misconfiguration silently disables pre-freshen while the operator believes idle tokens are being warmed.  
+**SUGGESTED FIX:** Validate at load time: `0 <= pre_freshen_threshold < threshold` (when pre-freshen is on), or clamp/warn in settings parsing.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/autoswitch.py` (~1193–1194, ~1420)  
+**ISSUE:** `_prefreshened` is never pruned when slots are removed or renamed.  
+**ATTACK VECTOR:** Long-lived daemon accumulates dead keys; harmless at small fleet size, but unbounded growth if slot IDs churn in automation.  
+**SUGGESTED FIX:** Drop entries for slots not in current headroom keys each tick, or cap map size to known slots.
+
+---
+
+**Not reported (weak / out of scope):** test-only harness details; deliberate `invalid_grant` quarantine at pre-band; transient left for switch-time freshen (by design, modulo throttle finding above).
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-ALT
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:2532 (set) / 3134 (clear)
+ISSUE: `_switch_timing` is set as a side effect inside the freshen loop but is only cleared on the success path of `_perform_with_drain2`; every early return (switch failure, `sessions-active`, `switch_to` returning falsy) leaves it set.
+ATTACK VECTOR: A best-strategy switch fails at `switch_to` (network blip) → `_switch_timing` retains `{freshenMs, freshenAttempts}`. The next tick takes the consume-first or `early` branch, which skips the freshen loop and calls `_perform_with_drain2` directly. The emitted `SwitchEvent.timing` then reports the *previous* attempt's freshen cost/attempt count, so the operator's "where did the seconds go" log lies exactly when they need it (a retry after a failure). Same leak if the freshen loop exhausts without a candidate.
+SUGGESTED FIX: Clear `self._switch_timing = None` at the top of `_perform_with_drain2` (or in a `finally` around the switch), and set it only immediately before the successful `_perform_with_drain2` call.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:1408-1410
+ISSUE: The pre-freshen budget is checked *before* each iteration, not around the network call, so a single `_freshen_target` invocation can exceed `PREFRESHEN_BUDGET_S` by an unbounded amount.
+ATTACK VECTOR: The docstring claims the pass "must never be the thing that stalls" the tick, but one slow refresh (the exact 25–88 s case the change is meant to fix) blocks the tick for its full duration. The next tick is scheduled from the delayed end time, so the active account burns 5.8 pts/min × stall seconds before the switch is even attempted — the pre-freshen can *cause* the missed window it was added to prevent.
+SUGGESTED FIX: Either wrap the refresh in a timeout, or reword the comment to state the budget is a soft cap that only bounds the *number* of refreshes, not the duration of any one. If a hard cap is required, run the pass on a worker thread with a join timeout.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3134-3145
+ISSUE: `SwitchEvent.timing` is documented as `{"freshenMs", "freshenAttempts", "quietScanMs", "switchMs"}`, but consume-first and `early` switches never enter the freshen loop, so `_switch_timing` is `None` and the emitted dict contains only `quietScanMs`/`switchMs`.
+ATTACK VECTOR: Log consumers (dashboards, the burn report) that key on `timing.freshenMs` will see `KeyError`/`None` for exactly the consume-first fleet the change is deployed on, or will silently mis-aggregate. The test only exercises the `best` strategy, so the gap is invisible in CI.
+SUGGESTED FIX: Always initialize `_switch_timing = {"freshenMs": 0, "freshenAttempts": 0}` before the loop (or emit `freshenMs: 0` when absent), and add a consume-first timing test.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:1414-1416
+ISSUE: `self._prefreshened[num] = now` is written *before* `_freshen_target` is called, so a transient failure (or an exception that propagates out of the pass) throttles the slot for the full `PREFRESHEN_INTERVAL_S` (120 s).
+ATTACK VECTOR: The pre-band (92→97 at 5.8 pts/min) is only ~52 s wide. A single transient failure at the start of the band consumes the entire pre-freshen opportunity for that slot; the switch then pays the network cost the change was meant to remove. The docstring's "transient failures are left for the switch-time freshen" is true, but the throttle still silently forfeits the pre-band.
+SUGGESTED FIX: Only stamp `_prefreshened[num]` when the result is `"ok"` (or a non-transient terminal status); on `"transient"` leave the timestamp unset so the next tick retries.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/autoswitch.py:1194
+ISSUE: `self._prefreshened` is a plain dict keyed by slot number with no eviction; if slots can be removed/renamed (account deletion, re-login under a new slot id), entries accumulate for the process lifetime.
+ATTACK VECTOR: Long-running daemon on a fleet where slots churn leaks memory and, worse, a reused slot id inherits a stale throttle timestamp, suppressing the first pre-freshen for that slot.
+SUGGESTED FIX: Prune keys not present in the current `headroom` map at the end of `_pre_freshen`, or key the throttle on a stable account identity rather than the slot number.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/autoswitch.py:434
+ISSUE: `timing: dict | None` and the `if self.timing is not None` guard in `_fields()` imply the field is optional, but `_perform_with_drain2` always assigns a non-empty dict, so the `None` branch is dead and the type is misleading.
+ATTACK VECTOR: A future caller that constructs `SwitchEvent` without `timing` will silently omit the field from `_fields()` while the type checker accepts it; conversely, readers of the type assume absence is possible when it never is.
+SUGGESTED FIX: Either make `timing` non-optional (`dict = field(default_factory=dict)`) and drop the guard, or actually allow `None` and document when it is absent.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-3
+###############################################################
+
+
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:2435
+ISSUE: Timing instrumentation uses `time.monotonic()` but throttling uses `self.clock()`
+ATTACK VECTOR: In test environments where `self.clock` is mocked but `time.monotonic` is real, timing stats become invalid and throttling logic is inconsistent.
+SUGGESTED FIX: Change all timing captures (e.g. `t_freshen = ...`) to use `self.clock()` consistently.
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:2017
+ISSUE: `account_email()` is not wrapped in error handling in `_pre_freshen`
+ATTACK VECTOR: If `account_email` raises due to DB corruption or network outage during pre-freshen, the entire tick stalls or crashes before attempting the safe switch path.
+SUGGESTED FIX: Wrap `self.switcher.account_email(num)` in a try/except block and skip the candidate on error.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:2017
+ISSUE: `_freshen_target` called for all candidates in loop without skip
+ATTACK VECTOR: If `_freshen_target` returns "ok", the loop continues to check and log the next candidate even if it's the last one and switch is not triggered yet.
+SUGGESTED FIX: Check `if status == "ok": continue` immediately after the call in the loop, or break early if the last candidate was checked.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:2435-2437
+ISSUE: `_prefreshened` lookup in switch loop has no error handling
+ATTACK VECTOR: If `self._prefreshened` is missing a key for any candidate (unlikely but possible), or if `num` is malformed, throttling logic fails silently allowing redundant refreshes.
+SUGGESTED FIX: Use `.get()` consistently and log warnings if throttle check fails due to unexpected key absence.
+
+SEVERITY: INFO
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:2529-2533
+ISSUE: `_switch_timing` reset to None only if switch succeeds
+ATTACK VECTOR: If `freshenMs` is set but switch fails, `_switch_timing` remains stale for next tick potentially causing incorrect timing attribution for next switch.
+SUGGESTED FIX: Always reset `self._switch_timing` to `None` after emitting (both success and failure paths).
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:2440-2442
+ISSUE: Timing stats not updated for pre-pass freshens
+ATTACK VECTOR: `SwitchEvent.timing` will under-report total network latency because pre-freshen calls (which take network time) are not tracked in the final event.
+SUGGESTED FIX: Accumulate pre-pass freshen metrics in `self._switch_timing` so final timing reflects full operation time.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/autoswitch.py:2010-2014
+ISSUE: Budget check uses `time.monotonic()` but throttle uses `self.clock()`
+ATTACK VECTOR: If `self.clock` drifts relative to monotonic time, budgeting and throttling decisions become inconsistent.
+SUGGESTED FIX: Replace `time.monotonic()` with `self.clock()` in budget check for consistency with throttling logic.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-4
+###############################################################
+
+**SEVERITY:** CRITICAL  
+**CONFIDENCE:** high  
+**FILE:** src/claude_swap/autoswitch.py:119‑124 (inside `_pre_freshen`)  
+**ISSUE:** The method mixes `self.clock()` (wall‑clock time) with `time.monotonic()` for timing and throttling. If the system clock is adjusted backwards or forwards (e.g., NTP correction, daylight‑saving change), the throttle (`now - self._prefreshened[…] < PREFRESHEN_INTERVAL_S`) can become inaccurate, causing a burst of refreshes that may hit rate limits or exhaust tokens.  
+**ATTACK VECTOR:** An operator who changes the host clock (or a cloud provider that drifts) can trigger a rapid series of network refreshes, potentially locking the account or violating API quotas, and can also make the per‑tick budget ineffective.  
+**SUGGESTED FIX:** Store the timestamp for throttling using `time.monotonic()` (or a dedicated monotonic clock) and compare against the same source. Example:  
+
+```python
+# at start of _pre_freshen
+now_monotonic = time.monotonic()
+# replace self._prefreshened timestamps with monotonic values
+if now_monotonic - self._prefreshened.get(num, 0.0) < PREFRESHEN_INTERVAL_S:
+    continue
+self._prefreshened[num] = now_monotonic
+```
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/autoswitch.py:138‑144 (inside `_pre_freshen`)  
+**ISSUE:** `_pre_freshen` calls `self._freshen_target(...)` without a `try/except`. Network‑related errors that raise exceptions (e.g., `requests.exceptions.Timeout`) will propagate out of the tick, aborting the whole autoswitch cycle and leaving the engine in an inconsistent state.  
+**ATTACK VECTOR:** A transient outage or malformed response can crash the daemon, preventing any further switches until the process is restarted.  
+**SUGGESTED FIX:** Wrap the call in a narrow exception handler, log the failure, and continue to the next candidate:  
+
+```python
+try:
+    status = self._freshen_target(num, email, buffer_ms=PREFRESHEN_BUFFER_MS)
+except Exception as exc:          # narrow to expected exception types if possible
+    _logger.debug("pre‑freshen failed for %s: %s", num, exc)
+    continue
+```
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/autoswitch.py:140‑144 (inside `_pre_freshen`)  
+**ISSUE:** The throttle timestamp (`self._prefreshened[num] = now`) is written **before** the refresh succeeds. If `_freshen_target` returns a transient failure (`"transient"`), the slot is still marked as “recently refreshed” and will be skipped for the full `PREFRESHEN_INTERVAL_S`, delaying a needed retry.  
+**ATTACK VECTOR:** In a flaky network environment the engine may unnecessarily postpone a refresh, causing the token to expire and forcing a costly switch‑time refresh.  
+**SUGGESTED FIX:** Update the timestamp only after a non‑transient successful status (e.g., `"ok"` or any status that indicates the token is now valid).  
+
+```python
+status = self._freshen_target(num, email, buffer_ms=PREFRESHEN_BUFFER_MS)
+if status == "ok":
+    self._prefreshened[num] = now
+elif status in ("identity-conflict", "invalid_grant"):
+    self._quarantine(num, email, status)
+# else: transient – do not update the timestamp
+```
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/autoswitch.py:1947‑1955 (tick logic)  
+**ISSUE:** When `_pre_freshen` quarantines a slot it calls `self._quarantine(...)`, but the local `quarantined` set that is later used to decide which candidates to consider for the actual switch is **not** updated. Consequently the switch logic may still try a slot that has just been quarantined, leading to unnecessary work or a failed switch attempt.  
+**ATTACK VECTOR:** A dead or conflicted account can be retried in the same tick, wasting the limited per‑tick budget and potentially causing a switch to fail or be delayed.  
+**SUGGESTED FIX:** Have `_pre_freshen` return the set of newly quarantined slots, or mutate the passed‑in `quarantined` collection directly. The simplest change is to add the slot to the set after quarantine:  
+
+```python
+if status in ("identity-conflict", "invalid_grant"):
+    self._quarantine(num, email, status)
+    quarantined.add(num)          # keep the tick‑local view in sync
+```
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** low  
+**FILE:** src/claude_swap/autoswitch.py:124‑125 (initialisation)  
+**ISSUE:** `_prefreshened` is a plain dictionary that grows for every slot ever seen. If slots are permanently removed (e.g., a user deletes an account), the dictionary retains the stale key forever, leading to unbounded memory growth over long‑running processes.  
+**ATTACK VECTOR:** In a fleet that frequently adds/removes slots, the daemon’s memory footprint can slowly increase, eventually causing OOM or degraded performance.  
+**SUGGESTED FIX:** Prune entries for slots that are no longer present in the current `headroom`/`ordered` list, e.g., at the end of each tick:  
+
+```python
+# after the tick finishes
+self._prefreshened = {k: v for k, v in self._prefreshened.items() if k in headroom}
+```
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:1394 (in `_pre_freshen`)
+ISSUE: Pre-freshen ranks candidates by raw headroom, ignoring `reserve_account`/`reserve_min_life_pct`, so it targets exactly the account the real switch logic is built to avoid.
+ATTACK VECTOR: A reserve account is deliberately left idle so it accumulates the highest headroom of any slot. `_pre_freshen`'s sort key (`-(headroom.get(n) or 0.0)`) puts that reserve account first in `pending`, so it consumes the per-tick throttle/budget refreshing a token that `_rank_candidates` will actively skip unless nothing else qualifies (per the reserve-account fixes in the recent commit history). The real next-switch target — chosen by `_rank_candidates`, not by headroom alone — may never get pre-freshened before the switch threshold is crossed, silently reintroducing the 25-88s stall this feature exists to eliminate, specifically for the fleet configuration (reserve configured) the owner cares most about.
+SUGGESTED FIX: Derive `pending`'s order from `_rank_candidates` (or replicate its reserve-exclusion rule) instead of a standalone headroom sort.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:2487 and :2532
+ISSUE: `self._switch_timing` is only set on the non-consume-first/non-early return path, so switches taken via `trigger == "consume-first" or early` emit a `SwitchEvent.timing` dict missing `freshenMs`/`freshenAttempts` entirely.
+ATTACK VECTOR: The early return (`if trigger == "consume-first" or early: ... return self._perform_with_drain2(...)`) never touches `self._switch_timing`, and `_perform_with_drain2` builds `timing = dict(self._switch_timing or {})` — for these triggers that's always `{}` going in, so the logged event carries only `quietScanMs`/`switchMs`. Any downstream consumer (dashboard, alert, or a human debugging a slow swap) that assumes the documented `{"freshenMs", "freshenAttempts", "quietScanMs", "switchMs"}` schema will KeyError or silently misinterpret a consume-first/early swap as having zero freshen cost. This is exactly the blind spot the PR set out to close, just for a different trigger. `tests/test_pre_freshen.py::TestSwitchTiming` only exercises the threshold-crossing path (`_usage(99)` with default strategy "best"), so this gap ships untested.
+SUGGESTED FIX: Set `self._switch_timing = {"freshenMs": 0, "freshenAttempts": 0}` before the early `return self._perform_with_drain2(...)` on the consume-first/early path, and add a test that exercises a consume-first or early-triggered switch's `SwitchEvent.timing`.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:1401
+ISSUE: `PREFRESHEN_BUDGET_S` is only checked between loop iterations, not during a single `_freshen_target` network call, so one slow/hung refresh can blow the 3s soft cap by an unbounded amount.
+ATTACK VECTOR: The comment claims the pre-freshen pass "must never be the thing that stalls" a below-threshold tick, but the budget check (`if time.monotonic() - started > PREFRESHEN_BUDGET_S: break`) only gates whether a *new* candidate is started — it does nothing once a refresh is in flight. On a slow or degraded network, a single `_freshen_target` call can run far longer than 3s, and since the tick loop is single-threaded, that stalls the entire tick (and everything waiting on it) for the duration of that one refresh, contradicting the stated design goal.
+SUGGESTED FIX: Either document that the budget is a start-of-iteration soft limit only (not a hard ceiling on total pass duration), or apply a per-call timeout inside `_freshen_target`'s network path.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
+
+=== APPENDED PASS 2026-09-22T12:08:25Z ===
+artifact_kind=adversarial-review
+created_at=2026-09-22T12:08:25Z
+status=partial
+mode=code
+output_format=text
+providers_used=cursor-agent, openrouter-3, openrouter-4, claude
+provider_count=4
+providers_attempted=5
+provider_outcomes=cursor-agent:ok,openrouter-alt:empty,openrouter-3:ok,openrouter-4:ok,claude:ok
+REVIEW BY: CURSOR-AGENT
+REVIEW BY: OPENROUTER-3
+REVIEW BY: OPENROUTER-4
+REVIEW BY: CLAUDE
+tree_modified_during_review=HEAD moved during the review: d40e9f1 -> 561e28f
+reviewed_blob=3a70c50b08283c908343691864c1c29d7683a8c1
+reviewed_blob=12f786ca1d452dddec98e293ccd039f30c466ff5
+input_chars=21153
+input_chars_original=21153
+input_truncated=false
+total_findings=21
+critical=2
+warning=13
+info=6
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: cursor-agent, openrouter-3, openrouter-4, claude (4 total)
+Mode: code
+Input size: 21153 chars
+Date: 2026-09-22T12:08:25Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CURSOR-AGENT
+###############################################################
+
+**Adversarial review (new issues only; prior fixes treated as verified)**
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/autoswitch.py` (~1436–1444, `_pre_freshen`)  
+**ISSUE:** `_quarantine(...)` runs inside the broad `try` that treats all failures as debug-only pre-freshen noise.  
+**ATTACK VECTOR:** A persistent `invalid_grant` / identity-conflict is detected, but quarantine fails (disk full, lock error, bug). The exception is logged at debug and the tick continues; the slot stays in the candidate pool and is hit again on the next pre-band tick and again at switch-time under the utilization wall—extra latency and repeated doomed OAuth work when early quarantine was the point.  
+**SUGGESTED FIX:** Quarantine only outside the swallowing `try`, or catch around `_freshen_target` / `account_email` only; let `_quarantine` propagate or log at warning/error on failure.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/autoswitch.py` (~2032–2040 call site + ~1418–1424 budget loop)  
+**ISSUE:** `_pre_freshen` is not under the same state lock used for recheck → switch → record, while comments assume loop + cron `--once` concurrency.  
+**ATTACK VECTOR:** Two engines can pass the per-slot throttle (both read `_prefreshened` before either writes), run overlapping refreshes for one slot, and race on persisted credentials—refresh-token rotation can invalidate the sibling grant and produce transient `invalid_grant` / identity churn at the worst moment (threshold crossing).  
+**SUGGESTED FIX:** Serialize pre-freshen with the existing state lock, a file lock, or a “refresh in flight” guard per slot shared with switch-time freshen.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/autoswitch.py` (~2547–2554 switch loop + `_perform_with_drain2` / drain paths)  
+**ISSUE:** `_switch_timing` is set on the engine in the candidate loop immediately before `_perform_with_drain2`, but clearing happens only at the top of `_perform`.  
+**ATTACK VECTOR:** If `_perform_with_drain2` returns without entering `_perform` (drain wait/defer, early NO_ACTION, or a later tick abort), `_switch_timing` can remain set. A later switch’s `_perform` can attach stale `freshenMs` / `freshenAttempts` to the wrong `SwitchEvent`, or the aborted attempt’s metrics leak until overwritten—misleading the 25–88 s diagnosis this feature targets.  
+**SUGGESTED FIX:** Clear `_switch_timing` in every `_perform_with_drain2` exit that does not reach `_perform`, or pass timing as an argument into `_perform` instead of mutable engine state.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/autoswitch.py` (~1418–1434)  
+**ISSUE:** `PREFRESHEN_BUDGET_S` only limits how many refreshes **start** per tick; an in-flight `_freshen_target` is not capped.  
+**ATTACK VECTOR:** One slow refresh (or several started before the budget check fails on the *next* iteration) can hold the below-threshold tick open for tens of seconds—the same stall pre-freshen is meant to move off the switch path—burning binding-window margin while utilization still climbs.  
+**SUGGESTED FIX:** Enforce a monotonic wall deadline around the whole `_pre_freshen` call (or skip starting a new refresh when remaining tick slack is below a floor), accepting partial pre-band coverage.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/autoswitch.py` (~1428–1429 throttle stamp)  
+**ISSUE:** `_prefreshened[num] = now` is updated before the network call, including on paths that fail or only partially persist.  
+**ATTACK VECTOR:** Transient failure or a slow/partial write still blocks that slot for `PREFRESHEN_INTERVAL_S` (120 s). If the switch lands inside that window, switch-time freshen becomes the only retry; combined with budget-limited pre-band on other slots, you can still pay full network cost under the wall despite pre-freshen being “on.”  
+**SUGGESTED FIX:** Set `_prefreshened[num]` only after a successful `ok` (and optionally use a shorter retry interval after explicit `transient`).
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/settings.py` (~279–288) + `autoswitch.py` (~2032–2040)  
+**ISSUE:** `pre_freshen_threshold` is clamped to 99.9 but not validated against `threshold` / strategy.  
+**ATTACK VECTOR:** Misconfiguration (`pre_freshen_threshold >= threshold`, or `consume-first` where pre-freshen is never invoked) yields no pre-band refreshes until behavior changes; operators assume tokens are warm at 97% but only switch-time freshen runs—reproducing the measured 25–88 s swap with no obvious config error.  
+**SUGGESTED FIX:** Validate at load time (`0 < pre_freshen_threshold < threshold`) or document and log once when pre-freshen cannot run for the active strategy.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/autoswitch.py` (~3093–3122 `_perform`)  
+**ISSUE:** After `_switch_timing` is taken and cleared, a gated abort on `sessions-active` emits `NoSwitchEvent` without freshen/quiet/switch breakdown.  
+**ATTACK VECTOR:** Freshen work already ran in the outer loop, but logs show only “sessions-active”—ops correlates slow ticks with switch events and misses that freshen time was spent on a aborted attempt (same blind spot as before timing, on a different exit).  
+**SUGGESTED FIX:** Attach partial `timing` (at least `freshenMs` / `freshenAttempts`) to `NoSwitchEvent` for gated aborts, or a dedicated reason subfield.
+
+---
+
+**Not reported (per your notes):** monotonic vs `clock()` split; budget counting starts only; reserve sort order; top-of-`_perform` timing capture; best-effort pre-freshen exceptions for network; false claim about `_prefreshened` in the switch loop.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-3
+###############################################################
+
+
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:3007
+ISSUE: `_switch_timing` is NOT cleared before early returns, causing cross-request timing pollution
+ATTACK VECTOR: If a switch is blocked (e.g. `sessions-active`) after candidate evaluation sets `_switch_timing`, the next real switch will report the previous blocked attempt's timing. The cleanup at 3087 is unreachable after 3007.
+SUGGESTED FIX: Move `pre_timing = ...; self._switch_timing = None` to the top of the method, or add explicit clearing before all early return paths.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:1208
+ISSUE: Throttle clock `self.clock()` is vulnerable to NTP adjustments, unlike budget timer
+ATTACK VECTOR: `self.clock()` returns wall-time (e.g. `time.time()`). If NTP sync jumps clock backwards by 2m, throttle check `now - last < 120s` resets incorrectly, refreshing same account twice per tick.
+SUGGESTED FIX: Use `time.monotonic()` for the `_prefreshened` throttle check instead of `self.clock()`.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:1380
+ISSUE: `_prefreshened` dictionary grows unbounded and is never cleaned up
+ATTACK VECTOR: In production, if slots/accounts are rotated frequently (ephemeral accounts), stale entries accumulate in `_prefreshened`, causing memory leak over time.
+SUGGESTED FIX: Add eviction logic (e.g., LRU or size cap) or cleanup stale entries (> `PREFRESHEN_INTERVAL_S`) on each tick.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:2498
+ISSUE: `_freshen_s` counter is not reset between candidates
+ATTACK VECTOR: In a loop with multiple candidates, `freshen_s` accumulates. If loop breaks early, final timing may undercount active switch's freshen time if multiple candidates were attempted.
+SUGGESTED FIX: Reset `freshen_s = 0.0` immediately before iterating candidates, or scope calculation to the single target candidate being evaluated.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3448
+ISSUE: `_return_home` sets `_switch_timing` but doesn't emit `SwitchEvent` directly
+ATTACK VECTOR: If `_perform_with_drain2` emits `SwitchEvent` but fails to include `timing` param (not in diff), timing is lost. Conversely, if `_return_home` calls `_perform_with_drain2` with timing set but event is not emitted, state remains dirty.
+SUGGESTED FIX: Ensure `_return_home` explicitly passes `timing` to emitted events or clears state on failure.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-4
+###############################################################
+
+**1**  
+**SEVERITY:** CRITICAL  
+**CONFIDENCE:** high  
+**FILE:** src/claude_swap/autoswitch.py:2475‑2482  
+**ISSUE:** The main switch loop only treats `"identity-conflict"` as a reason to skip a candidate, but `_freshen_target` can also return `"invalid_grant"`. When `"invalid_grant"` is returned the code proceeds to `_perform_with_drain2`, attempting a switch with a credential that is known to be unusable.  
+**ATTACK VECTOR:** In production a stale or revoked token will cause the engine to try to switch onto an invalid account, leading to failed switches, possible data loss, or unhandled exceptions that break the daemon.  
+**SUGGESTED FIX:** Add a branch analogous to the `"identity-conflict"` case:  
+
+```python
+if status in ("identity-conflict", "invalid_grant"):
+    self._quarantine(num, email, status)
+    continue
+```  
+
+---
+
+**2**  
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/autoswitch.py:1325‑1330  
+**ISSUE:** `_pre_freshen` throttles per‑slot refreshes using `self._prefreshened.get(num, 0.0)`. On a fresh process start `self._prefreshened` is empty, so the default `0.0` is used. Because `now` is obtained from `self.clock()` (a monotonic clock that starts near 0), the expression `now - 0.0 < PREFRESHEN_INTERVAL_S` is true for the first ~2 minutes, causing every slot to be incorrectly throttled on the first tick(s).  
+**ATTACK VECTOR:** The proactive “pre‑freshen” optimisation never runs after a restart, defeating its purpose and re‑introducing the long switch latency the feature was meant to avoid.  
+**SUGGESTED FIX:** Initialise the throttle entry with a sentinel that forces the first refresh, e.g.:
+
+```python
+if num not in self._prefreshened or now - self._prefreshened[num] >= PREFRESHEN_INTERVAL_S:
+    # allow refresh
+```
+
+or store `-float('inf')` as the default timestamp.
+
+---
+
+**3**  
+**SEVERITY:** INFO  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/autoswitch.py:1322‑1324  
+**ISSUE:** `_prefreshened` grows unbounded: every distinct slot ever seen is kept forever, even after the slot is removed from the system or becomes permanently quarantined.  
+**ATTACK VECTOR:** In long‑running deployments with many accounts (e.g., churn of temporary accounts), the dictionary can consume unbounded memory, eventually causing OOM or degraded performance.  
+**SUGGESTED FIX:** Periodically prune entries that are no longer present in the current `headroom`/`quarantined` sets, or use an LRU cache with a reasonable max size.
+
+---
+
+**4**  
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/autoswitch.py:1325‑1350  
+**ISSUE:** `_pre_freshen` mutates shared state (`self._prefreshened` and possibly `self._quarantine`) without acquiring the engine’s internal lock. When two engines run concurrently (e.g., the regular tick loop and a manual `cswap --once` cron), they can race, leading to duplicate refreshes or inconsistent quarantine lists.  
+**ATTACK VECTOR:** Race conditions may cause the per‑slot throttle to be bypassed, generating request storms, or may allow a slot that should be quarantined to be considered for switching, breaking correctness.  
+**SUGGESTED FIX:** Wrap the body of `_pre_freshen` that touches shared mutable state in `with self._state_lock:` (or the appropriate lock already used elsewhere).
+
+---
+
+**5**  
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/autoswitch.py:1339‑1345  
+**ISSUE:** The blanket `except Exception as e:` in `_pre_freshen` swallows *all* exceptions, including `KeyboardInterrupt`, `SystemExit`, and other control‑flow exceptions.  
+**ATTACK VECTOR:** An administrator sending SIGINT or a graceful shutdown request could be silently ignored, leaving the daemon hanging or preventing clean termination.  
+**SUGGESTED FIX:** Narrow the exception clause to catch only expected operational errors (e.g., `requests.RequestException`, `OSError`) and re‑raise others:
+
+```python
+except (OSError, requests.RequestException) as e:
+    _logger.debug(...)
+```
+
+---
+
+**6**  
+**SEVERITY:** INFO  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/autoswitch.py:2445‑2452  
+**ISSUE:** `freshen_s` accumulates the duration of *all* freshen attempts, even those that later result in `"identity-conflict"` and are skipped. Consequently `freshenMs` reported in `SwitchEvent.timing` may include time spent on candidates that never participated in the actual switch.  
+**ATTACK VECTOR:** Misleading performance metrics can hide the true cost of the critical path and make troubleshooting harder.  
+**SUGGESTED FIX:** Only add the elapsed time to `freshen_s` after confirming the status is not a skip reason, or reset the counter when a candidate is discarded.
+
+---
+
+**7**  
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/autoswitch.py:1947‑1955  
+**ISSUE:** `_pre_freshen` may quarantine slots, but the ordered list of candidates (`ordered`) used later in the same tick is computed **before** `_pre_freshen` runs. Thus a slot quarantined during pre‑freshen can still be selected for the actual switch attempt in that tick.  
+**ATTACK VECTOR:** The engine could attempt to switch to a slot that has just been identified as dead or conflicted, leading to unnecessary failures or extra network calls.  
+**SUGGESTED FIX:** Re‑compute the candidate ordering after `_pre_freshen` (or have `_pre_freshen` return the updated `quarantined` set) before entering the switch loop.
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:1429
+ISSUE: `_pre_freshen`'s try/except swallows failures of `self._quarantine(...)` itself, not just the network freshen, at debug level.
+ATTACK VECTOR: The docstring's stated purpose is "a dead lineage or identity conflict is quarantined NOW — learning it at the pre-band, not under the wall, is half the point." The `try` block wraps `_freshen_target` AND the subsequent `self._quarantine(num, email, status)` call together. If `_quarantine` (which does a state-file write via `_mutate_state`) hits a transient I/O error — disk full, concurrent lock contention with the other engine instance, a corrupt state file — the write failure is caught by the same broad `except Exception` and logged only at `_logger.debug`, never surfacing as a warning/error. The account is then NOT recorded as quarantined even though `_freshen_target` already determined its lineage is dead (`invalid_grant`) or its identity conflicts. It stays in the candidate pool and can later be selected as the real switch target by the switch-time freshen loop, which re-derives the same dead verdict — but only after the switch has already been chosen, costing a tick, or in the identity-conflict case risking confusion if the quarantine write intermittently succeeds/fails across retries. Compare to the switch-time loop (lines ~2544-2551), where the equivalent `self._quarantine(...)` call is NOT wrapped in any try/except — a write failure there propagates and is visible.
+SUGGESTED FIX: Narrow the `try` in `_pre_freshen` to wrap only the `_freshen_target` call; let `_quarantine`'s own errors propagate (or catch them separately and log at warning level) so a failed quarantine write is not silently indistinguishable from a skipped network refresh.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/autoswitch.py:1412
+ISSUE: `reserve = self._reserve_slot(self.settings)` is called before the per-candidate `try/except` in `_pre_freshen`, so it is not covered by the "best-effort, must never fail a tick" guarantee the function otherwise provides.
+ATTACK VECTOR: `_reserve_slot` only catches `ClaudeSwitchError` from `self.switcher.resolve_account`; any other exception type (e.g. an OSError from a future remote/keychain-backed resolution) would propagate out of `_pre_freshen` uncaught, and since `_pre_freshen` itself is called with no surrounding try/except at its call site (autoswitch.py:2037), it would abort the whole tick — contradicting the function's own stated invariant that "an optimisation must never be the thing that fails a tick."
+SUGGESTED FIX: Move the `reserve = self._reserve_slot(...)` call inside the same defensive boundary (or wrap it in its own narrow try/except defaulting to `None` on failure) so a reserve-resolution error degrades to "no reserve preference" instead of failing the tick.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
