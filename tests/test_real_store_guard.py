@@ -85,3 +85,11 @@ def test_any_json_write_under_the_real_home_is_refused_in_tests(fake_real_home, 
     with pytest.raises(RealStoreGuardError):
         h.switcher._write_json(target, {"accounts": {}})
     assert not target.exists()
+
+
+def test_state_and_settings_writes_are_guarded_too(fake_real_home):
+    from claude_swap.settings import atomic_write_json
+    target = fake_real_home / ".claude-swap-backup" / "autoswitch_state.json"
+    with pytest.raises(RealStoreGuardError):
+        atomic_write_json(target, {"lastSwitchAt": 1})
+    assert not target.exists()

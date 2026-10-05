@@ -726,6 +726,9 @@ def atomic_write_json(path: Path, data: dict) -> None:
     Shared by settings.json and the autoswitch state file (and any future
     machine-local state files beside them).
     """
+    # Test code may not write state or settings under the real home.
+    from claude_swap.real_store_guard import refuse_test_identity
+    refuse_test_identity(None, path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if sys.platform != "win32":
         os.chmod(path.parent, 0o700)
