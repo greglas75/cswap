@@ -72,13 +72,13 @@ def login_expires_at_iso(credentials: str) -> str | None:
     """
     data = extract_oauth_data(credentials)
     value = data.get("refreshTokenExpiresAt") if data else None
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
+        return None  # `not > 0` also turns NaN away
+    try:
+        when = datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):  # out of datetime's range: a corrupt file
         return None
-    return (
-        datetime.fromtimestamp(value / 1000, tz=timezone.utc)
-        .isoformat(timespec="seconds")
-        .replace("+00:00", "Z")
-    )
+    return when.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def is_oauth_token_expired(expires_at: object) -> bool:

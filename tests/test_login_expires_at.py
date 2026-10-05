@@ -25,6 +25,8 @@ class TestLoginExpiresAtIso:
         json.dumps({"claudeAiOauth": {"refreshTokenExpiresAt": "soon"}}),
         json.dumps({"claudeAiOauth": {"refreshTokenExpiresAt": True}}),
         json.dumps({"claudeAiOauth": {"refreshTokenExpiresAt": 0}}),
+        json.dumps({"claudeAiOauth": {"refreshTokenExpiresAt": 1e300}}),  # past datetime's range
+        '{"claudeAiOauth": {"refreshTokenExpiresAt": NaN}}',
         json.dumps({"other": {}}),
     ])
     def test_anything_but_a_positive_epoch_is_unknown(self, creds):
