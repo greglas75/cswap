@@ -25,6 +25,7 @@ def fake_real_home(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("email,expected", [
     ("b@example.com", True), ("c@example.org", True), ("d@host.test", True), ("u@localhost", True),
+    ("f@test", True), ("g@invalid", True),
     ("e@mail.example.com", True), ("tatiana@tgmresearch.com", False), ("greg.laski@gmail.com", False),
     ("a@x.com", False),   # a real mail domain: blocked only in a test context
     ("", False), (None, False), (123, False),
@@ -74,3 +75,13 @@ def test_the_engine_harness_refuses_a_non_temporary_home():
     from tests.test_autoswitch import EngineHarness
     with pytest.raises(RuntimeError, match="temporary home"):
         EngineHarness(Path("/Users/someone"))
+
+
+def test_any_json_write_under_the_real_home_is_refused_in_tests(fake_real_home, temp_home):
+    from tests.test_autoswitch import EngineHarness
+    h = EngineHarness(temp_home)
+    target = fake_real_home / ".claude-swap-backup" / "autoswitch_state.json"
+    target.parent.mkdir()
+    with pytest.raises(RealStoreGuardError):
+        h.switcher._write_json(target, {"accounts": {}})
+    assert not target.exists()

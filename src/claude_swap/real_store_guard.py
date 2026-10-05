@@ -28,7 +28,8 @@ import os
 import sys
 from pathlib import Path
 
-RESERVED_DOMAINS = frozenset({"example.com", "example.org", "example.net", "localhost"})
+RESERVED_DOMAINS = frozenset({"example.com", "example.org", "example.net", "localhost",
+                              "test", "invalid", "example"})
 TEST_SUFFIXES = (".test", ".invalid", ".example", ".localhost")
 
 

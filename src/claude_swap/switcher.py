@@ -428,6 +428,9 @@ class ClaudeAccountSwitcher:
 
     def _write_json(self, path: Path, data: dict) -> None:
         """Write JSON file with validation."""
+        # Test code may not write ANY file under the real home (nothing to
+        # check per account: in a test context the path alone decides).
+        refuse_test_identity(None, path)
         if Path(path).resolve() == Path(self.sequence_file).resolve():
             # A test helper pointed at the real home must not land its fixture
             # accounts in the real sequence (2026-10-05, see real_store_guard).
