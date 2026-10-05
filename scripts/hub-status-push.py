@@ -139,7 +139,8 @@ def main():
                 d[half] = old[half]
                 # When that half was collected — carried over already, keep its
                 # original time, or a stale half would look a minute old forever.
-                d.setdefault("stale", {})[half] = (old.get("stale") or {}).get(half) or old.get("at")
+                was = old.get("stale") if isinstance(old.get("stale"), dict) else {}
+                d.setdefault("stale", {})[half] = was.get(half) or old.get("at")
         try:
             put(token, d)
         except Exception as e:  # one machine's failure never stops the others

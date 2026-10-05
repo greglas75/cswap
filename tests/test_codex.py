@@ -441,7 +441,17 @@ class TestFetchUsageErrors:
 
     def test_an_expired_token_is_refreshable(self, monkeypatch):
         self._http(monkeypatch, 401, b'{"error":{"code":"token_expired"}}')
-        assert codex.fetch_usage(_auth("a@x.com")).refreshable()
+        auth = _auth("a@x.com")
+        auth["tokens"]["access_token"] = _jwt({"exp": 1})          # long past
+        assert codex.fetch_usage(auth).refreshable()
+
+    def test_a_401_on_a_valid_token_is_not_refreshable(self, monkeypatch):
+        """A disabled account answers 401 with a token that has not expired:
+        rank must not treat it as a healthy idle account."""
+        self._http(monkeypatch, 401, b'{"error":{"code":"account_deactivated"}}')
+        auth = _auth("a@x.com")
+        auth["tokens"]["access_token"] = _jwt({"exp": 9999999999})
+        assert not codex.fetch_usage(auth).refreshable()
 
     def test_other_http_errors_are_neither(self, monkeypatch):
         self._http(monkeypatch, 500, b"oops")
@@ -509,3 +519,16 @@ class TestReviewPass3:
             "secondary_window": {"used_percent": 10, "limit_window_seconds": 604800, "reset_at": 9},
         }})
         assert u.weekly_pct == 80
+
+
+def test_unlimited_credits_go_first_in_credits_mode(env, monkeypatch):
+    for e in ("u@x.com", "b@x.com", "a@x.com"):
+        _login(_auth(e))
+        codex.add(env)
+    unlimited = Usage(100, 1000.0, None, None, True, credits_balance=None, credits_usable=True, credits_unlimited=True)
+    by = {"a@x.com": Usage(100, 1000.0, None, None, True, credits_balance=10.0, credits_usable=True),
+          "b@x.com": Usage(100, 1000.0, None, None, True, credits_balance=90000.0, credits_usable=True),
+          "u@x.com": unlimited}
+    monkeypatch.setattr(codex, "fetch_usage", lambda auth, timeout=20.0: by[codex.email_of(auth)])
+    monkeypatch.setattr(codex.subprocess, "Popen", lambda *a, **kw: None)
+    assert codex.auto_tick(env, 95.0, 99.0)["to"] == "u@x.com"

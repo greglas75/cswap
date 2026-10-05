@@ -296,11 +296,13 @@ def parse_usage(payload: dict) -> Usage:
         if not isinstance(window, dict):
             continue
         length = window.get("limit_window_seconds") or 0
-        used = window.get("used_percent") if isinstance(window.get("used_percent"), (int, float)) else -1
+        def used(w: dict) -> float:
+            v = w.get("used_percent")
+            return float(v) if isinstance(v, (int, float)) else -1.0
         if length and length <= SHORT_WINDOW_MAX_S:
-            if short is None or used > (short.get("used_percent") or -1):
+            if short is None or used(window) > used(short):
                 short = window
-        elif weekly is None or used > (weekly.get("used_percent") or -1):
+        elif weekly is None or used(window) > used(weekly):
             # Two weekly-length windows: the more used one binds (a later one
             # used to overwrite the first whatever its value).
             weekly = window
@@ -360,13 +362,23 @@ def fetch_usage(auth: dict, timeout: float = 20.0) -> Usage:
         if e.code == 401 and "token_revoked" in body:
             # Dead for good — a later `codex login` on this machine revoked it.
             kind = "login revoked — log in again: cswap codex login"
-        elif e.code == 401:
+        elif e.code == 401 and _access_token_expired(tokens.get("access_token")):
+            # Only a token whose own exp has passed is "expired" — rank keeps
+            # it as a candidate, so any other 401 (a disabled account) must not
+            # read like this.
             kind = "token expired — refreshes on the next switch to it"
+        elif e.code == 401:
+            kind = "http 401 (token still valid — account refused)"
         else:
             kind = f"http {e.code}"
         return Usage(None, None, None, None, False, error=kind)
     except Exception as e:  # network, JSON — reported, never fatal
         return Usage(None, None, None, None, False, error=type(e).__name__)
+
+
+def _access_token_expired(token: str | None) -> bool:
+    exp = _jwt_claims(token).get("exp")
+    return isinstance(exp, (int, float)) and exp <= time.time()
 
 
 def rank(
@@ -537,7 +549,8 @@ def _auto_tick(
             }
         funded = sorted(
             (e for e, u in usages.items() if u.on_credits_ok()),
-            key=lambda e: -(usages[e].credits_balance or 0.0),
+            # Unlimited first: it has the most of all, and no balance number.
+            key=lambda e: -(float("inf") if usages[e].credits_unlimited else (usages[e].credits_balance or 0.0)),
         )
         if not funded:
             return {"event": "codex-no-switch", "reason": "no-candidate", "active": current}
