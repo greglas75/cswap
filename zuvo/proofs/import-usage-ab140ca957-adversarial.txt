@@ -1,0 +1,441 @@
+artifact_kind=adversarial-review
+created_at=2026-10-05T11:12:26Z
+status=partial
+mode=code
+output_format=text
+providers_used=cursor-agent, openrouter-3, byteplus, kimi
+provider_count=4
+providers_attempted=5
+provider_outcomes=cursor-agent:ok,agy:empty,openrouter-3:ok,byteplus:ok,kimi:ok
+REVIEW BY: CURSOR-AGENT
+REVIEW BY: OPENROUTER-3
+REVIEW BY: BYTEPLUS
+REVIEW BY: KIMI
+tree_modified_during_review=HEAD moved during the review: ab140ca -> 73cf4fd
+reviewed_blob=026a499e4f53d4413a9a76241c13046c6b60a8e1
+input_chars=19182
+input_chars_original=19182
+input_truncated=false
+total_findings=23
+critical=3
+warning=13
+info=7
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: cursor-agent, openrouter-3, byteplus, kimi (4 total)
+Mode: code
+Input size: 19182 chars
+Date: 2026-10-05T11:12:26Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CURSOR-AGENT
+###############################################################
+
+Adversarial review of the **changed lines only** in the provided diff.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/transfer.py` (import_usage validation loop) / `src/claude_swap/usage_store.py` (adopt hold cap)  
+**ISSUE:** `usageAgeSeconds` is validated as finite and ≥ 0 but not capped at `TRUST_MAX_AGE_S` (or any max).  
+**ATTACK VECTOR:** Stale or crafted `list --json` (old export, queue delay, hand-edited file) can adopt a snapshot that is already beyond the trust window. In `adopt`, `held_until = min(now + hold_s, stored + TRUST_MAX_AGE_S, …)` with `stored = now - age_s` gives `stored + TRUST_MAX_AGE_S = now + (TRUST_MAX_AGE_S - age_s)`; when `age_s > TRUST_MAX_AGE_S`, that cap is in the past, so `held_until > now` fails and `heldUntil` is removed—**`--hold` is silently ignored** while `lastGood`/`fetchedAt` may still update if the local row is older or empty. Decisions can run on quota data the store’s own trust rules would reject for locally fetched readings.  
+**SUGGESTED FIX:** Reject rows with `usageAgeSeconds > TRUST_MAX_AGE_S` (or skip adopt for that row with a clear message). Optionally still apply hold-only updates without replacing `lastGood` when over age.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/usage_store.py:831-834` (`adopt` early return)  
+**ISSUE:** `hold_s == 0` (“lift an earlier hold”) only runs inside `_mutate` when `readings` is non-empty; empty `readings` returns immediately.  
+**ATTACK VECTOR:** `import-usage` on a file where every row is skipped (`usageStatus != "ok"`, no local slot, duplicates caught earlier) produces `readings == {}`. CLI help says `0` lifts an earlier hold, but **no slot’s `heldUntil` is cleared**. Hub/script runs `--hold 0` with a partial or empty payload expecting to resume polling; collectors stay blocked until prior `heldUntil` expires.  
+**SUGGESTED FIX:** If `hold_s == 0`, either require explicit slot list (new flag) or document that lifting holds requires at least one matched row; alternatively, when `hold_s == 0`, mutate all slots listed in `identities`/`readings` keys only—if the intent is global lift, add an explicit code path (out of scope for minimal fix: at minimum error when `hold_s == 0` and `readings` is empty).
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/usage_store.py:868-876` (`adopt` / `apply`)  
+**ISSUE:** Hold is applied even when the imported reading does **not** replace `lastGood` (`fetched_at <= stored`), using the **local** `stored` and `lastGood` for caps.  
+**ATTACK VECTOR:** Mac has fresher local usage; hub pushes import + 180s hold. Local data stays newer (correct), but collectors are suppressed for matched slots anyway. If the local snapshot was only slightly newer and near reset/window boundary, you can block refreshes while trusting slightly stale local numbers—worse under clock skew or if “newer” is a failed/partial fetch timestamp artifact. Matches “hosts→Mac” sync intent but is easy to misread as “hold only follows adopted data.”  
+**SUGGESTED FIX:** Document explicitly, or only set `heldUntil` when `num in adopted` (or when `hold_s` is paired with a successful adopt for that slot).
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/transfer.py:603-607` / `src/claude_swap/usage_store.py:831`  
+**ISSUE:** `hold_s` is validated in CLI (`math.isfinite`, `>= 0`) but not in `import_usage` / `adopt`.  
+**ATTACK VECTOR:** Internal or future caller passes `hold_s=float('inf')` or NaN: `now + hold_s` becomes non-finite; `held_until > now` / persistence behavior is undefined or can yield a practical **indefinite poll block** on affected rows without a CLI guardrail.  
+**SUGGESTED FIX:** At start of `adopt` (or `import_usage`), reject non-finite or negative `hold_s` with `TransferError` / `ValueError`, mirroring CLI.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/usage_store.py:579-591` vs `adopt` docstring (~851-856)  
+**ISSUE:** Docstring says hold keeps `lastGood` “decision-trusted meanwhile”; `trust_extended` still requires `within_ceiling` (`age_s <= TRUST_MAX_AGE_S`) with `held` only as an inner disjunct.  
+**ATTACK VECTOR:** Not a separate failure mode when hold caps are applied at adopt time for **valid** ages (hold and trust expire together). Becomes user-visible inconsistency only in combination with over-age imports (finding 1)—operators believe “hold = trusted for decisions” while `entries()` can already refuse extended trust.  
+**SUGGESTED FIX:** Narrow docstring to “suppresses fetching” unless you intentionally want `held` to bypass `within_ceiling` (then change the boolean logic, not just docs).
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/transfer.py:633-639`  
+**ISSUE:** Full file/stdin read with no size bound before `json` parse.  
+**ATTACK VECTOR:** Same trust model as `import`: a pathological or hostile huge JSON causes high memory use or slow parse in the CLI process (local DoS), not remote unless something feeds stdin unattended.  
+**SUGGESTED FIX:** Optional size limit or streaming guard for non-`-` paths; out of scope if consistent with existing `import_accounts` pattern.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/usage_store.py:848-851` (`adopt` docstring vs behavior)  
+**ISSUE:** Documented TOCTOU—“fetch already in flight still records normally when it lands”—is unchanged but now interacts with new `heldUntil` on the same row.  
+**ATTACK VECTOR:** Adopt sets hold and optionally updates `lastGood`; an in-flight fetch completes after adopt and writes newer `lastGood` while `heldUntil` remains, so polling stays off even though data was just refreshed by this machine—usually desirable, but if the in-flight request was started under stale credentials and fails, you can sit in hold with pre-adopt or error state until hold/TRUST/reset caps expire.  
+**SUGGESTED FIX:** On successful local `record_*` after adopt, optionally shorten or clear `heldUntil` for that slot (only if product intent is “local fetch always wins over hub hold”).
+
+---
+
+**Not reviewed (absent from diff):** `loginExpiresAt` in `list --json`, `hub-status-push`, serialization of `heldUntil` on write, and switch/decision consumers of `trust_extended`—findings above follow only from the shown changes.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-3
+###############################################################
+
+
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/transfer.py:618
+ISSUE: Integer parsing accepts booleans (True/False) despite explicit type validation.
+ATTACK VECTOR: Since Python `bool` is a subclass of `int`, `isinstance(False, (int, float))` is True. The explicit check `isinstance(age_s, bool)` catches this, but if future refactoring moves this check or merges conditions, a `True` payload will pass. `True` (1) would set `fetched_at = now - 1.0`, causing a local collector to fetch the account 1 second ago, bypassing holds designed to prevent re-fetching fresh data.
+SUGGESTED FIX: Enforce type strictly: `if not (isinstance(age_s, (int, float)) and not isinstance(age_s, bool)):`
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/usage_store.py:868
+ISSUE: Missing file permission checks allow importing from world-readable sensitive paths.
+ATTACK VECTOR: `transfer.py` reads `source` directly without verifying permissions. A malicious actor could specify `/etc/shadow` or similar, triggering a parse error that logs the error message in stderr. This causes the tool to leak the filename in the error string to a terminal or logging process, potentially confirming file existence or leaking partial content if parsed as string.
+SUGGESTED FIX: Validate `os.access(in_path, os.R_OK)` and reject non-standard files, or wrap `read_text` in a try/except for permission errors and mask path in error messages.
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/transfer.py:668
+ISSUE: Trust boundary violation allows bypassing rate limits via imported "fresh" data.
+ATTACK VECTOR: A compromised machine can send usage data with `age_s` ≈ 0 and `usageStatus` "ok". `adopt` sets `held_until` but `due_candidate` checks `entry.held()` only to skip fetching. If the attacker machine has a valid token, the attacker can poll the API, and the importing machine will treat this data as fresh, avoiding local polling. This centralizes API usage (potentially over quota) on the attacker’s machine while others silently use stale or false "fresh" data.
+SUGGESTED FIX: Add an additional policy flag (e.g. `trusted_source`) or limit the freshness of imported `age_s` to a maximum allowed delta (e.g. `max_age_for_import = 60s`).
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/transfer.py:666
+ISSUE: Invariant violation on `held_until` calculation when `stored` is stale but `fetched_at` is recent.
+ATTACK VECTOR: If an existing row is stale (`stored` is old) but the imported data is newer (`fetched_at > stored`), the code uses the *new* `fetched_at` for calculating `held_until`. However, `fetched_at` is derived from `age_s` (local clock - age). If clocks are skew, `fetched_at` might be far in the future relative to `stored`. This can cause `held_until` to be pushed far into the future, locking the slot unnecessarily even if the local machine already has fresh data.
+SUGGESTED FIX: Clamp `fetched_at` to `now` (never allow future fetch times): `fetched_at = min(now, now - max(0.0, age_s))`.
+
+SEVERITY: INFO
+CONFIDENCE: high
+FILE: src/claude_swap/cli.py:1512
+ISSUE: `hold` argument accepts `0` to lift holds without enforcing `import-usage` dependency.
+ATTACK VECTOR: The validation `if args.hold is not None and args.import_usage is None:` correctly restricts `--hold` to usage import. But if `--hold 0` is passed without `--import-usage`, it errors. If passed *with* `--import-usage`, it lifts holds. The error message mentions `import-usage` specifically, but users might expect `--hold` to be globally useful for debugging (e.g. force re-fetch).
+SUGGESTED FIX: Allow `--hold` globally or clarify documentation that it is specific to usage import.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/usage_store.py:868
+ISSUE: `hold_s` of `0` lifts existing holds but does not clear `held_until` to `None` (keeps old value until `now`).
+ATTACK VECTOR: In `adopt`, if `hold_s` is `0`, the code computes `held_until = min(now, stored + ...)`. If `stored + ...` is in the past, `held_until` is less than `now`, effectively dropping the hold. However, the row persists `heldUntil` until it falls below `now`. If the row persists (e.g. serialized to disk), it retains an old timestamp, which might confuse debugging or logging later.
+SUGGESTED FIX: If `hold_s` is `0`, explicitly `row.pop("heldUntil", None)` instead of calculating.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/transfer.py:605
+ISSUE: No limit on file size for imported usage files.
+ATTACK VECTOR: `read_text()` loads entire file into memory. A malicious or accidental large file (GBs) could exhaust memory or trigger OOM during processing.
+SUGGESTED FIX: Validate `os.path.getsize` before reading and reject if > threshold (e.g., 1MB for a single user's list).
+
+
+###############################################################
+###   PROVIDER: BYTEPLUS
+###############################################################
+
+# Adversarial Review: cswap import-usage / UsageStore.adopt
+
+---
+
+**SEVERITY: WARNING**
+**CONFIDENCE: high**
+**FILE:** src/claude_swap/transfer.py:~654 (import_usage validation) / src/claude_swap/usage_store.py:~880 (`adopt` hold stamping)
+
+**ISSUE:** Freshness is measured at document *production* time only; nothing bounds the production→import gap, so a stale document imports as fresh — indefinitely.
+
+**ATTACK VECTOR:** `usageAgeSeconds` is captured when the producer ran `list --json`. `import_usage` reads only `schemaVersion` and per-row fields — no document-level timestamp is consulted, so `fetchedAt` is reconstructed as `import_time − age`. The tool's stated use case is *scripted* hand-off ("a script can let one machine poll and hand its readings to the rest"). If the producer dies (Mac asleep, uninstalled, path moved) while a consumer keeps importing the same shared file on a schedule, every import re-stamps `fetchedAt ≈ now`, beats any locally newer reading, re-arms `heldUntil` (capped at `TRUST_MAX_AGE_S` from the *re-stamped* time), and `entries()`/`due_candidate`/`_row_eligible` then actively suppress re-polling while serving the frozen reading as decision-trusted. The consumer never falls back to self-polling and never errors — week-old usage presented as current, forever.
+
+**SUGGESTED FIX:** Have `list --json` emit a top-level `generatedAt` (epoch); in `import_usage`, compute effective age as `usageAgeSeconds + max(0, now − generatedAt)` and reject (or refuse to hold/adopt) documents older than `TRUST_MAX_AGE_S`.
+
+---
+
+**SEVERITY: WARNING**
+**CONFIDENCE: high**
+**FILE:** src/claude_swap/usage_store.py:~864 (`adopt`: `if not readings: return set()`) with src/claude_swap/transfer.py:~679 (non-ok rows skipped before slot matching)
+
+**ISSUE:** `--hold 0` ("lifts an earlier hold" per CLI help) is a silent no-op exactly when lifting is needed.
+
+**ATTACK VECTOR:** Holds are lifted only for slots that appear in the document with `usageStatus == "ok"` *and* match a local slot. The canonical reason to run `--hold 0` is that the producer stopped producing good readings — but then its rows are non-ok, are `continue`d before `_find_account_slot`, `readings` ends up empty, `adopt` early-returns, and the old `heldUntil` stays armed. Output is `Done: 0 adopted, 0 kept, N skipped` with no mention of holds; collectors stay off the slot until the old hold lapses. Partial variant: a document matching slots 1–2 silently leaves a stale hold on slot 3 from an earlier broader import.
+
+**SUGGESTED FIX:** Resolve slots for *every* row with a valid email/org (before the status skip) and, when `hold_s == 0`, clear `heldUntil` for all matched slots in `adopt` — not only those receiving a reading (e.g., pass a `lift` set, or drop the early return when `hold_s == 0`).
+
+---
+
+**SEVERITY: WARNING**
+**CONFIDENCE: medium**
+**FILE:** src/claude_swap/transfer.py:~672 (email/org required on every row)
+
+**ISSUE:** Every row must carry a non-empty `email`, including rows the function intends to skip — producer documents containing email-less rows make the whole import fail.
+
+**ATTACK VECTOR:** The code validates `email`/`organizationUuid` *before* the `usageStatus != "ok"` skip, and the codebase itself has accounts with nothing to fetch ("Sentinel accounts (api-key / no credentials)"). A producer whose `list --json` includes such a row (or any never-logged-in slot) without an email yields a document the consumer can never import: hard `TransferError`, all-or-nothing abort — contradicting the docstring "Rows without usage … are skipped." Note the asymmetry: `organizationUuid or ""` tolerates a null org, but a null/missing email is fatal.
+
+**SUGGESTED FIX:** Move the email/org validation after the `usageStatus` skip (or treat a missing email on a non-ok row as `skipped += 1; continue`).
+
+---
+
+**SEVERITY: WARNING**
+**CONFIDENCE: medium**
+**FILE:** src/claude_swap/usage_store.py:~897 (`adopt` → `self._mutate(...)`)
+
+**ISSUE:** Slot→account resolution happens against a snapshot outside the store lock; `adopt` trusts slot numbers at mutate time.
+
+**ATTACK VECTOR:** `import_usage` calls `_get_sequence_data_migrated()` once, resolves `(email, org) → slot` via `_find_account_slot`, and only later applies readings under the store lock keyed by slot number. This codebase is explicitly multi-process/concurrency-aware (the `claim` re-check comment, hub/collector architecture), so a concurrent `switch`/remove/hub push that renumbers or reassigns slots between resolution and mutate applies account A's usage — and a multi-second fetch hold — to account B's row. `identities` is passed to `_mutate`, but nothing in the artifact shows it being re-verified under the lock.
+
+**SUGGESTED FIX:** Inside `_mutate` (under the lock), verify the row's stored email/`organizationUuid` still equals `identities[num]` before applying; skip (or error) on mismatch.
+
+---
+
+**SEVERITY: INFO**
+**CONFIDENCE: high**
+**FILE:** src/claude_swap/cli.py:~1828 (`elif args.import_usage:`)
+
+**ISSUE:** Dispatch uses truthiness where every sibling uses `is not None`; an empty path silently falls through.
+
+**ATTACK VECTOR:** `cswap import-usage ""` (or the legacy `--import-usage ""`) sets `args.import_usage` to `""`, which is falsy, so the branch is skipped and execution falls through to later handlers/default behavior instead of reporting a bad path — inconsistent with the adjacent `elif args.import_ is not None:` and a silent failure at the input boundary.
+
+**SUGGESTED FIX:** Change the dispatch test to `elif args.import_usage is not None:` (empty path then fails downstream with the existing "usage file not found" error, or add an explicit empty-path check).
+
+
+###############################################################
+###   PROVIDER: KIMI
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/usage_store.py (adopt, `reset_at = _earliest_reset(row.get("lastGood"), ("all",))`)
+ISSUE: Hold-capping relies on `"all"` being a wildcard sentinel understood by `oauth.relevant_windows`; nothing in the artifact shows that contract exists.
+ATTACK VECTOR: `_earliest_reset`'s docstring only guarantees `relevant_windows` returns `[]` for non-dict input; it says nothing about a `"all"` model sentinel. If `relevant_windows` filters windows by actual model names, `("all",)` matches nothing, `resets` is empty, and the function returns `None` — silently disabling the reset-based cap. The hold then runs to the full `TRUST_MAX_AGE_S` even though a usage window rolls over mid-hold, and `entries()` keeps the obsolete snapshot decision-trusted via the `held` branch (which, unlike `_rate_limited_trust_ok`, performs no reset re-check at read time). Fail-open in exactly the direction the comment claims to guard against.
+SUGGESTED FIX: Verify `oauth.relevant_windows` treats `"all"` as a wildcard; if it doesn't, pass a sentinel it does support, or collect `resets_at` across all windows without model filtering. Add a test asserting a hold is capped by a near-future `resets_at`.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/usage_store.py (adopt.apply)
+ISSUE: `adopt` has no staleness gate on the incoming reading itself: a reading whose earliest window already reset (or whose `age_s` exceeds `TRUST_MAX_AGE_S`) still replaces `lastGood` whenever `fetched_at > stored`.
+ATTACK VECTOR: Producer machine exports `list --json`, the file sits around (or clock skew inflates transit time), then a consumer imports it. A window's `resets_at` may already be in the past: the snapshot no longer describes the current window, yet it overwrites a locally fetched reading merely because its (back-computed) `fetchedAt` is newer. The hold branch happens to handle this (`held_until <= now` → hold dropped), but the `lastGood` replacement is unconditional. With `hold_s=None` (the documented default), the stale reading is adopted and served until it ages past `SERVE_TTL_S`/`TRUST_MAX_AGE_S` on paths that only check `fresh()`/`within_ceiling`, neither of which consults reset times.
+SUGGESTED FIX: In `apply`, compute `reset_at = _earliest_reset(usage, ("all",))` before adopting and skip adoption (don't count it in `adopted`, don't hold) when `reset_at is not None and reset_at <= now`; optionally also skip when `age_s > TRUST_MAX_AGE_S`.
+
+SEVERITY: WARNING
+CONFIDENCE: low
+FILE: src/claude_swap/usage_store.py (entries, `trust_extended`)
+ISSUE: The new `held` trust bridge is weaker than the analogous existing bridge: `_rate_limited_trust_ok` re-validates window resets at read time, the `held` branch checks only `within_ceiling and held_until`.
+ATTACK VECTOR: Safety of the `held` extension rests entirely on the adopt-time cap being correct (see finding 1) and on reset times never changing after adoption. Any path where `heldUntil` is set without the reset cap (a future writer, a hand-edited usage file, the wildcard failing) extends decision trust past a window rollover with no read-time backstop — a convention drift from the established "never trust past the soonest reset" invariant enforced everywhere else in this module.
+SUGGESTED FIX: In `entries()`, mirror `_rate_limited_trust_ok`: gate the `held` branch on `now < _earliest_reset(last_good, ...)` when resets are known, so the invariant holds regardless of how `heldUntil` was written.
+
+SEVERITY: INFO
+CONFIDENCE: high
+FILE: src/claude_swap/transfer.py (import_usage row loop)
+ISSUE: `usage_from_json` runs before the slot lookup, so a malformed `usage` payload on an account not managed locally aborts the entire import — contradicting the documented "accounts not managed here are skipped."
+ATTACK VECTOR: A `list --json` document from a machine managing a superset of accounts (the stated use case) contains one row for an unmanaged account with an unexpected `usage` shape (schema drift between tool versions, older producer). Instead of skipping that row, `import_usage` raises `TransferError` and adopts nothing, even though every managed account's row was valid. Same for the `usageAgeSeconds` validation.
+SUGGESTED FIX: Move `_find_account_slot` (and the `num is None` skip) ahead of the `usageAgeSeconds`/`usage_from_json` validation so only rows that will actually be adopted are strictly validated.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
+
+=== APPENDED PASS 2026-10-05T11:28:25Z ===
+artifact_kind=adversarial-review
+created_at=2026-10-05T11:28:24Z
+status=partial
+mode=code
+output_format=text
+providers_used=cursor-agent, codex-5.3, openrouter-4
+provider_count=3
+providers_attempted=5
+provider_outcomes=cursor-agent:ok,agy:empty,codex-5.3:ok,openrouter-4:ok,byteplus:timeout
+REVIEW BY: CURSOR-AGENT
+REVIEW BY: CODEX-5.3
+REVIEW BY: OPENROUTER-4
+reviewed_blob=714ec2c2e29aaa4787a00440c65b74f9f503c0a0
+reviewed_blob=e50259e548145c888920d2c92490d75c41024229
+input_chars=16078
+input_chars_original=16078
+input_truncated=false
+total_findings=13
+critical=1
+warning=10
+info=2
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: cursor-agent, codex-5.3, openrouter-4 (3 total)
+Mode: code
+Input size: 16078 chars
+Date: 2026-10-05T11:28:24Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CURSOR-AGENT
+###############################################################
+
+Adversarial review of **changed lines only**, ordered by severity then confidence.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** scripts/hub-status-push.py (module doc ~L1–18, `share_usage` ~L118–145, `main` ~L177–180)  
+**ISSUE:** One round can run far longer than the 1-minute LaunchAgent interval (parallel `collect` up to 90s; Mac can run up to three sequential `import_into` calls at 60s each).  
+**ATTACK VECTOR:** A second `hub-status-push.py` starts while the first is still in `share_usage`, so two processes can call `cswap import-usage` on the same machine. The in-process comment (“never two importers at once”) only applies inside one run, not across overlapping cron/LaunchAgent invocations → races, duplicated work, or corrupted/partial usage store updates.  
+**SUGGESTED FIX:** Serialize runs (e.g. `flock` on a lockfile), or cap total wall time and skip/limit imports; align agent interval with worst-case duration (or run share in a separate, less frequent job).
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** scripts/hub-status-push.py:~L133–136 (`share_usage`)  
+**ISSUE:** Every host’s full `raw_claude` is queued for Mac with `hold_s=0`, applied sequentially; there is no merge or “freshest wins” rule.  
+**ATTACK VECTOR:** Two CI hosts report the same org with different `usageAgeSeconds`/usage; whichever host is last in `raws.items()` (insertion order from `docs`) wins the Mac store for that import batch. A slower/stale host that finishes collect in the same round can overwrite a fresher peer on Mac, then Mac may re-export held readings to other hosts from that stale snapshot (for rows still passing `_measured_lately`).  
+**SUGGESTED FIX:** Before `import_into("mac", ...)`, pick one payload per org (min `usageAgeSeconds`, or max `usageFetchedAt` if present), or send a single merged document; optionally drop host rows that fail `_measured_lately` on the Mac path too.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** scripts/hub-status-push.py:~L125–136 vs ~L114–117 (`share_usage` / `_measured_lately`)  
+**ISSUE:** Freshness gating is one-way: Mac→hosts uses `_measured_lately`; hosts→Mac does not.  
+**ATTACK VECTOR:** A host that answered SSH but has not polled recently (large/missing `usageAgeSeconds`, clock skew, or idle CI box) still pushes a full list into Mac every minute. Mac→host sharing is filtered, but Mac’s local store and dashboard JSON can stay wrong until trust/adopt logic elsewhere rejects it (not in this diff). Operational symptom: Mac “trusts” dead readings while trying to reduce 429s on the outbound path only.  
+**SUGGESTED FIX:** Apply the same (or stricter) freshness filter before enqueueing host→Mac jobs, or pass a max-age flag through `import-usage` if the CLI supports it.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** scripts/hub-status-push.py:~L99–108, ~L139–141 (`import_into` / `run`)  
+**ISSUE:** Per-target imports run sequentially; failures are collected but earlier successful `import_into` calls in the same `run(tid)` chain are not rolled back.  
+**ATTACK VECTOR:** Mac imports host A OK, host B fails (timeout, non-zero exit, malformed pipe). Store is left half-updated; stderr logs two lines but `share_usage` only returns a boolean. Next minute’s held rows may reflect a mix of old and new sources with no explicit “generation” or transaction boundary in this script.  
+**SUGGESTED FIX:** Treat one round as one atomic document (merge locally then single `import-usage`), or document/ enforce idempotent full-replace semantics in the importer; on any failure in a chain, optionally re-import previous snapshot or bump a version field.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/switcher.py:~L4828–4840 (changed `held(now)` branch)  
+**ISSUE:** While `entries[num].held(now)`, proactive OAuth refresh for active accounts is skipped entirely.  
+**ATTACK VECTOR:** Long `SHARE_HOLD_S` (180s) plus renewed holds every hub round can keep an account in “held” state across many minutes. If access/refresh expiry falls inside that window, refresh is deferred until hold lapses; depending on fetch-path behavior (not in diff), you can hit `relogin_required`/failed usage fetches later than the old idle-hold logic would have, or show `token_expired` while still decision-trusted on imported usage.  
+**SUGGESTED FIX:** Still refresh tokens when expired (or within skew) even when held; or shorten hold when `is_oauth_token_expired` is true; or clear hold before refresh.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/oauth.py:~L72–74 (`login_expires_at_iso`)  
+**ISSUE:** `refreshTokenExpiresAt` must already be a numeric type; string epochs from JSON (`"1735689600000"`) are treated as absent.  
+**ATTACK VECTOR:** If production credentials ever store ms expiry as a string (common JSON quirk, manual edits, older exports), `list --json` omits `loginExpiresAt` even though a expiry exists → dashboard shows “unknown” until hard `relogin_required`.  
+**SUGGESTED FIX:** Coerce with a guarded parse: e.g. if `isinstance(value, str): value = int(value)` inside try/except, then existing range checks.
+
+---
+
+**Not reported (weak or outside changed lines):** `usage_from_json` / `_window_from_json` look intentionally strict (`isfinite`, bool exclusion); `loginExpiresAt` gated on truthy string is consistent with optional additive fields; `shlex.quote` change addresses real `$`/backtick expansion vs `json.dumps` on remote shells — no issue raised there.
+
+**Count:** 6 findings (no CRITICAL with high confidence from this diff alone; overlap + last-wins are the strongest production breakers).
+
+
+###############################################################
+###   PROVIDER: CODEX-5.3
+###############################################################
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: src/claude_swap/oauth.py:73  
+ISSUE: A malformed `refreshTokenExpiresAt` can crash `list --json`.  
+ATTACK VECTOR: The function accepts any positive float, including infinity, and passes it to `datetime.fromtimestamp`. Infinity or an out-of-range timestamp raises an exception while rendering an account row, potentially preventing the entire list from being produced.  
+SUGGESTED FIX: Require a finite timestamp and catch `OverflowError`, `OSError`, and `ValueError` from conversion.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: scripts/hub-status-push.py:131  
+ISSUE: A Mac reading adopted from another host can be sent back to that host with a renewed polling hold.  
+ATTACK VECTOR: `_measured_lately` checks age but not where the reading was measured. While an adopted reading remains under 300 seconds old, each minute’s round can renew a 180-second hold on its source host, delaying that host’s own polling while the Mac has no fresh measurement.  
+SUGGESTED FIX: Apply a hold only to readings the Mac measured locally; exclude adopted rows from the held share.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-4
+###############################################################
+
+**SEVERITY:** CRITICAL  
+**CONFIDENCE:** high  
+**FILE:** scripts/hub-status-push.py:line ≈ 520 (inside `share_usage` loop)  
+**ISSUE:** `entries` is keyed by *string* account numbers, but the new logic accesses it with an *int* (`entries[num]`). This raises a `KeyError` for every account, aborting the whole switch‑over pass.  
+**ATTACK VECTOR:** In production the script crashes on every run after the recent change, leaving the hub without any status updates and breaking the token‑refresh idle‑hold logic.  
+**SUGGESTED FIX:** Use the same key type as elsewhere, e.g. `entries[str(num)]`, or store integer keys consistently.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** scripts/hub-status-push.py:line ≈ 66 (inside `collect`)  
+**ISSUE:** `parse(claude_txt)` (and the analogous `parse(codex_txt)`) is called without a `try/except`. If the subprocess returns malformed JSON, `parse` will raise and the whole `collect` task crashes, causing the thread pool to abort and the script to exit with an unhandled exception.  
+**ATTACK VECTOR:** A corrupted or unexpected output from a remote host (or a malicious host) can bring down the entire status‑push run, causing loss of monitoring data.  
+**SUGGESTED FIX:** Wrap the `parse` calls in `try/except ValueError` (or the specific exception `parse` raises) and record the error in `doc["errors"]` instead of propagating.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** scripts/hub-status-push.py:line ≈ 84 (inside `import_into`)  
+**ISSUE:** `json.dumps(raw)` is performed without handling `TypeError`. If `raw` contains a non‑serializable value (e.g., a datetime object), `json.dumps` will raise, bubbling up and aborting the thread pool job.  
+**ATTACK VECTOR:** A malformed `raw_claude` payload from a host can cause the whole sharing step to fail silently (the exception propagates out of the generator, turning into an unhandled exception in the executor).  
+**SUGGESTED FIX:** Catch `TypeError` around `json.dumps` and return an error string, similar to the existing timeout/OSError handling.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/oauth.py:line ≈ 70 (function `login_expires_at_iso`)  
+**ISSUE:** Converting `refreshTokenExpiresAt` (epoch ms) to a `datetime` with `datetime.fromtimestamp(value / 1000, tz=timezone.utc)` can raise `OSError`/`OverflowError` for out‑of‑range timestamps. The function does not catch these exceptions, so a malformed credential can crash the caller (`account_row`).  
+**ATTACK VECTOR:** Corrupted or malicious credential data stored in the DB could bring down the entire switcher process when it tries to render the dashboard.  
+**SUGGESTED FIX:** Wrap the conversion in a `try/except (OSError, OverflowError, ValueError)` block and return `None` on failure.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** low  
+**FILE:** scripts/hub-status-push.py:line ≈ 30 (definition of `TARGETS`)  
+**ISSUE:** The lambda for the local `"mac"` target does not quote the command string, whereas remote targets use `shlex.quote`. If `BOTH` ever contains characters that the local shell would expand (e.g., `$` or backticks), it could lead to command injection on the Mac itself.  
+**ATTACK VECTOR:** An attacker who can influence the `BOTH` constant (e.g., via a compromised environment variable) could execute arbitrary commands locally.  
+**SUGGESTED FIX:** Apply `shlex.quote` to the command for the `"mac"` target as well, or construct the argument list without a shell (`["bash","-lc",BOTH]` is already safe because `BOTH` is a constant, but adding quoting makes the intent explicit).
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
