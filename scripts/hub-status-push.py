@@ -109,7 +109,14 @@ def main():
     if dry:
         print(json.dumps(docs, indent=1)[:4000])
         return 0
-    token = owner_password()
+    try:
+        token = owner_password()
+    except (subprocess.CalledProcessError, OSError) as e:
+        # A locked keychain (screen locked at login) is a reason to skip this
+        # round, not a traceback every minute; the documents on the hub stay.
+        print(time.strftime("%F %T ") + "hub password unavailable from the keychain (%s) — nothing sent" % e,
+              file=sys.stderr)
+        return 1
     prev = previous_docs(token)
     rc = 0
     for d in docs:

@@ -44,7 +44,7 @@ for h in "${targets[@]}"; do
         echo; echo "== $h: $e — open the link in a browser signed in as $e, then paste the code here"
         as_gha "$h" "unset CLAUDE_CODE_OAUTH_TOKEN; claude auth login --email $(printf %q "$e") && cswap add" || { echo "!! $h: $e not added"; rc=1; }
       done
-      as_gha "$h" "cswap list" | grep -E '^ +[0-9]+:' ;;
+      as_gha "$h" "cswap list" | grep -E '^ +[0-9]+:' || rc=1 ;;
     add-codex)
       as_gha "$h" "cswap codex login && cswap codex list" || rc=1 ;;
     *)
