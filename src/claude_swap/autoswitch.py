@@ -2964,7 +2964,7 @@ class AutoSwitchEngine:
                     life = oauth.weekly_life(usage.get(num), self._models)
                     if life is not None and life >= reserves[num]:
                         kept.append(((order.index(num),), num))
-                qualifying = kept
+                qualifying = kept   # keyed by configured reserve order alone
         # Ascending by the strategy's key; list order (sequence order) breaks ties.
         qualifying.sort(key=lambda t: t[0])
         return [num for _, num in qualifying], any_known, active_reset_ts

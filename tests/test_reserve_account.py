@@ -221,10 +221,10 @@ class TestSeveralReserves:
         assert parse_reserves("greg@x.com:40, yahoo@x.com:50, 7", 20.0) == [
             ("greg@x.com", 40.0), ("yahoo@x.com", 50.0), ("7", 20.0),
         ]
-        # A bad floor never un-reserves the account: it takes the default.
-        assert parse_reserves("a@x.com:abc, b@x.com:150, , b@x.com:5", 20.0) == [
-            ("a@x.com:abc", 20.0), ("b@x.com", 20.0),   # first mention of b wins
-        ]
+        # A bad floor never un-reserves the account: it keeps the default floor.
+        assert parse_reserves("a@x.com:abc, b@x.com:150, c@x.com:40%, d@x.com:, , b@x.com:5", 20.0) == [
+            ("a@x.com", 20.0), ("b@x.com", 20.0), ("c@x.com", 20.0), ("d@x.com", 20.0),
+        ]   # first mention of b wins
         assert parse_reserves(None, 20.0) == []
 
     def test_reserves_are_used_in_their_order_each_held_by_its_own_floor(self, temp_home):

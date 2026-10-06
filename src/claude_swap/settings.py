@@ -32,13 +32,17 @@ SETTINGS_FILENAME = "settings.json"
 _logger = logging.getLogger("claude-swap")
 
 
+_warned_reserve_entries: set[str] = set()
+
+
 def parse_reserves(value: str | None, default_floor: float) -> list[tuple[str, float]]:
     """``reserveAccount`` as ``[(identifier, floor_pct), ...]`` in use order.
 
     Entries are comma-separated; ``ident:pct`` sets that reserve's own weekly
-    floor (0-100). A suffix that is not a number in range is part of nothing
-    an account could be called, so the entry falls back to the default floor
-    rather than being dropped: a typo must never un-reserve the account.
+    floor (0-100). No email or slot number contains ':', so the identifier is
+    always what precedes the last one. A suffix that is not a number in range
+    ("greg@x.com:40%", "greg@x.com:") keeps the account a reserve on the
+    default floor, with one warning: a typo must never un-reserve the account.
     """
     out: list[tuple[str, float]] = []
     for part in (value or "").split(","):
@@ -49,15 +53,18 @@ def parse_reserves(value: str | None, default_floor: float) -> list[tuple[str, f
         floor = default_floor
         if sep:
             try:
-                parsed = float(pct)
+                parsed: float | None = float(pct)
             except ValueError:
                 parsed = None
             if parsed is not None and 0.0 <= parsed <= 100.0:
                 floor = parsed
-            elif parsed is not None:
-                _logger.warning("settings.json: reserve floor %r out of 0-100; using %s", part, default_floor)
-            else:
-                ident = part   # no numeric suffix: the whole entry is the identifier
+            elif part not in _warned_reserve_entries:
+                # Parsed on every tick and by every caller: warn once per entry.
+                _warned_reserve_entries.add(part)
+                _logger.warning(
+                    "settings.json: reserve floor in %r is not a number from 0 to 100; using %s",
+                    part, default_floor,
+                )
         else:
             ident = part
         ident = ident.strip()
@@ -171,7 +178,7 @@ class AutoSwitchSettings:
     # Several reserves (owner, 2026-10-05): a comma-separated list, used in
     # list order, each entry optionally carrying its own floor —
     # "greg@tgmresearch.com:40, greg.laski@yahoo.com:50". An entry without
-    # one takes reserve_min_life_pct. See reserves().
+    # one takes reserve_min_life_pct. See parse_reserves().
     reserve_account: str | None = None
     reserve_min_life_pct: float = 20.0
     # Codex (`cswap codex`): its own reserve — always last in the queue, and
