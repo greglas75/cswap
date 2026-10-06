@@ -1,0 +1,220 @@
+artifact_kind=adversarial-review
+created_at=2026-10-06T09:20:05Z
+status=partial
+mode=code
+output_format=text
+providers_used=cursor-agent, muse, kimi
+provider_count=3
+providers_attempted=5
+provider_outcomes=cursor-agent:ok,agy:empty,openrouter-3:empty,muse:ok,kimi:ok
+REVIEW BY: CURSOR-AGENT
+REVIEW BY: MUSE
+REVIEW BY: KIMI
+reviewed_blob=5282440e1b47a4c1e33b071c86ed4bf50c323732
+input_chars=16382
+input_chars_original=16382
+input_truncated=false
+total_findings=18
+critical=1
+warning=11
+info=6
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: cursor-agent, muse, kimi (3 total)
+Mode: code
+Input size: 16382 chars
+Date: 2026-10-06T09:20:05Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CURSOR-AGENT
+###############################################################
+
+Review is limited to the diff you provided; the workspace doesn’t contain these files, so nothing was verified outside the artifact.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/autoswitch.py:1461` vs `2102` / `2505` / `2953`  
+**ISSUE:** Reserve set for rotation uses `self._reserve_slots(self.settings)` while tick logic uses `_reserve_slots(settings)` from the method parameter.  
+**ATTACK VECTOR:** When a tick runs with overridden `settings` (e.g. consume-first / replay / `with_overrides`), freshening deprioritizes a different reserve set than `on_reserve`, proactive `reserve-active`, floor blocking, and `_rank_candidates` — reserve may be freshened while treated as non-reserve for switching (or the reverse), causing wrong token rotation or spurious “reserve-protected” / missed handover.  
+**SUGGESTED FIX:** Pass the same `settings` into the rotation block as the rest of the tick (`self._reserve_slots(settings)` at ~1461), or document and enforce that `self.settings` always equals tick `settings`.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/autoswitch.py:2960–2968` (unchanged comment vs new `kept` branch)  
+**ISSUE:** Comment–code mismatch: comment claims sort is “Ascending by the strategy's key; list order breaks ties”, but when only reserves qualify, keys are replaced with `(order.index(num),)` only.  
+**ATTACK VECTOR:** Reserve-only failover ignores strategy ordering (headroom / reset / etc.); first configured reserve is always preferred among above-floor reserves even when a later reserve is clearly better by the strategy — unexpected landing account and uneven quota burn.  
+**SUGGESTED FIX:** Either preserve original strategy key as primary sort and use `order.index(num)` only as tie-breaker, or update the comment to state reserve-only path is strictly config order.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/autoswitch.py:2392–2410` vs `2133`  
+**ISSUE:** `on_reserve` disables `_early_swap_fires` for all triggers, but quiet `reserve-active` / `alert=False` applies only when `trigger == "proactive"`.  
+**ATTACK VECTOR:** On a reserve with utilization below threshold, a non-proactive trigger (threshold, drain, manual intent, etc.) skips early opportunism and does not hit the proactive-only early exit — can fall through to last-account / long-wait / alert paths the comments say the reserve path avoids (“no last-account alert, no long wait”).  
+**SUGGESTED FIX:** Factor shared “on reserve, under threshold, no takeover peer” handling for all triggers that would otherwise treat the slot as resting, or gate the same `NoSwitchEvent` + `_abandon_switch_intent(..., alert=False)` before generic blocked/alert logic.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/autoswitch.py:2965` and `src/claude_swap/switcher.py:5497`  
+**ISSUE:** `order.index(num)` / `order.index(str(row[0]))` assumes reserve dict keys and candidate/row slot ids share the same type and string form.  
+**ATTACK VECTOR:** If `qualifying` uses int slot ids while `_reserve_slots` keys are str (or `"3"` vs `3`), `index` raises `ValueError` and kills the tick or status command mid-run.  
+**SUGGESTED FIX:** Normalize slot ids once at resolution (always `str`) and use the same normalization in `order.index(...)`.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/settings.py:36–40` vs `67–68`  
+**ISSUE:** Docstring says a bad numeric suffix is “part of nothing an account could be called” and the entry falls back to default floor; for out-of-range numeric suffix (`ident:150`) the identifier stays the `rpartition` left side (`ident`), not the full `part`.  
+**ATTACK VECTOR:** Operator typo `account:150` silently keeps account as reserve with default floor and only a log line — looks like a custom 150% floor was rejected but the account remains reserved; confusing during outages.  
+**SUGGESTED FIX:** Align docstring with behavior, or treat out-of-range `:pct` like non-numeric suffix (`ident = part.strip()`) if that matches product intent.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/autoswitch.py:3468–3475`  
+**ISSUE:** `_reserve_slots` invokes `_resolve_reserve` per identifier on every call; with multiple reserves this multiplies calls per tick (rotation, `on_reserve`, floor block, rank) vs single-reserve before.  
+**ATTACK VECTOR:** If `_resolve_reserve` ever performs I/O or mutates state (docstring fragment in the diff admits “it is a write” while `_rank_candidates` replay expects purity), more entries × more call sites increases duplicate side effects and stale resolution within one tick.  
+**SUGGESTED FIX:** Cache `{slot: floor}` for the duration of a tick on the engine instance, or make `_resolve_reserve` truly pure and move writes out of the resolve path.
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** low  
+**FILE:** `src/claude_swap/settings.py:67–68`  
+**ISSUE:** Duplicate identifiers in one `reserveAccount` string are skipped silently (`ident not in ...`); duplicate slots from two idents resolving to the same managed account are skipped in `_reserve_slots` (`num not in out`) — only first floor wins.  
+**ATTACK VECTOR:** Config like `a@x.com:50,a@x.com:30` or two emails mapping to one slot yields one floor with no explicit error; operator believes the stricter floor applies.  
+**SUGGESTED FIX:** Log or validate at settings load when a duplicate ident or duplicate resolved slot is dropped with a conflicting floor.
+
+
+###############################################################
+###   PROVIDER: MUSE
+###############################################################
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/settings.py:parse_reserves
+ISSUE: Non-numeric `:suffix` becomes part of the identifier, silently un-reserving the account
+ATTACK VECTOR: `part.rpartition(":")` followed by `ident = part` on `ValueError` means `gmail.com:abc`, `gmail.com:40x`, or `gmail.com:` keeps the `:suffix` as the identifier. `_resolve_reserve` / `slot_of` then matches no managed account and the entry is skipped. The docstring claims the opposite: "a typo must never un-reserve the account" and "falls back to the default floor rather than being dropped". Only out-of-range numerics fall back; typos drop protection, so the fleet burns the account meant to stay usable, with no warning logged on this path.
+SUGGESTED FIX: On unparseable suffix, keep the left side as ident with `default_floor` and log a warning instead of `ident = part`.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:2098
+ISSUE: Out-of-range floor warning fires multiple times per tick
+ATTACK VECTOR: `_reserve_slots()` calls `parse_reserves()`, which logs on out-of-range floors. The diff adds at least four `_reserve_slots()` calls per tick (freshen exclusion, `on_reserve`, floor-block, qualifying filter). One bad config line produces multiple identical warnings every tick, spamming logs and hiding real alerts.
+SUGGESTED FIX: Parse reserves once per tick and pass the result down, or make the warning once-per-process.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/switcher.py:5497
+ISSUE: `reserve_rows.sort(key=lambda row: order.index(str(row[0])))` can raise `ValueError`
+ATTACK VECTOR: `order` holds raw `slot_of()` return values while the lookup key is `str(row[0])`. If slot type and row type differ (int vs str) or a row was appended under a `num` representation that differs from `row[0]`, `index()` throws and the `best` listing crashes instead of degrading. The `str()` on only one side shows the normalization is incomplete.
+SUGGESTED FIX: Normalize both sides identically, e.g. store `str(slot)` in `reserves` and look up `str(row[0])`.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:1461
+ISSUE: Freshen exclusion uses `self.settings` but `on_reserve` uses tick-local `settings`
+ATTACK VECTOR: Under `with_overrides`, the two views of `reserveAccount` can diverge: the account treated as the live reserve (no early-swap, quiet `reserve-active` stay) may not be the one excluded from freshening, or vice versa. That defeats the comment's safety goal of never rotating a refresh token for a slot the switch never uses, risking quarantine of the reserve.
+SUGGESTED FIX: Use the same settings object for both calls in a tick.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:2505
+ISSUE: Floor-block scope narrowed to `oauth_candidates`, changing non-OAuth reserve behavior
+ATTACK VECTOR: Old code computed `weekly_life` for the single reserve regardless and then required all OAuth candidates exhausted. New `held` requires `n in oauth_candidates`, so a reserve outside that set never appears in `held` and `bool(held)` stays False. A below-floor non-OAuth reserve no longer triggers the `reserve-protected` gate.
+SUGGESTED FIX: Compute `held` over all reserves as before, or explicitly handle non-OAuth reserves.
+
+SEVERITY: INFO
+CONFIDENCE: high
+FILE: src/claude_swap/settings.py:171
+ISSUE: Comment references `See reserves()` which does not exist
+ATTACK VECTOR: The `reserve_account` field comment points to `reserves()`; the artifact defines `parse_reserves()` plus `_reserve_slots()` / slot resolution. A future reader following the comment looks for the wrong symbol and may reimplement parsing instead of reusing it, causing convention drift.
+SUGGESTED FIX: Point the comment at `parse_reserves`.
+
+
+###############################################################
+###   PROVIDER: KIMI
+###############################################################
+
+## Adversarial Review: cswap multi-reserve autoswitch
+
+---
+
+**FINDING 1**
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/settings.py (parse_reserves, the `else: ident = part` branch)
+ISSUE: A non-numeric suffix (the most likely typo class — `"greg:40%"`, `"greg:abc"`, trailing `"greg:"`) causes the *entire entry, suffix included*, to be treated as the identifier, which then resolves to no managed account and is silently skipped — the account is un-reserved with zero warning logged.
+ATTACK VECTOR: Operator writes `reserveAccount: "greg@x.com:40%"` (percent sign is the natural typo for a "pct" field). `float("40%")` raises ValueError → `ident = "greg@x.com:40%"` → `_resolve_reserve` / `slot_of` find nothing → entry dropped. The reserve protection the operator explicitly configured is gone, silently, and the fleet can now burn the account that "has to stay." Note the asymmetry: the out-of-range-numeric path (`"greg:150"`) logs a warning *and* still reserves the account; the non-numeric path does neither.
+COMMENT-CODE MISMATCH: The docstring states "the entry falls back to the default floor rather than being dropped: **a typo must never un-reserve the account**." The `else: ident = part` branch does exactly what the docstring promises never happens — this typo class un-reserves the account.
+SUGGESTED FIX: In the `parsed is None` branch, log a warning mirroring the out-of-range branch and use `ident` (the rpartition prefix) with `default_floor` instead of reassigning `ident = part` — or, if keeping the suffix-as-identifier behavior for exotic names, at minimum warn when the entry later fails to resolve in `_reserve_slots`/`slot_of`.
+
+---
+
+**FINDING 2**
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py (~2392, the new `on_reserve and trigger == "proactive"` NO_ACTION block)
+ISSUE: While parked on a reserve under threshold with no takeover candidate, this block emits a `NoSwitchEvent` and calls `_abandon_switch_intent` on *every tick* — there is no throttle, dedupe, or "already reported" guard visible in the changed lines.
+ATTACK VECTOR: A fleet where all non-reserve accounts are exhausted sits in this state for hours or days. Every tick appends an identical "reserve-active" event and re-runs intent abandonment, growing the event log/state unboundedly and drowning genuine events — the exact artifact spam the adjacent `early` path deliberately avoids ("none of the must-move artifacts … simply stays put").
+SUGGESTED FIX: Gate the emit/abandon on a state flag (e.g. only when `state.switch_intent` exists or a `reserve_active_notified` marker is unset), reset when the condition clears — matching whatever suppression pattern the early-swap stay-put path uses.
+
+---
+
+**FINDING 3**
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/settings.py (parse_reserves dedup) + src/claude_swap/autoswitch.py (_reserve_slots, `num not in out`)
+ISSUE: Dedup happens at two inconsistent layers: `parse_reserves` dedups by raw identifier *string*, while `_reserve_slots`/switcher dedup by *resolved slot* with first-floor-wins and no warning. Two aliases of the same account (`"1:40, greg@x.com:50"`) silently discard the second floor.
+ATTACK VECTOR: Operator reconfigures a reserve floor by appending the account in a different identifier form with the new floor (`"greg@x.com:50, 1:40"` vs `"1:40, greg@x.com:50"`) — the effective floor depends on which alias happens to come first, and the losing floor vanishes without a log line. Config validation appears to accept it; the applied policy differs from the written one.
+SUGGESTED FIX: When `_resolve_reserve`/`slot_of` maps a second identifier to an already-present slot, log a warning naming both identifiers and the floor being ignored (one line in `_reserve_slots` and the switcher loop, or centralize resolution so the switcher reuses `_reserve_slots`-style logic).
+
+---
+
+**FINDING 4**
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/switcher.py (~5498, `reserve_rows.sort(key=lambda row: order.index(str(row[0])))`)
+ISSUE: `list.index` raises `ValueError` if the row's key isn't found, and the key correctness depends on an implicit type contract: `reserves` is keyed by `slot_of(ident)`'s return, but the sort looks up `str(row[0])`. If `slot_of` ever returns a non-`str` slot (e.g. int slot number) while `row[0]` stringifies differently — or a reserve row slips in whose slot isn't in `order` — the whole display path crashes.
+ATTACK VECTOR: A refactor of `slot_of`'s return type, or a row shape change, turns the account-listing view into a `ValueError` traceback exactly when the operator is inspecting why reserves were skipped.
+SUGGESTED FIX: Use `order.index(...)` only behind a precomputed `{slot: position}` map with `.get(slot, len(order))` fallback, sorting unknown slots last instead of raising.
+
+---
+
+**FINDING 5**
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/switcher.py (~5431, inline `from claude_swap.settings import parse_reserves`)
+ISSUE: Convention drift: a function-local import of a settings helper inside a method that already references `settings` module attributes at its top level, with no circular-import constraint visible in the artifact (settings.py does not import switcher).
+ATTACK VECTOR: Not a runtime bug — but local imports bypass module-level import checks, hide the dependency from readers/linters, and if the motivating fear was circularity, that cycle would be a design smell worth surfacing rather than routing around.
+SUGGESTED FIX: Hoist to the module's top-level import block alongside the existing settings imports; if that genuinely creates a cycle, note why in a comment.
+
+---
+
+**Notes on things checked and cleared:** the `kept.append(((order.index(num),), num))` re-key in the qualifying filter is safe (all entries are reserves by the time it runs, so `order.index`/`reserves[num]` cannot fail); `float("nan")`/`"inf"` suffixes correctly fall into the warned out-of-range branch; the `held`-based `reserve_floor_blocked` logic correctly handles the multi-reserve case where one reserve is above its floor; the `not on_reserve` early-swap suppression is consistent with the new proactive hand-over path since `early` can never be true when the new NO_ACTION block fires.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
