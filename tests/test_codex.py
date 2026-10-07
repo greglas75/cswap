@@ -188,6 +188,26 @@ class TestReserve:
         event = codex.auto_tick(env, 95.0, 99.0, reserve="res@x.com", reserve_min_life=30.0)
         assert (event["event"], event["to"]) == ("codex-switch", "b@x.com")
 
+    def _reserve_live(self, env, monkeypatch, by_email):
+        _login(_auth("b@x.com"))
+        codex.add(env)
+        _login(_auth("res@x.com"))
+        codex.add(env)
+        monkeypatch.setattr(codex, "fetch_usage", lambda auth, timeout=20.0: by_email[codex.email_of(auth)])
+        return codex.auto_tick(env, 95.0, 99.0, reserve="res@x.com", reserve_min_life=30.0)
+
+    def test_a_live_reserve_with_room_hands_over_to_an_ordinary_account(self, env, monkeypatch):
+        """Owner, 2026-10-07: yahoo (the reserve) stayed live at 65% while the others'
+        weeks had just reset to 0-33%."""
+        event = self._reserve_live(env, monkeypatch, {"res@x.com": _usage(65), "b@x.com": _usage(33)})
+        assert (event["event"], event["to"], event["mode"]) == ("codex-switch", "b@x.com", "leave-reserve")
+        assert codex.email_of(codex.read_auth(codex.live_auth_path())) == "b@x.com"
+
+    def test_a_live_reserve_stays_when_no_ordinary_account_has_room(self, env, monkeypatch):
+        event = self._reserve_live(env, monkeypatch, {"res@x.com": _usage(40), "b@x.com": _usage(100)})
+        assert event["reason"] == "below-threshold"
+        assert codex.email_of(codex.read_auth(codex.live_auth_path())) == "res@x.com"
+
 
 class TestLogin:
     def test_login_runs_in_a_throwaway_home_and_leaves_the_live_login(self, env, monkeypatch):

@@ -517,7 +517,32 @@ def _auto_tick(
     # The reserve is left as soon as its week drops under the floor, not only
     # at the switch threshold — and an ordinary account always beats it.
     on_spent_reserve = current == reserve and reserve_spent(live_usage, reserve_min_life)
-    if not live_usage.revoked() and not live_usage.over(threshold, weekly_threshold) and not on_spent_reserve:
+    healthy = not live_usage.revoked() and not live_usage.over(threshold, weekly_threshold) and not on_spent_reserve
+    if healthy and current == reserve:
+        # Sitting on the reserve is never a resting state (owner, 2026-10-07: the floor
+        # only ever decided when to LEAVE it at the threshold, so a live reserve burned on
+        # while ordinary accounts, their week just reset, sat idle). Any ordinary account
+        # with room takes over; with none, the reserve carries on.
+        others = [e for e in emails if e != current]
+        usages = usages_for(backup_root, others, current)
+        ordered = [e for e in rank(usages, current, threshold, weekly_threshold, reserve, reserve_min_life)
+                   if e != reserve]
+        if ordered:
+            event = {
+                "event": "codex-switch",
+                "from": current,
+                "to": ordered[0],
+                "mode": "leave-reserve",
+                "weeklyPct": live_usage.weekly_pct,
+                "dryRun": dry_run,
+            }
+            if not dry_run:
+                _set_credits_account(backup_root, None)
+                _switch(backup_root, ordered[0])
+                if after_switch:
+                    event["afterSwitch"] = run_after_switch(after_switch, current, ordered[0])
+            return event
+    if healthy:
         # Back under the limit (its week reset): it no longer runs on credits,
         # and a pin left behind would skip the biggest-balance choice next time.
         if not dry_run and _credits_account(backup_root) == current:
