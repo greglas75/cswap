@@ -1,0 +1,297 @@
+artifact_kind=adversarial-review
+created_at=2026-10-07T11:12:05Z
+status=ok
+mode=code
+output_format=text
+providers_used=cursor-agent, agy, codex-5.3, byteplus-3, kimi
+provider_count=5
+providers_attempted=5
+provider_outcomes=cursor-agent:ok,agy:ok,codex-5.3:ok,byteplus-3:ok,kimi:ok
+REVIEW BY: CURSOR-AGENT
+REVIEW BY: AGY
+REVIEW BY: CODEX-5.3
+REVIEW BY: BYTEPLUS-3
+REVIEW BY: KIMI
+reviewed_blob=e158459815911e499dbfe9e4867e6992f3fab0a7
+input_chars=2148
+input_chars_original=2148
+input_truncated=false
+total_findings=23
+critical=4
+warning=15
+info=4
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: cursor-agent, agy, codex-5.3, byteplus-3, kimi (5 total)
+Mode: code
+Input size: 2148 chars
+Date: 2026-10-07T11:12:05Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CURSOR-AGENT
+###############################################################
+
+**Finding 1**
+
+**SEVERITY:** CRITICAL  
+**CONFIDENCE:** high  
+**FILE:** `src/claude_swap/codex.py` (new block ~530–541)  
+**ISSUE:** Every `auto_tick` while `healthy and current == reserve` and `ordered` is non-empty calls `_switch()` with no idempotency guard.  
+**ATTACK VECTOR:** Context says each switch restarts the Codex daemon. If `current` stays `reserve` (failed/partial switch, slow config write, or `current` out of sync with the active account), every tick triggers another restart — outage/flapping until state converges.  
+**SUGGESTED FIX:** Before `_switch`, skip when the active/target account is already `ordered[0]` (read the same source `_switch` uses), or add a short “pending switch” flag / compare last switch target+timestamp; only call `_switch` when the target actually changes.
+
+---
+
+**Finding 2**
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/codex.py` (~524–525 vs ~517 `live_usage`)  
+**ISSUE:** Reserve usage is “live” (`live_usage`), but candidates come from `usages_for(backup_root, others, current)` — likely separate reads with no shown synchronization.  
+**ATTACK VECTOR:** After ordinary accounts’ week reset, stale candidate usage can make `ordered[0]` look under threshold while it is already over (or revoked) in reality; you switch, restart the daemon, and immediately hit over-limit/revoked handling or ping-pong.  
+**SUGGESTED FIX:** Use the same freshness path for candidates as for `live_usage`, or re-fetch/validate `ordered[0]` immediately before `_switch` (same checks as `healthy` uses for the target).
+
+---
+
+**Finding 3**
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/codex.py` (~541 `return event`)  
+**ISSUE:** The leave-reserve path returns early and skips the rest of `_auto_tick` after the `if healthy:` block (not in the diff).  
+**ATTACK VECTOR:** Any bookkeeping in the tail of `_auto_tick` (metrics, persistence, follow-up ticks, other modes) never runs on leave-reserve ticks, so production can show “switch happened” in the event while other invariants drift silently.  
+**SUGGESTED FIX:** Match other switch branches: either run shared post-switch logic before return, or structure as “compute event + defer return” through a single exit path used by all switch modes.
+
+---
+
+**Finding 4**
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/codex.py` (~537–538)  
+**ISSUE:** `_set_credits_account(backup_root, None)` runs before `_switch`; there is no shown rollback if `_switch` fails.  
+**ATTACK VECTOR:** Credits pin is cleared but account remains on reserve; later ticks still try leave-reserve, credits mode is wrong, and behavior depends on implicit fallbacks elsewhere — hard to debug “cleared pin but never left reserve.”  
+**SUGGESTED FIX:** Call `_switch` first and only clear credits on success, or restore the previous credits account if `_switch` fails (same ordering as other switch paths in this file, if any).
+
+---
+
+**Finding 5**
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/codex.py` (~524–526)  
+**ISSUE:** `usages` is built only for `others` (excludes `current`), while `rank(..., current, ...)` may still expect a complete `usages` map (e.g. indexing every email it ranks).  
+**ATTACK VECTOR:** Depending on `rank`/`usages_for` implementation, production hits `KeyError` or wrong ordering when `current == reserve` and the rank path touches the reserve key or assumes all `emails` are present.  
+**SUGGESTED FIX:** Confirm `rank`’s contract; if it needs all accounts, pass full `usages_for(backup_root, emails, current)` or document and enforce “others-only” in `rank`.
+
+---
+
+**Finding 6**
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** medium  
+**FILE:** `src/claude_swap/codex.py` (comment ~522–525 vs condition ~520)  
+**ISSUE:** Comment claims sitting on the reserve is “never a resting state,” but the new behavior is gated on `healthy` only (`not revoked`, not over thresholds, not `on_spent_reserve`).  
+**ATTACK VECTOR:** Operators/readers assume reserve always yields to an ordinary account with room; in revoked/over/spent-reserve states this block does not run, so reserve can remain the effective resting account until some other branch runs — surprise during incidents.  
+**SUGGESTED FIX:** Narrow the comment to “when healthy, reserve is not a resting state,” or align the condition with the comment if that was the product intent.
+
+---
+
+**Finding 7**
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** low  
+**FILE:** `src/claude_swap/codex.py` (~520–538)  
+**ISSUE:** No concurrency control around read (`live_usage`, `usages_for`, `rank`) → write (`_set_credits_account`, `_switch`).  
+**ATTACK VECTOR:** Overlapping ticks (cron overlap, manual trigger + auto tick) can both see `current == reserve`, pick different `ordered[0]` if usage/rank ties shift, and double-restart or interleave credits clears with partial switches.  
+**SUGGESTED FIX:** Reuse whatever single-flight lock/mutex other `_auto_tick` switch paths use; if none exists, hold an exclusive lock for the switch sequence only.
+
+---
+
+**Note:** Findings 3 and 5 depend on code outside the diff (`rank`, `usages_for`, tail of `_auto_tick`); severity is unchanged but confidence is capped at medium per your rules. Finding 1 is the strongest production risk given explicit “restart daemon per switch” context.
+
+
+###############################################################
+###   PROVIDER: AGY
+###############################################################
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: [src/claude_swap/codex.py:528-530](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L528-L530)
+ISSUE: Switching to an account with an expired access token abandons a healthy reserve and deadlocks `auto_tick` on `"active-usage-unknown"`.
+ATTACK VECTOR: In [`rank()`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L388), accounts whose access tokens expired while idle (~10 days) return `life is None` with `usage.refreshable() == True`. [`rank()`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L388) deliberately includes them as candidates ahead of reserve/credits. If all other ordinary accounts are exhausted or expired, [`rank()`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L388) returns the expired account. When `current == reserve` and healthy, `_auto_tick` switches to this account via [`_switch()`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L447). Because [`_switch()`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L447) only copies `auth.json` and does not refresh tokens, on the very next tick [`fetch_usage()`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L345) fails with HTTP 401 (`"token expired"`). Line 512 traps this with `if live_usage.error is not None and not live_usage.revoked()`, immediately returning `reason: "active-usage-unknown"` every tick. The switcher never refreshes the token autonomously and never rotates back to the healthy reserve, leaving the daemon permanently frozen on an unauthenticated account.
+SUGGESTED FIX: Filter out accounts without known room (`life is None`) when leaving the reserve:
+```python
+ordered = [
+    e for e in rank(usages, current, threshold, weekly_threshold, reserve, reserve_min_life)
+    if usages[e].life(threshold, weekly_threshold) is not None
+]
+```
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: [src/claude_swap/codex.py:528-530](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L528-L530)
+ISSUE: Switching to an account with negligible quota (`life < MIN_USEFUL_LIFE_PCT`) causes daemon restart thrashing and session termination.
+ATTACK VECTOR: [`rank()`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L388) includes accounts with `0 < life < MIN_USEFUL_LIFE_PCT` (e.g. 0.1% life, or an account whose sliding 5-hour short window just barely dipped below threshold). The new check leaves the healthy reserve (which may have 80%+ life) for an account with less than one prompt's worth of quota. The switch executes `run_after_switch`, restarting the Codex daemon and terminating active TUI sessions. After a single prompt, that ordinary account crosses threshold again; on the next tick, `_auto_tick` switches back to the reserve (restarting the daemon again). If the account fluctuates across the threshold, the system enters an infinite restart loop.
+SUGGESTED FIX: Require ordinary accounts taking over from the reserve to have useful life:
+```python
+ordered = [
+    e for e in rank(usages, current, threshold, weekly_threshold, reserve, reserve_min_life)
+    if (usages[e].life(threshold, weekly_threshold) or 0.0) >= MIN_USEFUL_LIFE_PCT
+]
+```
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: [src/claude_swap/codex.py:522-525](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L522-L525)
+ISSUE: Comment-code mismatch: comment claims ordinary accounts whose "week just reset" with "room" take over, but code accepts accounts with unverified or exhausted quotas.
+ATTACK VECTOR: Lines 522–525 claim:
+`# while ordinary accounts, their week just reset, sat idle). Any ordinary account with room takes over; with none, the reserve carries on.`
+The code on lines 528–529 blindly relies on [`rank()`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L388). However, [`rank()`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L388) was built to find an emergency fallback when an active account is dead; it treats unverified accounts (`life is None`) and nearly exhausted accounts (`life < MIN_USEFUL_LIFE_PCT`) as eligible. The code does not enforce that an account has actually reset its week or has meaningful room.
+SUGGESTED FIX: Align code with comment intent by explicitly filtering candidates for `life >= MIN_USEFUL_LIFE_PCT` and readable quota.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: [src/claude_swap/codex.py:527](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L527)
+ISSUE: Sequential HTTP requests for all stored accounts execute under exclusive file lock `store_lock` on every tick while on reserve.
+ATTACK VECTOR: [`_auto_tick`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L497) runs inside [`with store_lock(backup_root):`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L490), an exclusive `fcntl.flock` on `.lock`. Previously, when sitting on an account below threshold, `_auto_tick` only fetched usage for `[current]` and returned immediately at line 520. With this change, while on the reserve, every tick invokes [`usages_for(backup_root, others, current)`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L469), running sequential `urlopen` requests with 20s timeouts for all stored accounts. If network latency spikes or OpenAI endpoints degrade, `store_lock` is held for up to `N * 20` seconds, blocking concurrent user operations like `cswap codex switch`, `login`, and `sync`.
+SUGGESTED FIX: Fetch usages outside the exclusive store lock before entering `_auto_tick`, or acquire `store_lock` only during the read-modify-write sync and switch phases.
+
+---
+
+SEVERITY: INFO
+CONFIDENCE: high
+FILE: [src/claude_swap/codex.py:528-529](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L528-L529)
+ISSUE: Redundant list comprehension filter `if e != reserve`.
+ATTACK VECTOR: Line 526 constructs `others = [e for e in emails if e != current]`. Because `current == reserve` within this branch, `reserve` is already excluded from `others` and absent from `usages`. Furthermore, [`rank()`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L388) skips `email == current` at line 413. Filtering `if e != reserve` is unreachable dead logic that suggests confusion about what `rank()` returns.
+SUGGESTED FIX: Remove `if e != reserve` from the list comprehension.
+
+---
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: [src/claude_swap/codex.py:540-541](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L540-L541)
+ISSUE: Non-atomic state mutation: credits tracking file is deleted before [`_switch()`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L447) succeeds.
+ATTACK VECTOR: [`_set_credits_account(backup_root, None)`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L617) unlinks `credits-mode.json` before [`_switch(backup_root, ordered[0])`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L447) runs. If [`_switch()`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L447) raises [`CodexError`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L52) (e.g. invalid target file, live login unstored guard), the unpinned credit state has already been permanently destroyed even though no switch occurred.
+SUGGESTED FIX: Call [`_set_credits_account(backup_root, None)`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L617) only after [`_switch()`](file:///Users/greglas/DEV/claude-account-switcher/src/claude_swap/codex.py#L447) completes successfully.
+
+
+###############################################################
+###   PROVIDER: CODEX-5.3
+###############################################################
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: src/claude_swap/codex.py:536  
+ISSUE: The new switch path clears the credits account before `_switch` succeeds.  
+ATTACK VECTOR: If `_switch` fails after `_set_credits_account(backup_root, None)` succeeds, the current account remains active but its credits state has been erased. A later tick can make a decision from that inconsistent state.  
+SUGGESTED FIX: Clear the credits account only after a successful switch, or restore it if the switch fails.
+
+
+###############################################################
+###   PROVIDER: BYTEPLUS-3
+###############################################################
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/codex.py:529-540
+ISSUE: Target account (ordered[0]) health is not validated before switching
+ATTACK VECTOR: The code switches to the top-ranked account without verifying it is not revoked, not over threshold, or otherwise unusable. If the ranking function returns an unhealthy account, this causes immediate service disruption (e.g., using a revoked account, or an account already over limits triggering further failures).
+SUGGESTED FIX: Add explicit health checks for the target account (ordered[0]) before switching, mirroring the 'healthy' check used for the current reserve account. For example: retrieve the target's usage, check it is not revoked and not over thresholds, and skip to the next candidate in 'ordered' if not.
+
+---
+SEVERITY: CRITICAL
+CONFIDENCE: medium
+FILE: src/claude_swap/codex.py:536-540
+ISSUE: No rollback for partial switch operations (data integrity risk)
+ATTACK VECTOR: The non-dry run path performs two sequential mutations: _set_credits_account(None) followed by _switch(). If the first succeeds but the second fails (e.g., database error, network blip), the system is left in an inconsistent state: credits_account is set to None but the current account remains the reserve. This can cause unexpected behavior in subsequent ticks (e.g., failure to use credits when needed, repeated failed switch attempts).
+SUGGESTED FIX: Wrap the mutations in error handling with rollback. For example:
+  try:
+      _set_credits_account(backup_root, None)
+      _switch(backup_root, ordered[0])
+  except Exception:
+      _set_credits_account(backup_root, current)  # Rollback credits account change
+      raise
+Alternatively, use atomic transactions if the underlying storage supports cross-operation atomicity.
+
+---
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/codex.py:521-525
+ISSUE: Comment-code mismatch: comment promises switching only to accounts with "room" but code does not enforce this
+ATTACK VECTOR: The added comment explicitly states "Any ordinary account with room takes over", but the code does not check if the target account has "room" (i.e., is under thresholds, not revoked). This misleads maintainers into believing a safety check exists that is not present, leading to unforeseen failures.
+SUGGESTED FIX: Either:
+  1. Update the comment to clarify that the ranking function is responsible for selecting accounts with room, or
+  2. Add explicit "room" (health) checks for the target account to enforce the comment's claim.
+
+---
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/codex.py:527-539
+ISSUE: TOCTOU race condition between ranking target accounts and switching
+ATTACK VECTOR: The code ranks target accounts based on their state at ranking time, but the target account's state can change (e.g., marked as revoked, usage exceeds threshold) before the switch is executed. This leads to switching to an unhealthy account in concurrent production environments.
+SUGGESTED FIX: Add a final validation of the target account's state immediately before switching, or use atomic compare-and-swap operations to ensure the state hasn't changed since ranking.
+
+---
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/codex.py:541-542
+ISSUE: Unhandled exceptions from run_after_switch leave event incomplete and propagate errors post-switch
+ATTACK VECTOR: If run_after_switch throws an exception (e.g., external service failure), the switch has already been committed, but the event's "afterSwitch" field is not set, and the exception propagates. This leads to missing audit data, repeated tick retries, or failure to complete post-switch actions.
+SUGGESTED FIX: Wrap run_after_switch in error handling to log failures and prevent exception propagation. For example:
+  if after_switch:
+      try:
+          event["afterSwitch"] = run_after_switch(after_switch, current, ordered[0])
+      except Exception as e:
+          event["afterSwitchError"] = str(e)  # Capture error for audit
+          # Log error per application conventions
+
+
+###############################################################
+###   PROVIDER: KIMI
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/codex.py:540-543
+ISSUE: Two-step state mutation (`_set_credits_account(None)` then `_switch` then daemon restart) has no failure handling; a raise mid-sequence leaves pin/account/daemon states mutually inconsistent.
+ATTACK VECTOR: If `_switch(backup_root, ordered[0])` raises (I/O error, missing account file), the credits pin is already cleared while the daemon is still live on the reserve — state that normally only exists after the fall-through healthy path, but here produced without the intended switch and without any event emitted, so the tick's telemetry shows nothing while state changed. Worse, if `_switch` succeeds but `run_after_switch` (the daemon restart) fails or raises, the account on disk points at `ordered[0]` while the running Codex daemon still operates against the old account — silent split-brain that persists until the next external restart.
+SUGGESTED FIX: Wrap the mutation block in try/except; on `_switch` failure, restore the credits pin (`_set_credits_account(backup_root, current)`) before re-raising, and record a failed `afterSwitch` result in the event instead of letting the restart exception escape past the `return event`.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/codex.py:527-541
+ISSUE: Switch-churn / no hysteresis: a healthy reserve now leaves on *every* tick to the current rank leader, and each switch restarts the daemon.
+ATTACK VECTOR: Under fluctuating weekly usage, the "best ordinary account" can change between consecutive ticks. Tick N switches reserve→A (daemon restart); A later crosses the threshold, existing logic switches to B (restart); B drains, and when the reserve again becomes current and healthy, it immediately leaves again (restart). There is no minimum dwell time, no "only leave if the target is meaningfully better," and no guard against the target being only marginally under threshold — so a near-threshold leader can be picked, cross over moments later, and force another restart. Daemon restarts are the expensive operation here and nothing in the new branch dampens them.
+SUGGESTED FIX: Add a minimal guard: skip the leave-reserve switch unless `ordered[0]` has headroom above some margin (e.g., weekly_pct below threshold minus a buffer), or record the last leave-reserve switch time and enforce a minimum interval.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/codex.py:527-529
+ISSUE: TOCTOU on candidate usage snapshots — `usages_for`/`rank` results are acted on without revalidation, and nothing prevents a concurrent tick from making the same decision.
+ATTACK VECTOR: Usage data for the ordinary accounts is fetched, then `_switch` executes. With live accounts, usage can cross the threshold between fetch and switch (the reserve is actively burning during this window, and so are the ordinary accounts if anything else runs against them). Additionally, two overlapping ticks (cron overlap, slow tick) both see `current == reserve`, both rank, and both call `_switch` — the second switch targets an account chosen from a now-stale snapshot, with two daemon restarts. No lock or post-rank recheck is visible in the changed lines.
+SUGGESTED FIX: Re-fetch the chosen account's usage immediately before `_switch` and abort if it no longer has room; if the codebase has any tick-level lock used elsewhere, apply it here too.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/codex.py:528-529
+ISSUE: The leave-reserve path trusts `rank()` to return only accounts "with room"; the changed code applies no eligibility filter of its own (only `e != reserve`).
+ATTACK VECTOR: The comment claims "Any ordinary account *with room* takes over," but the code enforces only non-reserve membership. If `rank` ever includes revoked or over-threshold accounts (e.g., to rank them last for a different caller), this branch — unlike a hypothetical explicit filter — would switch the live daemon onto an already-exhausted or revoked account. The artifact doesn't show `rank`'s contract, so this is unverifiable from the diff alone, but the new code is the only switch path that performs no health check on its target.
+SUGGESTED FIX: Filter `ordered` explicitly, e.g. `if e != reserve and not usages[e].revoked() and not usages[e].over(threshold, weekly_threshold)`, mirroring the health predicate used for the reserve.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
