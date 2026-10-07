@@ -203,6 +203,12 @@ class TestReserve:
         assert (event["event"], event["to"], event["mode"]) == ("codex-switch", "b@x.com", "leave-reserve")
         assert codex.email_of(codex.read_auth(codex.live_auth_path())) == "b@x.com"
 
+    def test_a_live_reserve_never_hands_over_to_a_sliver_or_an_unreadable_account(self, env, monkeypatch):
+        event = self._reserve_live(env, monkeypatch, {"res@x.com": _usage(40), "b@x.com": _usage(92)})
+        assert event["reason"] == "below-threshold"     # 92% used: 7 points of week, under 10
+        event = self._reserve_live(env, monkeypatch, {"res@x.com": _usage(40), "b@x.com": _usage(0, error="token expired")})
+        assert event["reason"] == "below-threshold"
+
     def test_a_live_reserve_stays_when_no_ordinary_account_has_room(self, env, monkeypatch):
         event = self._reserve_live(env, monkeypatch, {"res@x.com": _usage(40), "b@x.com": _usage(100)})
         assert event["reason"] == "below-threshold"

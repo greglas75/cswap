@@ -494,6 +494,10 @@ def auto_tick(
         )
 
 
+# A live reserve hands over only to an account with at least this much of its week left.
+LEAVE_RESERVE_MIN_LIFE = 10.0
+
+
 def _auto_tick(
     backup_root: Path,
     threshold: float,
@@ -525,8 +529,11 @@ def _auto_tick(
         # with room takes over; with none, the reserve carries on.
         others = [e for e in emails if e != current]
         usages = usages_for(backup_root, others, current)
+        # Only a readable account with real room: leaving costs a daemon restart (every
+        # session is cut), so never for a token that has to refresh first or a sliver of week.
         ordered = [e for e in rank(usages, current, threshold, weekly_threshold, reserve, reserve_min_life)
-                   if e != reserve]
+                   if e != reserve and usages[e].error is None
+                   and usages[e].life(threshold, weekly_threshold) >= LEAVE_RESERVE_MIN_LIFE]
         if ordered:
             event = {
                 "event": "codex-switch",
@@ -537,8 +544,8 @@ def _auto_tick(
                 "dryRun": dry_run,
             }
             if not dry_run:
-                _set_credits_account(backup_root, None)
                 _switch(backup_root, ordered[0])
+                _set_credits_account(backup_root, None)   # only once the switch went through
                 if after_switch:
                     event["afterSwitch"] = run_after_switch(after_switch, current, ordered[0])
             return event
