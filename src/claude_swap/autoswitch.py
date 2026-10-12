@@ -829,6 +829,36 @@ class EarlySwapEvent(AutoSwitchEvent):
 
 
 @dataclass(frozen=True)
+class PaceEvent(AutoSwitchEvent):
+    """The active account is below the threshold but climbing fast enough to
+    reach it before the next readings would show it: the tick proceeds as a
+    threshold crossing (proactive). Readings change only every 1-3 minutes, so
+    a small plan under the whole fleet went 24 -> 57 -> 100 % between two of
+    them and the threshold was never seen (2026-10-12, gregpaypal)."""
+
+    kind: ClassVar[str] = "pace"
+    utilization_pct: float
+    projected_pct: float
+    lookahead_seconds: float
+    threshold: float
+
+    def _fields(self) -> dict:
+        return {
+            "utilizationPct": self.utilization_pct,
+            "projectedPct": self.projected_pct,
+            "lookaheadSeconds": self.lookahead_seconds,
+            "thresholdPct": self.threshold,
+        }
+
+    def human(self) -> str:
+        return (
+            f"pace: {pct_label(self.utilization_pct)}% → projected "
+            f"{pct_label(self.projected_pct)}% in {self.lookahead_seconds:.0f} s "
+            f"(≥ {pct_label(self.threshold)}%) — switching before the wall"
+        )
+
+
+@dataclass(frozen=True)
 class Drain2TimeoutEvent(AutoSwitchEvent):
     """The fixation cap hit while sessions were still mid-turn: the switch
     proceeds, paying the caches of the ``forced`` sessions. One per episode."""
@@ -1250,6 +1280,12 @@ class AutoSwitchEngine:
         # ``_idle_hold_slow`` is per-tick like ``_blocked_wait_long``.
         self._idle_hold_since: float | None = None
         self._idle_hold_slow = False
+        # Pace look-ahead (``pace_lookahead_seconds``): the active account's
+        # last DISTINCT binding-window reading — (slot, clock() it first
+        # appeared, utilization, projection made from the climb into it or
+        # None). Same-value ticks keep it; a new slot or a drop (window reset)
+        # starts over.
+        self._pace_sample: tuple[str, float, float, float | None] | None = None
         # Unknown-hold at the pinned home (CON-2340): the first tick the
         # home's usage was unreadable WITHOUT a dead-token verdict. Survives
         # across ticks (elapsed-time cap shared with the idle-hold); cleared
@@ -2130,7 +2166,8 @@ class AutoSwitchEngine:
                     base_h = base_headroom.get(current)
                     if base_h is not None:
                         utilization = 100.0 - base_h
-                if utilization < settings.threshold and not on_reserve:
+                paced = self._pace_crosses(current, utilization, settings)
+                if utilization < settings.threshold and not on_reserve and not paced:
                     early = self._early_swap_fires(utilization, settings, state)
                     if early:
                         # The park is small enough that leaving NOW is cheaper
@@ -2968,6 +3005,41 @@ class AutoSwitchEngine:
         # Ascending by the strategy's key; list order (sequence order) breaks ties.
         qualifying.sort(key=lambda t: t[0])
         return [num for _, num in qualifying], any_known, active_reset_ts
+
+    def _pace_crosses(
+        self, current: str, utilization: float, settings: AutoSwitchSettings
+    ) -> bool:
+        """Whether the active account's climb would reach the threshold within
+        ``pace_lookahead_seconds`` — judged at each new distinct reading from
+        the rate since the previous one, and held while that reading stands
+        (a blocked switch keeps the crossing, like a real one). No measured
+        rise, a new slot, or a drop (window reset) never fires."""
+        lookahead = settings.pace_lookahead_seconds
+        if lookahead <= 0:
+            self._pace_sample = None
+            return False
+        now = self.clock()
+        sample = self._pace_sample
+        if sample is None or sample[0] != current or utilization < sample[2]:
+            self._pace_sample = (current, now, utilization, None)
+            return False
+        _slot, since, before, projected = sample
+        if utilization > before:
+            elapsed = now - since
+            if elapsed <= 0:
+                return False
+            projected = utilization + (utilization - before) / elapsed * lookahead
+            self._pace_sample = (current, now, utilization, projected)
+            if projected >= settings.threshold and utilization < settings.threshold:
+                self._emit(
+                    PaceEvent(
+                        utilization_pct=utilization,
+                        projected_pct=projected,
+                        lookahead_seconds=lookahead,
+                        threshold=settings.threshold,
+                    )
+                )
+        return projected is not None and projected >= settings.threshold
 
     def _early_swap_fires(
         self, utilization: float, settings: AutoSwitchSettings, state: dict

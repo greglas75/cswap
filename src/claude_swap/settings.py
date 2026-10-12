@@ -195,6 +195,14 @@ class AutoSwitchSettings:
     # switch-time freshen stays as the safety net; this only moves its slow
     # path out of the critical window. 0 = off (default).
     pre_freshen_threshold: float = 0.0
+    # Pace look-ahead: the active account counts as past ``threshold`` when its
+    # binding window, climbing at the rate measured between its last two
+    # distinct readings, would reach the threshold within this many seconds.
+    # Usage readings change only every 1-3 minutes, so a small plan under the
+    # whole fleet jumps past the threshold between two of them (2026-10-12:
+    # gregpaypal read 24 -> 57 -> 100 % in 7 min; the at-limit escape then cut
+    # live requests). 0 = off (default).
+    pace_lookahead_seconds: float = 0.0
     # Its own switch point for the WEEKLY windows (7d and the model-scoped
     # weekly windows); the 5h window keeps ``threshold``. A point of a weekly
     # window is ~34x a point of the 5h one in absolute quota, so leaving it at
@@ -356,6 +364,14 @@ SETTING_SPECS: dict[str, SettingSpec] = {
                 "Refresh idle candidates' tokens once the active account "
                 "reaches this pct, so the switch never waits on the network "
                 "(0 = off)"
+            ),
+        ),
+        SettingSpec(
+            "autoswitch", "paceLookaheadSeconds", "pace_lookahead_seconds",
+            "float", 0.0, 3600.0,
+            help=(
+                "Switch as if past the threshold when the active account's "
+                "measured climb would reach it within this many seconds (0 = off)"
             ),
         ),
         SettingSpec(
