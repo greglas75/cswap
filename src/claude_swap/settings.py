@@ -368,7 +368,7 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         ),
         SettingSpec(
             "autoswitch", "paceLookaheadSeconds", "pace_lookahead_seconds",
-            "float", 0.0, 3600.0,
+            "float", 0.0, 900.0,
             help=(
                 "Switch as if past the threshold when the active account's "
                 "measured climb would reach it within this many seconds (0 = off)"

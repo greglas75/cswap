@@ -108,6 +108,8 @@ PREFRESHEN_INTERVAL_S = 120.0
 # never be the thing that stalls it. Tokens far from expiry cost ~0 s (the
 # freshen returns before any network), so the budget only binds on refreshes.
 PREFRESHEN_BUDGET_S = 3.0
+# Pace look-ahead: the shortest interval a climb is measured over (seconds).
+PACE_MIN_INTERVAL_S = 60.0
 
 # Sleep caps around a known quota reset (RESET_SLACK_S lives in poll_policy
 # with the rest of the cadence numbers). Recheck at the exhausted-account poll
@@ -854,7 +856,7 @@ class PaceEvent(AutoSwitchEvent):
         return (
             f"pace: {pct_label(self.utilization_pct)}% → projected "
             f"{pct_label(self.projected_pct)}% in {self.lookahead_seconds:.0f} s "
-            f"(≥ {pct_label(self.threshold)}%) — switching before the wall"
+            f"(≥ {pct_label(self.threshold)}%) — treated as a threshold crossing"
         )
 
 
@@ -3013,7 +3015,8 @@ class AutoSwitchEngine:
         ``pace_lookahead_seconds`` — judged at each new distinct reading from
         the rate since the previous one, and held while that reading stands
         (a blocked switch keeps the crossing, like a real one). No measured
-        rise, a new slot, or a drop (window reset) never fires."""
+        rise, a new slot, or a drop (window reset) never fires; a held
+        projection lapses once the look-ahead passes with no new reading."""
         lookahead = settings.pace_lookahead_seconds
         if lookahead <= 0:
             self._pace_sample = None
@@ -3025,9 +3028,10 @@ class AutoSwitchEngine:
             return False
         _slot, since, before, projected = sample
         if utilization > before:
-            elapsed = now - since
-            if elapsed <= 0:
-                return False
+            # Readings come every 1-3 minutes; two of them seconds apart would
+            # turn one point into a wall, so the climb is never measured over
+            # less than PACE_MIN_INTERVAL_S.
+            elapsed = max(now - since, PACE_MIN_INTERVAL_S)
             projected = utilization + (utilization - before) / elapsed * lookahead
             self._pace_sample = (current, now, utilization, projected)
             if projected >= settings.threshold and utilization < settings.threshold:
@@ -3039,6 +3043,11 @@ class AutoSwitchEngine:
                         threshold=settings.threshold,
                     )
                 )
+        elif projected is not None and now - since > lookahead:
+            # The look-ahead passed without the next reading: the prediction
+            # did not come true, and an old one must not keep driving switches.
+            projected = None
+            self._pace_sample = (current, since, utilization, None)
         return projected is not None and projected >= settings.threshold
 
     def _early_swap_fires(

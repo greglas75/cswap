@@ -74,6 +74,12 @@ SEQUENCES = {
     # Bug caught: a blocked switch forgetting the crossing on the next same-value tick.
     "the crossing holds while the reading stands": (
         [(0, "1", 24), (151, "1", 57), (15, "1", 57)], True),
+    # Bug caught: a prediction that never came true driving switches long after.
+    "a held crossing lapses once the look-ahead passes": (
+        [(0, "1", 24), (151, "1", 57), (181, "1", 57)], False),
+    # Bug caught: two readings 15 s apart turning 2 points into a wall
+    # (2/15 * 180 = +24 -> 106); measured over 60 s it is +6 -> 88.
+    "a climb is measured over at least a minute": ([(0, "1", 80), (15, "1", 82)], False),
     # Bug caught: the rate measured across a switch, from another account's reading.
     "a new slot starts over": ([(0, "1", 24), (151, "2", 57)], False),
     # Bug caught: after a window reset the climb measured from the stale high value
