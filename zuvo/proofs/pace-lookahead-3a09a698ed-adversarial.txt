@@ -1,0 +1,249 @@
+artifact_kind=adversarial-review
+created_at=2026-10-12T10:41:41Z
+status=ok
+mode=code
+output_format=text
+providers_used=codex-5.3, openrouter-3, claude, muse, kimi
+provider_count=5
+providers_attempted=5
+provider_outcomes=codex-5.3:ok,openrouter-3:ok,claude:ok,muse:ok,kimi:ok
+REVIEW BY: CODEX-5.3
+REVIEW BY: OPENROUTER-3
+REVIEW BY: CLAUDE
+REVIEW BY: MUSE
+REVIEW BY: KIMI
+reviewed_blob=fd061970d564074eb2a7af7b3f9bd470dc556f19
+input_chars=10954
+input_chars_original=10954
+input_truncated=false
+total_findings=23
+critical=1
+warning=16
+info=6
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: codex-5.3, openrouter-3, claude, muse, kimi (5 total)
+Mode: code
+Input size: 10954 chars
+Date: 2026-10-12T10:41:41Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CODEX-5.3
+###############################################################
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: src/claude_swap/autoswitch.py:3039  
+ID: autoswitch.py:3039-stale-projection-survives-threshold-change  
+ISSUE: A projected crossing is held without checking it against the current threshold or look-ahead setting.  
+ATTACK VECTOR: After a crossing is recorded, reducing `paceLookaheadSeconds` or raising `threshold` still makes same-value ticks return `True`. The daemon can switch under settings that no longer call for it.  
+SUGGESTED FIX: Recompute or invalidate the held projection when either setting changes.
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: src/claude_swap/autoswitch.py:3030  
+ID: autoswitch.py:3030-sample-time-substitutes-reading-time  
+ISSUE: The rate uses the tick when each value was first observed, rather than the time of the underlying usage reading.  
+ATTACK VECTOR: Network delay, missed ticks, or an unchanged cached reading can make two readings appear much closer or farther apart than they were, producing a false proactive trigger or missing one.  
+SUGGESTED FIX: Use reading timestamps when available; otherwise avoid projecting across delayed or uncertain samples.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-3
+###############################################################
+
+
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:3036
+ID: autoswitch.py:3036:division-by-near-zero
+ISSUE: Rate calculation uses raw elapsed time without a minimum threshold.
+ATTACK VECTOR: If two distinct readings arrive in quick succession (e.g., due to clock resolution or retries), `elapsed` may be tiny (e.g., 0.001s). Dividing `utilization - before` by this causes `projected` to explode to infinity, triggering a false switch on noise.
+SUGGESTED FIX: Require `elapsed >= 1.0` or equivalent (minimum one-second measurement window) before computing rate.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:3040
+ID: autoswitch.py:3040:stale-projection-return
+ISSUE: Method returns `True` (indicating crossing) on flat utilization if previous projection was high.
+ATTACK VECTOR: When utilization stops rising, `utilization > before` is false; old `projected` persists. If that projection exceeds threshold, the method returns `True` repeatedly, blocking `early_swap_fires` logic on every tick until the crossing falls below threshold naturally.
+SUGGESTED FIX: Only return `True` if a valid `projected` was calculated in current execution (i.e., `projected` assigned in `if utilization > before` block).
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3012
+ID: autoswitch.py:3012:docstring-contradiction
+ISSUE: Docstring claims "No measured rise... never fires" but code returns existing crossing state.
+ATTACK VECTOR: Comment promises `True` only when climb triggers a projected crossing; code returns `True` when climb was recent enough to cross even if current rate is zero (flat).
+SUGGESTED FIX: Clarify docstring to state that state returns True while projection remains active, not just when rise is measured.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3035
+ID: autoswitch.py:3035:clock-skew-vulnerable
+ISSUE: Rate calculation assumes monotonic `clock()` behavior without fallback.
+ATTACK VECTOR: If `clock()` returns a timestamp earlier than `since` (system clock correction), `elapsed` may be negative. Code returns `False`, losing state and potentially resetting the crossing window mid-flight.
+SUGGESTED FIX: Log warning if `elapsed <= 0` and skip update instead of resetting sample; or use monotonic clock.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3007
+ID: autoswitch.py:3007:missing-typo-check
+ISSUE: No validation that `settings.pace_lookahead_seconds` is reasonable.
+ATTACK VECTOR: If misconfigured to extremely large value (e.g. 1e9), projections become insensitive to actual rate; if extremely small (<1s), noise triggers fires.
+SUGGESTED FIX: Add sanity check in setter/config load (e.g. `1.0 <= pace_lookahead_seconds <= 1800.0`).
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/autoswitch.py:3032
+ID: autoswitch.py:3032:missing-epoch-check
+ISSUE: `_pace_sample` persists across app restarts if state is serialized externally.
+ATTACK VECTOR: If daemon restarts but `_pace_sample` survives (e.g. via pickle or redis), `since` may become stale (e.g. days old), causing rate computation using `elapsed` = days.
+SUGGESTED FIX: Reset `_pace_sample` on initialization if `since` is too old relative to expected tick interval.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: tests/test_pace_lookahead.py:31
+ID: test_pace_lookahead.py:31:clock-advance-dependency
+ISSUE: Tests manually advance clock; production may tick irregularly.
+ATTACK VECTOR: Tests use discrete jumps (e.g., `clock.advance(151)`). In production with 15s ticks, accumulated `elapsed` will differ from discrete test jumps; rate may not project correctly under actual tick cadence.
+SUGGESTED FIX: Add test case simulating variable tick intervals (e.g., 15s, 25s, 15s) to validate rate accumulation over multiple ticks.
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3028
+ID: autoswitch.py:3028:rate-underestimated-after-plateau
+ISSUE: The rate is divided by the time since the previous value *first appeared*, not since it was last observed unchanged. A plateau therefore dilutes the climb.
+ATTACK VECTOR: An account sits at 24 % for 20 minutes, then a fast agent run takes it to 57 % between two fetches. `elapsed` is about 1200 s plus the fetch interval, so the projection is 57 + 33/1200*180, about 62 %, and nothing fires. This is the burst-after-idle case the feature exists for. The rise could only have happened after the last tick that still saw the old value.
+SUGGESTED FIX: Track `last_seen` for the held value, updated on every same-value tick. Use `now - last_seen` as the elapsed time, or at least clamp it to a maximum of about 2× the fetch interval.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3031
+ID: autoswitch.py:3031:no-minimum-elapsed-quantization-extrapolation
+ISSUE: There is no minimum on `elapsed` and no allowance for the integer-percent resolution of readings. A 1–3 point change seen 15–30 s after the previous distinct reading is extrapolated over the whole look-ahead.
+ATTACK VECTOR: Two distinct readings land on adjacent ticks, for example because the usage cache and a base-headroom path refresh at different moments, or a fetch retry delivers two snapshots back to back. Going from 80 % to 83 % over 15 s projects 83 + 3/15*180 = 119 %, a spurious `proactive` switch off a healthy account. With the 3600 s maximum look-ahead, even a single 1-point tick can fire.
+SUGGESTED FIX: Require `elapsed >= ~30–60 s` (or a configured minimum) before projecting, otherwise keep the old baseline. Alternatively, require the rise to be at least 2–3 points, or cap the projected rate.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3042
+ID: autoswitch.py:3042:stale-projection-held-indefinitely
+ISSUE: A projection is held for as long as the reading stays unchanged, with no expiry. The docstring says this is "like a real crossing", but a real crossing is a fact and a projection is a prediction that the lack of further rise falsifies.
+ATTACK VECTOR: An account reads 57 % with a projection of 96 %, the user stops working, and the reading stays at 57 % for hours. Every tick still returns `paced=True`. If the switch was blocked (idle hold, no candidate with room, drain wait), it fires as soon as a target appears, and it abandons the account even though it never reached the wall. The look-ahead window of `since + lookahead` has long passed, and more than a full cache cycle with no new reading proves the climb stopped.
+SUGGESTED FIX: In the held branch, return False once `now - since > lookahead` (or a few multiples of the expected reading interval). Also drop the sample if `_pace_crosses` was not called for a long gap.
+
+SEVERITY: WARNING
+CONFIDENCE: low
+FILE: src/claude_swap/autoswitch.py:2169
+ID: autoswitch.py:2169:utilization-source-window-not-stable
+ISSUE: The rate is computed between consecutive `utilization` values, but nothing guarantees they come from the same window or source. At the call site, `utilization` is overridden by `100 - base_headroom` in some branches.
+ATTACK VECTOR: The binding window flips from a 7d reading of 60 % to a 5h reading of 80 % (or the value alternates between the `usage` and `base_headroom` paths). That reads as a rise of 20 points in one reading interval, so it projects a crossing and switches without any real climb. In the opposite direction, a flip to a lower window resets the baseline and hides a real climb.
+SUGGESTED FIX: Include the binding window's key in the sample tuple, and reset on a change, in the same way as the slot.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3034
+ID: autoswitch.py:3034:event-claims-switching-side-effect-predicate
+ISSUE: `_pace_crosses` is named like a predicate but mutates state and emits a `PaceEvent` whose text says "switching before the wall". The event is emitted before the tick has decided to switch.
+ATTACK VECTOR: The event fires, then the switch is skipped. Possible reasons are `on_reserve`, a home pin, an idle hold, no target with room, or a cooldown. The log and hub show "switching" with no `SwitchEvent`, which misleads incident analysis. Because the event fires only once per reading, it is not repeated when the switch happens a tick later.
+SUGGESTED FIX: Rename the method to something like `_pace_update`, or move the emit to the point where the proactive switch is actually taken. At minimum, reword `human()` to "would reach … within …" instead of claiming a switch.
+
+
+###############################################################
+###   PROVIDER: MUSE
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:3042
+ID: autoswitch:3042:stale-projection-held-indefinitely
+ISSUE: A projected crossing is held forever while the reading is flat, with no expiry at the end of the look-ahead.
+ATTACK VECTOR: 24 -> 57 projects 96.3 within 180 s and switches; but if 57 then plateaus for 30 minutes (climb stopped, prediction falsified), every subsequent same-value tick still returns True and the daemon switches anyway on a dead prediction, causing a premature/flapping switch.
+SUGGESTED FIX: Store a deadline (`since_of_before + elapsed + lookahead` or `rise_time + lookahead`) alongside the projection and return False once `now` passes it unless a new rise re-arms it.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:3023
+ID: autoswitch:3023:drop-clears-held-crossing
+ISSUE: Any `utilization < sample[2]`, even a 0.1-point noise dip, resets the sample to `(current, now, utilization, None)` and returns False.
+ATTACK VECTOR: A held crossing from 24 -> 57 that is blocked on one tick is forgotten by a single jittery read of 56.9 on the next tick, contradicting the documented "blocked switch keeps the crossing"; real float readings with rounding/noise therefore lose the proactive trigger exactly when it must persist.
+SUGGESTED FIX: Only reset the baseline on a large drop indicating a window reset (e.g. drop > 20 points or below a reset floor); ignore small dips and preserve the held `projected`.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:3029
+ID: autoswitch:3029:zero-elapsed-stale-baseline
+ISSUE: When `elapsed <= 0` the method returns False without advancing `_pace_sample` past the new higher reading.
+ATTACK VECTOR: Two distinct readings landing on the same clock value (coarse clock, fast tests with `advance(0)`, NTP step) leave the old baseline in place, so the next tick computes the full delta over only the later interval (e.g. 33 points / 15 s instead of / 151 s), projecting ~453% and firing a bogus proactive switch.
+SUGGESTED FIX: Always advance the sample to the new reading on a rise; when `elapsed <= 0`, store `(current, now, utilization, previous_projected)` and return False.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3031
+ID: autoswitch:3031:single-spike-triggers-switch
+ISSUE: One delta between two readings with no smoothing, outlier rejection, or confirmation fires the switch immediately.
+ATTACK VECTOR: A single transient over-report (API glitch, partial failure, stale read: 24 -> 57 -> back to 25) triggers an irreversible proactive switch before the next reading can disprove it; production readings change only every 1-3 min so the bad decision stands for minutes.
+SUGGESTED FIX: Require two consecutive rising readings (or cap the per-second rate to a plausible maximum) before projecting a crossing.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3034
+ID: autoswitch:3034:duplicate-pace-events-emitted
+ISSUE: Every further rising tick with `projected >= threshold` emits another `PaceEvent`; nothing deduplicates per episode.
+ATTACK VECTOR: A stair-step climb (57 -> 60 -> 65, each still below 95) emits one `PaceEvent` per step, spamming the event log/telemetry and any consumer counting switch reasons, unlike the single held-crossing the docstring describes.
+SUGGESTED FIX: Emit only on the transition from not-crossing to crossing (guard on the stored `projected` being None or below threshold).
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/settings.py:369
+ID: settings:369:excessive-lookahead-trivial-drift
+ISSUE: `paceLookaheadSeconds` allows up to 3600 s while readings move every 60-180 s, so ordinary drift becomes a "crossing".
+ATTACK VECTOR: With threshold 95 and lookahead 3600, a benign drift of ~1 point per 3-minute reading (0.0056/s) projects +20 points and switches at ~75%; the threshold is effectively lowered by configuration far beyond the documented 1-3-minute use case.
+SUGGESTED FIX: Cap the spec range near the reading cadence (e.g. max 300-600 s) or document the effective threshold-lowering with an example.
+
+
+###############################################################
+###   PROVIDER: KIMI
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3038
+ID: autoswitch.py:3038:held-crossing-never-expires
+ISSUE: A projected crossing is held indefinitely while the same reading stands — there is no staleness bound on the stored `projected` value.
+ATTACK VECTOR: Readings normally change every 1–3 min, but the climb rate is measured once and then trusted forever. If the usage feed stalls, the window fills more slowly than measured, or the fleet simply stops burning quota after the rise (e.g., 24→57 measured, then utilization sits at 57 for 45 minutes), every subsequent tick still returns `projected >= threshold`, so the engine keeps forcing proactive switches based on a projection whose premise (the climb continues) has long stopped being true. The docstring says "held while that reading stands (a blocked switch keeps the crossing, like a real one)" — but a real threshold crossing is re-verified against fresh readings each tick; this one is verified against a measurement that ages without bound, so the "like a real one" claim does not hold for a reading that stands far past the normal 1–3 min cadence. In production this manifests as account churn / unnecessary switches during quiet periods after a burst.
+SUGGESTED FIX: Cap how long a held crossing remains valid — e.g., store the projection's computed-at time and treat the crossing as expired once `now - since` exceeds some multiple of the normal reading cadence (or `lookahead` itself), resetting `_pace_sample` on expiry.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3028
+ID: autoswitch.py:3028:short-elapsed-rate-extrapolation
+ISSUE: The projection extrapolates `lookahead / elapsed` with no minimum on `elapsed`, so a small rise measured over a short interval is amplified into a huge projected value.
+ATTACK VECTOR: `projected = utilization + (utilization - before) / elapsed * lookahead`. The setting spec allows `pace_lookahead_seconds` up to 3600 s. If two distinct readings happen to arrive close together — e.g., the daemon's tick coincides with the provider updating readings, or a delayed tick compresses the observed interval to ~15 s — then a mundane 1–2 point rise measured over 15 s with a 1800 s lookahead projects +120 to +240 points and fires a proactive switch on pure noise. The motivating incident (33 points over 151 s) is a 21x amplification; the code does nothing to distinguish that from a 1-point jitter amplified 240x. The test suite only exercises elapsed ≥ 60 s, so this failure mode is invisible to the author's tests.
+SUGGESTED FIX: Require a minimum measurement window before trusting the rate — e.g., `if elapsed < 30: return False` (keep the sample, don't recompute the projection), or require the rise itself to exceed a noise floor (e.g., 2 points) before projecting.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/autoswitch.py:3020
+ID: autoswitch.py:3020:strict-drop-resets-baseline
+ISSUE: Any strict decrease in utilization — even sub-point float jitter — resets the baseline and silently discards a held crossing.
+ATTACK VECTOR: `utilization` is derived as `100.0 - base_h` (float headroom arithmetic). If the provider's headroom value wobbles slightly (95.0 → 94.9) due to rounding or in-flight request settlement rather than a true window reset, `utilization < sample[2]` wipes `_pace_sample`, including a legitimately held crossing, and detection needs two fresh distinct readings (2–6 minutes) to re-arm — exactly the blind window the feature exists to close. The reset condition can't distinguish "window reset" (large drop) from measurement noise (tiny drop).
+SUGGESTED FIX: Treat only drops larger than a small epsilon (e.g., 1–2 points) as a window reset; for smaller drops, keep the existing sample (optionally clamp `sample[2]` down to the new value).
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
