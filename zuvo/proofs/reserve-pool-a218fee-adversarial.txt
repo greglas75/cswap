@@ -1,0 +1,271 @@
+artifact_kind=adversarial-review
+created_at=2026-10-13T06:46:08Z
+status=ok
+mode=code
+output_format=text
+providers_used=codex-5.3, openrouter-3, byteplus-3, claude, muse
+provider_count=5
+providers_attempted=5
+provider_outcomes=codex-5.3:ok,openrouter-3:ok,byteplus-3:ok,claude:ok,muse:ok
+REVIEW BY: CODEX-5.3
+REVIEW BY: OPENROUTER-3
+REVIEW BY: BYTEPLUS-3
+REVIEW BY: CLAUDE
+REVIEW BY: MUSE
+reviewed_blob=ccb91ee2fe5949fe22ae8ce75ee2f18794058447
+input_chars=12531
+input_chars_original=12531
+input_truncated=false
+total_findings=24
+critical=1
+warning=15
+info=8
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: codex-5.3, openrouter-3, byteplus-3, claude, muse (5 total)
+Mode: code
+Input size: 12531 chars
+Date: 2026-10-13T06:46:08Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CODEX-5.3
+###############################################################
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: src/claude_swap/autoswitch.py:3567  
+ID: autoswitch.py:3567:missing-usage-disables-pool  
+ISSUE: Pool mode treats every configured account as a held reserve when `usage` is omitted.  
+ATTACK VECTOR: `_reserve_slots` still accepts `usage=None` and returns all configured reserves in that case. Any caller using that default applies last-resort rules to an account whose weekly life is above its floor.  
+SUGGESTED FIX: Require usage for pool-mode reserve decisions, or explicitly handle unavailable usage at the call boundary.
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: src/claude_swap/switcher.py:5460  
+ID: switcher.py:5460:stale-week-changes-list-ranking  
+ISSUE: The list decides whether a reserve is pooled from `entry.last_good`, which may be stale.  
+ATTACK VECTOR: After the account crosses its weekly floor, a previously successful usage snapshot can still place it among ordinary rotation accounts in `cswap list`, contradicting the current reserve decision.  
+SUGGESTED FIX: Base the list’s pool classification on the same current usage snapshot used for switching, or label the ranking as based on cached usage.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-3
+###############################################################
+
+
+
+1
+ITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/switcher.py
+ID: switcher.py:5459:unsafe-reserve-lookup
+ISSUE: Conditional `reserves[num]` access can raise `KeyError` when reserves are excluded from pool logic.
+ATTACK VECTOR: If `settings.reserve_mode == "pool"` and `week is not None` but `num` was filtered out by `_reserve_slots` (because life >= floor), this line raises `KeyError`.
+SUGGESTED FIX: Replace `reserves[num]` with `reserves.get(num, float("inf"))` and check `num in reserves` before computing `pooled`.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py
+ID: autoswitch.py:3568:usage-null-failure
+ISSUE: `pool` mode silently degrades to `last` mode when `usage` data is not supplied to `_reserve_slots`.
+ATTACK VECTOR: If a production service calls `_reserve_slots` without `usage` (e.g. during health checks), the pool logic is skipped, forcing reserves to behave as `last`-mode reserves.
+SUGGESTED FIX: Add a runtime warning when `pool` mode is active but `usage` is `None`.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py
+ID: autoswitch.py:3571:usage-typo
+ISSUE: `oauth.weekly_life(usage.get(num), ...)` uses `.get()` on a dict of `str | None`, returning `str | None` instead of `dict`.
+ATTACK VECTOR: `usage.get(num)` returns the usage value directly; if the dict was typed wrong or nested, this fails the type contract or causes `weekly_life` to reject data.
+SUGGESTED FIX: Ensure `usage` maps to actual usage objects, or extract `usage[num]` directly after verifying type.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py
+ID: autoswitch.py:3565:filtering-contract
+ISSUE: `_reserve_slots` signature promises `dict[str, float]` but conditional filtering returns the same type under a `pool` contract.
+ATTACK VECTOR: Callers assume returned reserves match full reserve set; the filtered subset breaks `reserves.items()` loops.
+SUGGESTED FIX: Rename `_reserve_slots` to `_filtered_reserves` or clarify it may not return all slots.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/switcher.py
+ID: switcher.py:5487:note-fallback
+ISSUE: If `pooled` flag is not computed or `num` not in `reserves`, the fallback note may miss the `pooled` message.
+ATTACK VECTOR: Users see incorrect "reserve held" messages when reserves are expected to be pooled.
+SUGGESTED FIX: Move `pooled` check to top and default to "pooled" if status unknown.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/settings.py
+ID: settings.py:390:setting-enum
+ISSUE: `reserve_mode` is a `str` choice but lacks validation in code paths besides comparison.
+ATTACK VECTOR: Configuration files specifying "Pool" (capitalized) bypass the string check silently.
+SUGGESTED FIX: Normalize `reserve_mode` to lowercase in `AutoSwitchSettings` constructor.
+
+
+###############################################################
+###   PROVIDER: BYTEPLUS-3
+###############################################################
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:3567
+ID: autoswitch.py:3567:unhandled-exception-str-usage
+ISSUE: Unhandled exception when usage value is a string, leading to tick failure.
+ATTACK VECTOR: If the usage API returns a string (e.g., error message) for a reserve account, `oauth.weekly_life` will throw a TypeError/AttributeError when passed a string, crashing the entire tick process and preventing any switches.
+SUGGESTED FIX: Wrap the `oauth.weekly_life` call in a try-except, or validate that `usage.get(num)` is a dict or None before passing. Treat non-dict, non-None values as unknown life.
+
+---
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:1474
+ID: autoswitch.py:1474:comment-code-mismatch-critical-path
+ISSUE: Docstring claims `_pre_freshen` runs off the critical path, but it is called synchronously during the tick.
+ATTACK VECTOR: A developer reading the docstring may assume `_pre_freshen` is asynchronous and add expensive operations, leading to increased tick latency and missed switch deadlines.
+SUGGESTED FIX: Either update the docstring to reflect synchronous execution, or move the `_pre_freshen` call to an asynchronous task/thread.
+
+---
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3567
+ID: autoswitch.py:3567:models-inconsistency-weekly-life
+ISSUE: Inconsistent `models` instances used for `weekly_life` calculation between engine and switcher.
+ATTACK VECTOR: If `AutoSwitchEngine._models` and `ClaudeAccountSwitcher`'s `models` are differently configured (e.g., timezones, API versions), `oauth.weekly_life` may return conflicting values, leading to mismatched reserve status between switch logic and list display.
+SUGGESTED FIX: Ensure both components use the same `models` instance, or pass the instance explicitly to avoid inconsistency.
+
+---
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/settings.py:184
+ID: settings.py:184:unvalidated-reserve-mode-runtime
+ISSUE: No runtime validation of `reserve_mode` outside setting specification.
+ATTACK VECTOR: If `reserve_mode` is set to an unrecognized value (bypassing setting specs), the code defaults to "last" behavior silently, which may not match operator expectations.
+SUGGESTED FIX: Add an explicit assertion or validation in `_reserve_slots` that `reserve_mode` is one of the allowed choices, raising a clear error if not.
+
+---
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/autoswitch.py:3566
+ID: autoswitch.py:3567:dict-comprehension-side-effect-risk
+ISSUE: Walrus operator inside dict comprehension may hide side effects or exceptions.
+ATTACK VECTOR: If `oauth.weekly_life` has unintended side effects, the dict comprehension will execute it for every reserve in a single expression, making debugging harder.
+SUGGESTED FIX: Extract the `weekly_life` calculation into an explicit loop with clear error handling, rather than using a walrus operator inside a dict comprehension.
+
+---
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/switcher.py:5489
+ID: switcher.py:5489:pooled-note-floor-assumption
+ISSUE: Pooled reserve note assumes floor is a percentage of the week used, not remaining.
+ATTACK VECTOR: If `reserve_min_life_pct` is interpreted as remaining life (per variable name), the note "in rotation until 80% of week" may confuse operators when floor is 20% (meaning 20% remaining, 80% used).
+SUGGESTED FIX: Clarify the note to explicitly state whether it refers to used or remaining life, e.g., "in rotation until 80% used" or "while >20% remains".
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:2140
+ID: autoswitch.py:2140:live-pooled-reserve-unread-week-flap
+ISSUE: Whether a reserve is pooled now depends on a per-tick, fallible usage read, so a live reserve is treated as a held reserve whenever that read fails.
+ATTACK VECTOR: In pool mode the owner sits on a reserve with 60% of its week left. One tick's usage fetch returns a `str` sentinel or `None` (429, network blip, token refresh). `weekly_life` returns `None`, so `_reserve_slots` keeps the account in the reserve set. `on_reserve` becomes True and the "never a resting place" handover fires, moving the owner off a healthy account. The next good read pools it again, it can win the ranking, and the engine lands on it again. Each hop swaps credentials under running sessions. The docstring only argues that an unread week must not put the account into rotation; it ignores that the same rule ejects the live account. `cswap list` reads `entry.last_good` while the engine reads the tick's `usage`, so the list can show "in rotation" while the engine treats the account as held.
+SUGGESTED FIX: For the live account (`current`), treat unknown life as "keeps its current class". For example, in the pool filter skip any slot where `life is None` and `num == current`, or fall back to the last known good weekly life.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3567
+ID: autoswitch.py:3567:pool-floor-no-margin-overshoot
+ISSUE: A reserve is pooled at `life >= floor` with no margin or look-ahead, so a reserve at floor+ε can be chosen and then burn past the floor before the next tick.
+ATTACK VECTOR: The reserve has 21% of its week left (floor 20). It is now an ordinary account, and with a fresh 5h window it usually has the most headroom, so it ranks first. One 5h session consumes far more than the 1% above the floor, and the weekly floor is only re-checked on later ticks. In "last" mode this overshoot was rare because the reserve was a last resort. In "pool" mode it is the common case, which defeats the owner's "use it up to 80%" intent.
+SUGGESTED FIX: Pool only when `life >= floor + margin`, or apply the existing pace/climb look-ahead to the weekly floor for pooled reserves. Use hysteresis: enter above floor+margin, and leave when the floor is crossed.
+
+SEVERITY: WARNING
+CONFIDENCE: low
+FILE: src/claude_swap/autoswitch.py:3570
+ID: autoswitch.py:3570:weekly-life-str-sentinel-unguarded
+ISSUE: `_reserve_slots` was config-only and is now data-dependent, and it passes `usage.get(num)`, typed `dict | str | None`, straight to `oauth.weekly_life` with no type guard.
+ATTACK VECTOR: The new annotation says per-slot usage can be a `str` sentinel. If `weekly_life` assumes a dict (`.get("seven_day")`), a single slot with an error sentinel raises `AttributeError`. `_reserve_slots` is called at the top of tick evaluation (the `on_reserve` site) outside any local guard, so one bad slot can abort the whole autoswitch tick on every tick until the read recovers. This only matters in pool mode.
+SUGGESTED FIX: Guard the comprehension, e.g. `u = usage.get(num); life = oauth.weekly_life(u, self._models) if isinstance(u, dict) else None`.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3567
+ID: autoswitch.py:3567:usage-none-silently-disables-pool
+ISSUE: The `usage=None` default silently means "unfiltered, last mode". Any caller that doesn't pass usage gets pool mode switched off without error.
+ATTACK VECTOR: The diff patches five engine call sites by hand. A call site missed here, or added later (status/doctor/explain paths), sees every reserve as held, so the engine and the diagnostics disagree. `_in_switch_order` appears to rely on exactly this unfiltered default to get the floor map, which makes the contract implicit and fragile.
+SUGGESTED FIX: Split into two explicit methods, `_reserve_floors(settings)` (all configured) and `_held_reserves(settings, usage)` (filtered). Alternatively make `usage` a required keyword and pass `{}` where the full set is wanted.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/switcher.py:5466
+ID: switcher.py:5466:duplicated-pool-predicate
+ISSUE: The "pooled" predicate (`week is not None and week >= floor`) is reimplemented in the switcher, separately from the engine's `life is None or life < floor`.
+ATTACK VECTOR: The two copies agree today, but a boundary or unknown-life tweak made in only one (e.g. the margin fix above) makes `cswap list` show the reserve in a different position from where the engine takes it. The list's own docstring promises it shows "where the engine will take it".
+SUGGESTED FIX: Expose one helper, e.g. `AutoSwitchEngine.is_pooled(num, floor, last_good, settings)` or `oauth.reserve_pooled(life, floor, mode)`, and call it from both places.
+
+
+###############################################################
+###   PROVIDER: MUSE
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/settings.py:184
+ID: settings.py:184:unvalidated-reserve-mode-string
+ISSUE: `reserve_mode` is a plain `str` that silently behaves as `"last"` for any typo/case variant
+ATTACK VECTOR: Operator sets `Pool`/`POOL`/`pooled`; `== "pool"` is False everywhere so pooling never activates, capacity sits idle while the operator believes the reserve is in rotation.
+SUGGESTED FIX: Validate/normalize in one place (e.g. `__post_init__`: lower-case and raise `ValueError` on unknown values).
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/switcher.py:5459
+ID: switcher.py:5459:divergent-weekly-life-sources
+ISSUE: Engine and list compute the same pool predicate from different inputs (`usage.get(num)` vs `entry.last_good`)
+ATTACK VECTOR: Fresh tick `usage` disagrees with persisted `last_good` (latency, partial fetch, key mismatch), so the engine lands on an account the list shows as held/last-resort, or vice versa; the safety invariant "unread week stays a reserve" can hold in one view and break in the other.
+SUGGESTED FIX: Compute `weekly_life` once per account from a single source and pass it to both `_reserve_slots` and `_in_switch_order`.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3567
+ID: autoswitch.py:3567:unguarded-weekly-life-filter
+ISSUE: Dict-comprehension filter calls `oauth.weekly_life()` on unvalidated deserialized `usage` values with no guard
+ATTACK VECTOR: One malformed reserve payload (unexpected JSON shape beyond `dict | str | None`) raises inside `_reserve_slots`, breaking all four callers (ranking, pre-freshen, held-report, multi-reserve) on a path that previously never touched `usage`.
+SUGGESTED FIX: Wrap the call in try/except and treat exceptions as unknown life (keep the reserve).
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3567
+ID: autoswitch.py:3567:floor-boundary-flapping-no-hysteresis
+ISSUE: Pool membership flips on exact `life < floor` comparison with no hysteresis band
+ATTACK VECTOR: Recomputed `weekly_life` jittering around the floor (e.g. 20.1 vs 19.9) makes the reserve oscillate between ordinary and held across ticks, causing repeated switch/handover churn and refresh-token rotation.
+SUGGESTED FIX: Add a small hysteresis (e.g. re-enter rotation only at `floor + 1-2pts`, or stay held once under floor until weekly reset).
+
+SEVERITY: INFO
+CONFIDENCE: high
+FILE: src/claude_swap/autoswitch.py:3543
+ID: autoswitch.py:3543:optional-usage-disables-pool-silently
+ISSUE: `usage=None` default silently disables pooling (all reserves kept) with no warning
+ATTACK VECTOR: Any current or future `_reserve_slots` caller that omits `usage` diverges from callers in the same tick that pass it, so pre-freshen/ranking disagree on which accounts are reserves.
+SUGGESTED FIX: Make `usage` required, or log/assert when `reserve_mode == "pool"` and `usage is None`.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/switcher.py:5490
+ID: switcher.py:5490:rounded-threshold-display-mismatch
+ISSUE: Displayed threshold `{100 - floor:.0f}%` rounds while the comparison uses the exact float floor
+ATTACK VECTOR: With a non-integer floor (e.g. 12.5) the list shows "until 88% of week" while enforcement uses 12.5%, misleading the operator debugging a boundary handover.
+SUGGESTED FIX: Show the exact floor (e.g. `{floor:g}% life left`) instead of the rounded complement.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
