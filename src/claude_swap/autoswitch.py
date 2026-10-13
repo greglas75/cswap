@@ -1472,6 +1472,7 @@ class AutoSwitchEngine:
         current: str,
         headroom: dict[str, float | None],
         quarantined: set[str] | frozenset[str],
+        usage: dict[str, dict | str | None] | None = None,
     ) -> None:
         """Freshen idle candidates ahead of the switch, off the critical path.
 
@@ -1496,7 +1497,7 @@ class AutoSwitchEngine:
         # the MOST headroom — sorted naively it would be freshened first and
         # could spend the whole per-tick budget on the one account the switch
         # is built to avoid.
-        reserves = self._reserve_slots(self.settings)
+        reserves = self._reserve_slots(self.settings, usage)
         # Disabled slots are not rotation candidates: freshening them would
         # rotate a refresh token (and risk a quarantine) the switch never uses.
         try:
@@ -2136,7 +2137,7 @@ class AutoSwitchEngine:
         # it stays put quietly (below, no alert). The ranking judges peers
         # against the threshold line rather than the reserve's own headroom,
         # so a reserve with more room than a healthy peer still steps aside.
-        on_reserve = current in self._reserve_slots(settings)
+        on_reserve = current in self._reserve_slots(settings, usage)
 
         def rank_headroom(h: float | None) -> float | None:
             if on_reserve and h is not None:
@@ -2184,7 +2185,7 @@ class AutoSwitchEngine:
                             and utilization >= settings.pre_freshen_threshold
                             and not self.dry_run
                         ):
-                            self._pre_freshen(current, headroom, quarantined)
+                            self._pre_freshen(current, headroom, quarantined, usage)
                         self._emit(
                             NoSwitchEvent(
                                 reason="below-threshold",
@@ -2541,7 +2542,7 @@ class AutoSwitchEngine:
                 # protected reserve it reads as "everyone is exhausted" and
                 # sends the operator hunting for quota that is sitting right
                 # there, deliberately untouched.
-                reserves = self._reserve_slots(settings)
+                reserves = self._reserve_slots(settings, usage)
                 held = {
                     n: (life, floor)
                     for n, floor in reserves.items()
@@ -2991,7 +2992,7 @@ class AutoSwitchEngine:
         # left and stopped the whole fleet.
         # Several reserves (2026-10-05) go in their configured order, each
         # held by its own floor.
-        reserves = self._reserve_slots(settings)
+        reserves = self._reserve_slots(settings, usage)
         if reserves and any(num in reserves for _, num in qualifying):
             others = [entry for entry in qualifying if entry[1] not in reserves]
             if others:
@@ -3539,11 +3540,22 @@ class AutoSwitchEngine:
             self._home_warned = None
         return number
 
-    def _reserve_slots(self, settings: AutoSwitchSettings) -> dict[str, float]:
+    def _reserve_slots(
+        self,
+        settings: AutoSwitchSettings,
+        usage: dict[str, dict | str | None] | None = None,
+    ) -> dict[str, float]:
         """Every reserve as ``{slot: weekly floor pct}``, in use order.
 
         ``autoswitch.reserveAccount`` may name several (``parse_reserves``);
         an identifier naming no managed account is skipped, as before.
+
+        ``reserveMode=pool`` (owner, 2026-10-13: "use the reserve up to 80% of
+        its week"): a reserve whose weekly life still clears its floor is an
+        ordinary account and is left out here, so every reserve rule — last
+        in the ranking, never a resting place — applies only once it is under
+        the floor. Unknown life keeps it a reserve: an unread week must not
+        put the owner's account into the rotation.
         """
         out: dict[str, float] = {}
         for ident, floor in parse_reserves(
@@ -3552,6 +3564,12 @@ class AutoSwitchEngine:
             num = self._resolve_reserve(ident)
             if num is not None and num not in out:
                 out[num] = floor
+        if settings.reserve_mode == "pool" and usage is not None:
+            out = {
+                num: floor for num, floor in out.items()
+                if (life := oauth.weekly_life(usage.get(num), self._models)) is None
+                or life < floor
+            }
         return out
 
     def _resolve_reserve(self, ident: str) -> str | None:

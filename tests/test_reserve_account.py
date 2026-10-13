@@ -259,3 +259,54 @@ class TestSeveralReserves:
             "1": _usage(10), "2": _usage7(0, 10), "3": _usage7(0, 10),
         }) is TickOutcome.SWITCHED
         assert h.active_number() == 1
+
+
+class TestPoolReserve:
+    """reserveMode=pool (owner, 2026-10-13: "use the reserve up to 80% of its
+    week"): above its floor a reserve is an ordinary account; under it, a held
+    reserve again."""
+
+    def pooled(self, temp_home, **overrides):
+        return reserved(
+            temp_home, reserve_mode="pool", reserve_min_life_pct=20.0, **overrides
+        )
+
+    def test_a_reserve_above_its_floor_competes_on_headroom(self, temp_home):
+        """Bug caught: pool mode ignored, the reserve still waits for last resort."""
+        h = self.pooled(temp_home)
+        assert h.tick_with_usage({
+            "1": _usage(100), "2": _usage(70), "3": _usage7(0.0, 30.0),
+        }) is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+
+    def test_a_reserve_under_its_floor_is_never_a_landing(self, temp_home):
+        """Bug caught: the floor stops counting once the reserve joins the pool."""
+        h = self.pooled(temp_home)
+        assert h.tick_with_usage({
+            "1": _usage(100), "2": _usage(70), "3": _usage7(0.0, 85.0),
+        }) is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+
+    def test_a_live_reserve_above_its_floor_rests_like_any_account(self, temp_home):
+        """Bug caught: the 'never a resting place' handover still firing in pool."""
+        h = self.pooled(temp_home, live=3)
+        assert h.tick_with_usage({
+            "1": _usage(0), "2": _usage(0), "3": _usage7(10.0, 50.0),
+        }) is TickOutcome.NO_ACTION
+        assert h.active_number() == 3
+
+    def test_a_live_reserve_past_its_floor_hands_over(self, temp_home):
+        """Bug caught: the live reserve burning on past 80% of its week."""
+        h = self.pooled(temp_home, live=3)
+        assert h.tick_with_usage({
+            "1": _usage(100), "2": _usage(50), "3": _usage7(0.0, 81.0),
+        }) is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+
+    def test_an_unread_week_keeps_it_a_reserve(self, temp_home):
+        """Bug caught: a missing 7d window putting the owner's account in rotation."""
+        h = self.pooled(temp_home)
+        assert h.tick_with_usage({
+            "1": _usage(100), "2": _usage(70), "3": {"five_hour": {"pct": 0.0}},
+        }) is TickOutcome.SWITCHED
+        assert h.active_number() == 2

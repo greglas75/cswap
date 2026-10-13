@@ -181,6 +181,12 @@ class AutoSwitchSettings:
     # one takes reserve_min_life_pct. See parse_reserves().
     reserve_account: str | None = None
     reserve_min_life_pct: float = 20.0
+    # "last" (default): the above. "pool" (owner, 2026-10-13: "use the
+    # reserve up to 80% of its week"): a reserve that still holds its floor
+    # of weekly life is an ordinary rotation account; once under the floor
+    # it turns back into a held reserve — never landed on, and left like a
+    # reserve when it is the live one.
+    reserve_mode: str = "last"
     # Codex (`cswap codex`): its own reserve — always last in the queue, and
     # dropped once less than `codex_reserve_min_life_pct` of its week is left.
     codex_reserve_account: str | None = None
@@ -380,6 +386,14 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             help=(
                 "Switch point for the weekly (7d and model) windows; the 5h "
                 "window keeps threshold (0 = same as threshold)"
+            ),
+        ),
+        SettingSpec(
+            "autoswitch", "reserveMode", "reserve_mode", "choice",
+            choices=("last", "pool"),
+            help=(
+                "last: reserves only when nothing else qualifies; pool: in the "
+                "normal rotation until under their weekly floor"
             ),
         ),
         SettingSpec(

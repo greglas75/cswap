@@ -68,3 +68,26 @@ def test_without_a_home_the_list_follows_best_most_headroom(temp_home):
     ordered, notes = h.switcher._in_switch_order(rows, entries, h.switcher._get_sequence_data())
     assert [r[0] for r in ordered] == [1, 2, 3]
     assert notes["2"] == "(next)"
+
+
+def test_a_pooled_reserve_ranks_by_life_until_its_floor(temp_home):
+    """reserveMode=pool: the list must show the reserve where the engine will
+    take it, not at the end as a last resort."""
+    h = EngineHarness(temp_home)
+    for n, e in [(1, "a@x.com"), (2, "b@x.com"), (3, "res@x.com"), (4, "spent@x.com")]:
+        h.seed(n, e)
+    h.make_live("a@x.com", 1)
+    root = h.switcher.backup_dir
+    set_setting(root, "autoswitch.reserveAccount", "res@x.com:20, spent@x.com:20")
+    set_setting(root, "autoswitch.reserveMode", "pool")
+    rows = [_row(1, "a@x.com", True), _row(2, "b@x.com"), _row(3, "res@x.com"), _row(4, "spent@x.com")]
+    entries = {
+        "1": UsageEntry(last_good=_usage(50)),
+        "2": UsageEntry(last_good=_usage(60)),
+        "3": UsageEntry(last_good=_usage7(0, 30)),   # 70% of its week left: in rotation
+        "4": UsageEntry(last_good=_usage7(0, 85)),   # under its floor: held
+    }
+    ordered, notes = h.switcher._in_switch_order(rows, entries, h.switcher._get_sequence_data())
+    assert [r[0] for r in ordered] == [1, 3, 2, 4]
+    assert notes["3"] == "(reserve — in rotation until 80% of week)"
+    assert notes["4"].startswith("(reserve — held")

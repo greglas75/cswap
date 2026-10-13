@@ -5456,6 +5456,15 @@ class ClaudeAccountSwitcher:
             dead = entry is not None and (
                 entry.token_dead() or entry.sentinel is not None
             )
+            week = (
+                oauth.weekly_life(entry.last_good, models)
+                if num in reserves and entry is not None else None
+            )
+            # reserveMode=pool: a reserve above its floor ranks like any slot.
+            pooled = (
+                settings.reserve_mode == "pool"
+                and week is not None and week >= reserves[num]
+            )
             if row[4]:
                 active.append(row)
             elif self._disabled_from_data(seq_data, num):
@@ -5463,9 +5472,8 @@ class ClaudeAccountSwitcher:
             elif dead or life is None:
                 notes[num] = "(not usable now)"
                 unusable.append(row)
-            elif num in reserves:
+            elif num in reserves and not pooled:
                 floor = reserves[num]
-                week = oauth.weekly_life(entry.last_good, models)
                 if week is not None and week >= floor:
                     notes[num] = "(reserve — last resort)"
                 else:
@@ -5478,6 +5486,11 @@ class ClaudeAccountSwitcher:
                 notes[num] = "(exhausted)"
                 unusable.append(row)
             else:
+                if pooled:
+                    notes[num] = (
+                        f"(reserve — in rotation until {100 - reserves[num]:.0f}% "
+                        "of week)"
+                    )
                 # Same key as the engine's prefer-mode ranking: home, then
                 # soonest weekly reset among slots with real room, then life.
                 first = 0 if num == home and life >= home_margin else 1
