@@ -1,0 +1,109 @@
+artifact_kind=adversarial-review
+created_at=2026-10-15T11:05:44Z
+status=partial
+mode=code
+output_format=text
+providers_used=codex-5.3, claude
+provider_count=2
+providers_attempted=4
+provider_outcomes=codex-5.3:ok,openrouter-alt:timeout,claude:ok,kimi:empty
+REVIEW BY: CODEX-5.3
+REVIEW BY: CLAUDE
+reviewed_blob=c8e8acc3640068d0bf233787d7a2a5e115da5f82
+input_chars=10129
+input_chars_original=10129
+input_truncated=false
+total_findings=8
+critical=0
+warning=6
+info=2
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: codex-5.3, claude (2 total)
+Mode: code
+Input size: 10129 chars
+Date: 2026-10-15T11:05:44Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CODEX-5.3
+###############################################################
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: src/claude_swap/autoswitch.py:3808  
+ID: autoswitch.py:3808:past-reset-remains-expiring  
+ISSUE: The reset check has no lower bound, so an account with a reset timestamp in the past still qualifies as expiring.  
+ATTACK VECTOR: If usage data remains stale after the weekly reset, the account can take or hold the login even though its quota is no longer about to expire.  
+SUGGESTED FIX: Require `0 < reset - now <= window_s`.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: src/claude_swap/autoswitch.py:3823  
+ID: autoswitch.py:3823:live-account-skips-headroom-check  
+ISSUE: The live-account hold does not check the binding headroom required to enter burn mode.  
+ATTACK VECTOR: An account already live with an expiring week and utilization below the threshold returns `NO_ACTION` even when its binding headroom is below the required margin, blocking the ordinary switching rules.  
+SUGGESTED FIX: Apply the same `active_headroom >= margin` check before holding the live account.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: src/claude_swap/autoswitch.py:3825  
+ID: autoswitch.py:3825:hold-claim-ignores-pace  
+ISSUE: The docstring says the login stays until the threshold or reset, but `_pace_crosses` can end the hold before either condition.  
+ATTACK VECTOR: A live expiring account below the threshold can be returned to the ordinary rules while its week is still expiring.  
+SUGGESTED FIX: Remove the pace check from the hold condition, or narrow the stated guarantee to include pace.
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3836
+ID: autoswitch.py:3836:hold-pace-target-asymmetry-flapping
+ISSUE: The hold test for the live account includes `not self._pace_crosses(...)`. The target test for a non-live account has no pace check. The two disagree about the same account.
+ATTACK VECTOR: The live account X is expiring and under threshold, but its pace projects a threshold crossing. The hold falls through with `return None`, and the ordinary rules move the login to home or another account. On the next tick X is no longer current. It is expiring with `headroom >= margin`, so it passes as a target and `_burn_before_reset` moves back to X. The next tick the pace check fails again and the login moves away. This repeats every tick, with a freshen and a drain/switch each time. It happens whenever the pace look-ahead trips below `threshold - hysteresis`.
+SUGGESTED FIX: Apply the same pace guard to targets. Skip a target when `_pace_crosses(num, 100 - h, settings)` is true. Alternatively, remember the account that was just released and exclude it from burn targets until its reset.
+
+SEVERITY: WARNING
+CONFIDENCE: low
+FILE: src/claude_swap/autoswitch.py:3813
+ID: autoswitch.py:3813:expiring-past-reset-no-lower-bound
+ISSUE: `expiring()` only checks `reset - now > window_s`. There is no `reset > now` check, so a reset timestamp already in the past passes as "within the window".
+ATTACK VECTOR: Cached usage has `seven_day.resets_at` in the past, through a stale usage cache, a failed usage refresh or clock skew. Its pct and `weekly_life` still describe the old week. A live account like that is held with NO_ACTION, so the engine ignores the ordinary rules and the home return. A non-live one is taken as a target, and it sorts first because its reset is the smallest. The hold lasts as long as the usage data stays stale, which can be long when the usage endpoint is failing. If `_seven_day_reset_ts` already rolls or filters past resets, this does not apply. That behaviour is not visible in the diff.
+SUGGESTED FIX: Require `now < reset <= now + window_s` in `expiring()`.
+
+SEVERITY: WARNING
+CONFIDENCE: low
+FILE: src/claude_swap/autoswitch.py:3841
+ID: autoswitch.py:3841:consume-first-gate-proxy-no-dwell
+ISSUE: The burn move reuses the `"consume-first"` entry of `_gated_triggers()` as its quiet-session gate, and `"burn-before-reset"` is not a trigger of its own. The burn path also has no dwell or cooldown, and it emits a NoSwitchEvent on every tick. This applies to both `burn-before-reset-wait` and the hold event.
+ATTACK VECTOR: If `_gated_triggers` is configured per trigger name, a user who gates other triggers but not consume-first gets burn moves during an active session. A user who gates consume-first gets burn moves gated by a setting they did not choose for this feature. While the session is busy, `burn-before-reset-wait` fires each tick and floods the event log. The held-account event does the same for the whole window, up to 24 h.
+SUGGESTED FIX: Add `burn-before-reset` to the gated-trigger set. Alternatively, de-duplicate the events per (reason, account), as other NoSwitchEvents presumably do.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3819
+ID: autoswitch.py:3819:held-current-blocks-sooner-reset
+ISSUE: The "hold the live expiring account" branch runs before target selection. A live account whose reset is later therefore blocks an account whose reset is sooner. This contradicts the "soonest reset goes first" ordering used for targets.
+ATTACK VECTOR: A resets in 110 minutes and is live. B resets in 20 minutes with 60% of its week unused. A is held until its threshold or its reset. By then B's reset has passed and its quota is lost, which is the loss the feature exists to prevent.
+SUGGESTED FIX: In the hold branch, first check whether a target with a strictly sooner reset exists. If one does, fall through to the target path.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3831
+ID: autoswitch.py:3831:sort-tiebreak-string-account-number
+ISSUE: `sorted((reset, num))` breaks ties on `num`, which is a string. `"10"` sorts before `"2"`. Equal resets also ignore headroom and life.
+ATTACK VECTOR: Resets from the usage API are often rounded to the same second or minute across accounts. The target is then chosen by lexicographic slot number rather than by the account with the most quota left to burn.
+SUGGESTED FIX: Use the key `(reset, -life_or_headroom, int(num))`.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
