@@ -147,6 +147,8 @@ HOME_RETURN_MIN_HEADROOM_PCT = 20.0
 # minutes, so it sorts behind every candidate with real room whatever its
 # reset time (see the prefer-mode ranking key).
 MIN_USEFUL_LIFE_PCT = 10.0
+# burnBeforeResetMinutes: less weekly life than this is not worth a move.
+BURN_MIN_LIFE_PCT = 2.0
 
 
 def _home_return_margin(settings: AutoSwitchSettings) -> float:
@@ -1993,6 +1995,12 @@ class AutoSwitchEngine:
             pin_active = False
         if not pin_active or current != home:
             self._home_unknown_since = None
+        if active_headroom is not None:
+            burn = self._burn_before_reset(
+                current, active_headroom, usage, headroom, quarantined, settings
+            )
+            if burn is not None:
+                return burn
         if pin_active:
             if current != home:
                 outcome = self._return_home(
@@ -3772,6 +3780,84 @@ class AutoSwitchEngine:
         # leave a return-home timing behind for some later switch to report.
         self._switch_timing = {"freshenMs": freshen_ms, "freshenAttempts": 1}
         return self._perform_with_drain2(home, email, "return-home", None, None)
+
+    def _burn_before_reset(
+        self,
+        current: str,
+        active_headroom: float,
+        usage: dict[str, dict | str | None],
+        headroom: dict[str, float | None],
+        quarantined: set[str],
+        settings: AutoSwitchSettings,
+    ) -> TickOutcome | None:
+        """Use weekly quota that is about to expire (``burnBeforeResetMinutes``).
+
+        Owner, 2026-10-15: greg@avsh.pl reached its weekly reset with 13% of
+        the week unused, because the prefer-mode home kept the login while it
+        had room. An account whose 7d window resets within the window and
+        whose binding window has the room a return would demand takes the
+        login ahead of the home and of every ranking; the login stays on it
+        until its threshold or the reset, then the ordinary rules resume.
+        ``None`` hands the tick on to them.
+        """
+        window_s = settings.burn_before_reset_minutes * 60.0
+        if window_s <= 0:
+            return None
+        now = self.clock()
+        # Not _home_return_margin: its 20% floor is room for a long stay, and
+        # an expiring week is exactly an account with little of it left.
+        margin = 100.0 - settings.threshold + settings.hysteresis_pct
+
+        def expiring(num: str) -> float | None:
+            reset = _seven_day_reset_ts(usage.get(num), now)
+            life = oauth.weekly_life(usage.get(num), self._models)
+            if reset is None or reset - now > window_s:
+                return None
+            if life is None or life < BURN_MIN_LIFE_PCT:
+                return None
+            return reset
+
+        if expiring(current) is not None:
+            utilization = 100.0 - active_headroom
+            if utilization < settings.threshold and not self._pace_crosses(
+                current, utilization, settings
+            ):
+                self._emit(NoSwitchEvent(
+                    reason="burn-before-reset",
+                    detail=f"Account-{current} uses its week before the reset",
+                ))
+                return TickOutcome.NO_ACTION
+            return None
+        targets = sorted(
+            (reset, num)
+            for num in self.switcher.switchable_account_numbers()
+            if num != current and num not in quarantined
+            and self.switcher.account_kind_for(num) != "api_key"
+            and (h := headroom.get(num)) is not None and h >= margin
+            and (reset := expiring(num)) is not None
+        )
+        if not targets:
+            return None
+        target = targets[0][1]
+        if "consume-first" in self._gated_triggers():
+            quiet, detail = self._session_quiet()
+            if not quiet:
+                self._emit(NoSwitchEvent(
+                    reason="burn-before-reset-wait",
+                    detail=f"the move to Account-{target} waits: {detail}",
+                ))
+                return None
+        email = self.switcher.account_email(target)
+        if self.dry_run:
+            return self._perform_with_drain2(target, email, "burn-before-reset", None, None)
+        status = self._freshen_target(target, email)
+        if status in ("identity-conflict", "invalid_grant"):
+            self._quarantine(target, email, status)
+            quarantined.add(target)
+            return None
+        if status in ("transient", "skip-live-session"):
+            return None
+        return self._perform_with_drain2(target, email, "burn-before-reset", None, None)
 
     def _drain_gate(
         self, trigger: str, active_headroom: float | None

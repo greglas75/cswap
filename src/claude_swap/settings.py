@@ -187,6 +187,13 @@ class AutoSwitchSettings:
     # it turns back into a held reserve — never landed on, and left like a
     # reserve when it is the live one.
     reserve_mode: str = "last"
+    # Use it or lose it (owner, 2026-10-15: greg@avsh.pl reset with 13% of its
+    # week unused while the login sat on the home): an account whose weekly
+    # window resets within this many minutes, with room in its 5h window,
+    # takes the login ahead of the home and every other account, and keeps
+    # it until its threshold or the reset. Reserves included — what is left
+    # at the reset is gone either way. 0 = off (default).
+    burn_before_reset_minutes: float = 0.0
     # Codex (`cswap codex`): its own reserve — always last in the queue, and
     # dropped once less than `codex_reserve_min_life_pct` of its week is left.
     codex_reserve_account: str | None = None
@@ -394,6 +401,14 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             help=(
                 "last: reserves only when nothing else qualifies; pool: in the "
                 "normal rotation until under their weekly floor"
+            ),
+        ),
+        SettingSpec(
+            "autoswitch", "burnBeforeResetMinutes", "burn_before_reset_minutes", "float",
+            0.0, 1440.0,
+            help=(
+                "Move the login onto an account whose week resets within this "
+                "many minutes and still has room, ahead of the home (0 = off)"
             ),
         ),
         SettingSpec(
