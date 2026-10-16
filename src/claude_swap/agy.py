@@ -200,10 +200,13 @@ def stored_accounts(backup_root: Path) -> list[str]:
     root = store_dir(backup_root)
     if not root.is_dir():
         return []
+    # Only files that hold the login they are named after: other tools have
+    # dropped their own JSON here (2026-10-16: `*.token.json`, probe-state.json).
     return sorted(
         p.name[: -len(".json")]
         for p in root.iterdir()
-        if p.name.endswith(".json") and not p.name.startswith(".") and p.name != QUOTA_STATE
+        if p.name.endswith(".json") and not p.name.startswith(".")
+        and email_of(read_file(p)) == p.name[: -len(".json")]
     )
 
 

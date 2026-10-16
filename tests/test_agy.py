@@ -169,3 +169,13 @@ def test_the_agy_1_4_token_file_is_the_live_login(env):
     agy.add(env)
     agy.switch(env, "b@x.com")
     assert agy.email_of(agy.read_file(cli)) == "b@x.com"
+
+
+def test_foreign_json_in_the_store_is_not_an_account(env):
+    """Bug caught (2026-10-16, ryzen-dev): `<email>.token.json` and probe-state.json
+    written by another tool were listed — and ranked — as accounts."""
+    _live(_login("a@x.com"))
+    agy.add(env)
+    (agy.store_dir(env) / "a@x.com.token.json").write_text(json.dumps(_login("a@x.com")))
+    (agy.store_dir(env) / "probe-state.json").write_text(json.dumps({"accounts": {}}))
+    assert agy.stored_accounts(env) == ["a@x.com"]
