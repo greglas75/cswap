@@ -122,3 +122,35 @@ def test_login_without_a_new_sign_in_puts_the_old_login_back(env, monkeypatch):
     with pytest.raises(agy.AgyError):
         agy.login(env)
     assert agy.email_of(agy.read_live()) == "a@x.com"
+
+
+def test_login_interrupted_in_agy_puts_the_old_login_back(env, monkeypatch):
+    """Bug caught (review): Ctrl-C inside agy left the machine logged out."""
+    _live(_login("a@x.com"))
+    monkeypatch.setattr(agy.shutil, "which", lambda name: "/bin/agy")
+
+    def interrupted(cmd):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(agy.subprocess, "call", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        agy.login(env)
+    assert agy.email_of(agy.read_live()) == "a@x.com"
+
+
+@pytest.mark.parametrize(
+    ("entry", "life"),
+    [
+        pytest.param({"life": 0.0, "resetAt": None, "at": 0.0}, None, id="no-reset-old-reading-expires"),
+        pytest.param({"life": 0.0, "resetAt": None, "at": 99_000.0}, 0.0, id="no-reset-recent-reading-holds"),
+        pytest.param({"life": 0.0, "resetAt": 50_000.0, "at": 0.0}, 100.0, id="past-reset-is-fresh"),
+    ],
+)
+def test_known_life(entry, life):
+    """Bug caught (review): a reading without a reset time held an account out forever."""
+    assert agy.known_life(entry, 100_000.0) == life
+
+
+def test_nanosecond_reset_times_parse():
+    """Bug caught (review): RFC 3339 nanoseconds made the reset time unreadable."""
+    assert agy._ts("2026-10-16T20:36:06.123456789Z") == pytest.approx(agy._ts("2026-10-16T20:36:06.123456Z"))

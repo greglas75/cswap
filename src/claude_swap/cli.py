@@ -1197,7 +1197,8 @@ def _agy_command(argv: list[str]) -> None:
             if current in emails:
                 live = agy.fetch_quota(agy.read_live() or {}, models)
                 if live.error is None:
-                    agy.record(root, current, live, now)
+                    with agy.store_lock(root):
+                        agy.record(root, current, live, now)
                     state = agy.load_state(root)
             order = agy.rank(emails, current, state, threshold, now)
             rows = ([current] if current in emails else []) + order + [

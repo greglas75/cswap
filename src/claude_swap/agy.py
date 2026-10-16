@@ -24,6 +24,7 @@ import contextlib
 import fcntl
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -32,7 +33,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from claude_swap import macos_keychain
@@ -46,6 +47,8 @@ KEYCHAIN_ACCOUNT = "antigravity"
 KEYRING_PREFIX = "go-keyring-base64:"
 TOKEN_FILE = "jetski-standalone-oauth-token"
 QUOTA_STATE = "quota.json"
+# A reading without a usable reset time stops describing the account after this.
+READING_MAX_AGE_S = 24 * 3600
 
 
 class AgyError(Exception):
@@ -91,14 +94,19 @@ def read_file(path: Path) -> dict | None:
         return None
 
 
-def read_live() -> dict | None:
+def read_live(strict: bool = False) -> dict | None:
+    """The live login. On macOS the keychain is the authority: an unreadable
+    keychain (locked, denied) is "unknown", never the possibly stale file —
+    ``strict`` raises instead, for callers about to overwrite the login."""
     if use_keychain():
         try:
-            found = _parse(macos_keychain.get_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT))
-        except Exception:  # noqa: BLE001 — a locked keychain falls back to the file
-            found = None
-        if found is not None:
-            return found
+            raw = macos_keychain.get_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
+        except Exception as e:  # noqa: BLE001
+            if strict:
+                raise AgyError(f"the keychain is unreadable ({e}) — try again once it is unlocked")
+            return None
+        if raw is not None:
+            return _parse(raw)
     return read_file(live_file())
 
 
@@ -214,17 +222,22 @@ def login(backup_root: Path) -> str:
     """
     if shutil.which("agy") is None:
         raise AgyError("agy is not on PATH")
-    previous = read_live()
+    previous = read_live(strict=True)
     if previous is not None:
         add(backup_root)
     clear_live()
-    print("Sign in with the other Google account in agy, then exit it (Ctrl-D or /quit).")
-    subprocess.call(["agy"])
-    fresh = read_live()
-    email = email_of(fresh)
-    if fresh is None or email is None or (previous is not None and email == email_of(previous)):
-        if previous is not None:
+    fresh = None
+    try:
+        print("Sign in with the other Google account in agy, then exit it (Ctrl-D or /quit).")
+        subprocess.call(["agy"])
+        fresh = read_live()
+    finally:
+        # Ctrl-C or a crash in agy must not leave the machine logged out.
+        email = email_of(fresh)
+        if (fresh is None or email is None or (previous is not None and email == email_of(previous))) \
+                and previous is not None:
             write_live(previous)
+    if fresh is None or email is None or (previous is not None and email == email_of(previous)):
         raise AgyError("no new login — the previous one is back in place")
     with store_lock(backup_root):
         write_private(stored_path(backup_root, email), fresh)
@@ -239,14 +252,23 @@ class Quota:
     error: str | None = None
 
 
-def _expired(data: dict) -> bool:
-    expiry = (data.get("token") or {}).get("expiry")
-    if not isinstance(expiry, str):
-        return False
+def _ts(value) -> float | None:
+    """RFC 3339 → epoch. Nanosecond fractions are cut to micro; no offset = UTC."""
+    if not isinstance(value, str):
+        return None
+    text = re.sub(r"(\.\d{6})\d+", r"\1", value.strip()).replace("Z", "+00:00")
     try:
-        return datetime.fromisoformat(expiry.replace("Z", "+00:00")).timestamp() <= time.time()
+        dt = datetime.fromisoformat(text)
     except ValueError:
-        return False
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _expired(data: dict) -> bool:
+    expiry = _ts((data.get("token") or {}).get("expiry"))
+    return expiry is not None and expiry <= time.time()
 
 
 def _post(path: str, token: str, body: dict, timeout: float) -> dict:
@@ -264,7 +286,10 @@ def _post(path: str, token: str, body: dict, timeout: float) -> dict:
 def parse_models(payload: dict, models: list[str]) -> Quota:
     """Tightest model with a reset time; ``models`` (prefixes) narrows the set."""
     worst: Quota | None = None
-    for name, info in (payload.get("models") or {}).items():
+    entries = payload.get("models")
+    if not isinstance(entries, dict):
+        return Quota(None, None, None, error="unexpected quota response")
+    for name, info in entries.items():
         quota = (info or {}).get("quotaInfo") if isinstance(info, dict) else None
         if not isinstance(quota, dict) or "resetTime" not in quota:
             continue   # internal tab/chat models: no quota of their own
@@ -273,10 +298,7 @@ def parse_models(payload: dict, models: list[str]) -> Quota:
         fraction = quota.get("remainingFraction", 0)
         if not isinstance(fraction, (int, float)):
             continue
-        try:
-            reset = datetime.fromisoformat(str(quota["resetTime"]).replace("Z", "+00:00")).timestamp()
-        except ValueError:
-            reset = None
+        reset = _ts(quota["resetTime"])
         life = max(0.0, min(100.0, float(fraction) * 100.0))
         if worst is None or life < (worst.life or 0.0):
             worst = Quota(life, name, reset)
@@ -328,8 +350,11 @@ def known_life(entry: dict | None, now: float) -> float | None:
     if not isinstance(entry, dict) or not isinstance(entry.get("life"), (int, float)):
         return None
     reset = entry.get("resetAt")
-    if isinstance(reset, (int, float)) and reset <= now:
-        return 100.0
+    if isinstance(reset, (int, float)):
+        if reset <= now:
+            return 100.0
+    elif now - float(entry.get("at") or 0) > READING_MAX_AGE_S:
+        return None   # no reset time: an old reading says nothing any more
     return float(entry["life"])
 
 
@@ -353,8 +378,10 @@ def _switch(backup_root: Path, email: str) -> str | None:
     target = read_file(stored_path(backup_root, email))
     if target is None or email_of(target) != email:
         raise AgyError(f"{email} is not stored — sign in with it and run: cswap agy add")
-    live = read_live()
+    live = read_live(strict=True)
     live_email = email_of(live)
+    if live is None and live_file().exists():
+        raise AgyError(f"the live login in {live_file()} is unreadable — switching would replace it")
     if live_email is not None and live_email != email and not stored_path(backup_root, live_email).exists():
         raise AgyError(f"the live login {live_email} is not stored — run `cswap agy add` first")
     previous = _sync_live(backup_root)
