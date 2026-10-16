@@ -46,6 +46,8 @@ KEYCHAIN_SERVICE = "gemini"
 KEYCHAIN_ACCOUNT = "antigravity"
 KEYRING_PREFIX = "go-keyring-base64:"
 TOKEN_FILE = "jetski-standalone-oauth-token"
+# agy 1.4 on Linux keeps the login here instead (measured 2026-10-16, ryzen-dev).
+CLI_TOKEN_FILE = "antigravity-cli/antigravity-oauth-token"
 QUOTA_STATE = "quota.json"
 # A reading without a usable reset time stops describing the account after this.
 READING_MAX_AGE_S = 24 * 3600
@@ -59,8 +61,18 @@ def gemini_home() -> Path:
     return Path(os.environ.get("CSWAP_AGY_HOME") or "~/.gemini").expanduser()
 
 
+def live_files() -> list[Path]:
+    """Every token file agy may read; the newest existing one is live."""
+    found = [p for p in (gemini_home() / TOKEN_FILE, gemini_home() / CLI_TOKEN_FILE) if p.exists()]
+    return sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
 def live_file() -> Path:
-    return gemini_home() / TOKEN_FILE
+    files = live_files()
+    if files:
+        return files[0]
+    # Nothing on disk (a login just cleared): where this platform's agy reads.
+    return gemini_home() / (TOKEN_FILE if sys.platform == "darwin" else CLI_TOKEN_FILE)
 
 
 def use_keychain() -> bool:
@@ -149,15 +161,19 @@ def write_live(data: dict) -> None:
         refuse_test_identity(email_of(data), live_file())
         encoded = base64.b64encode(json.dumps(data).encode("utf-8")).decode("ascii")
         macos_keychain.set_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, KEYRING_PREFIX + encoded)
-    write_private(live_file(), data)
+    # Both files agy versions read, when present: a stale one left behind
+    # would be read back as the live login by a version that prefers it.
+    for path in live_files() or [live_file()]:
+        write_private(path, data)
 
 
 def clear_live() -> None:
     if use_keychain():
         with contextlib.suppress(Exception):
             macos_keychain.delete_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
-    with contextlib.suppress(FileNotFoundError):
-        live_file().unlink()
+    for path in live_files():
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
 
 
 def stored_path(backup_root: Path, email: str) -> Path:

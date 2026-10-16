@@ -34,7 +34,9 @@ def env(tmp_path, monkeypatch):
 
 
 def _live(data: dict) -> None:
-    agy.live_file().write_text(json.dumps(data))
+    path = agy.live_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data))
 
 
 def _two(env) -> None:
@@ -154,3 +156,16 @@ def test_known_life(entry, life):
 def test_nanosecond_reset_times_parse():
     """Bug caught (review): RFC 3339 nanoseconds made the reset time unreadable."""
     assert agy._ts("2026-10-16T20:36:06.123456789Z") == pytest.approx(agy._ts("2026-10-16T20:36:06.123456Z"))
+
+
+def test_the_agy_1_4_token_file_is_the_live_login(env):
+    """Bug caught (2026-10-16, ryzen-dev): agy 1.4 keeps the login in
+    antigravity-cli/antigravity-oauth-token, which cswap did not see."""
+    cli = agy.gemini_home() / agy.CLI_TOKEN_FILE
+    cli.parent.mkdir(parents=True)
+    cli.write_text(json.dumps(_login("b@x.com")))
+    assert agy.add(env) == "b@x.com"
+    cli.write_text(json.dumps(_login("a@x.com")))
+    agy.add(env)
+    agy.switch(env, "b@x.com")
+    assert agy.email_of(agy.read_file(cli)) == "b@x.com"
