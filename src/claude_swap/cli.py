@@ -1122,6 +1122,116 @@ def _codex_command(argv: list[str]) -> None:
         sys.exit(1)
 
 
+def _agy_command(argv: list[str]) -> None:
+    """Handle `cswap agy {login,add,list,switch,auto}` — Antigravity CLI rotation.
+
+    See :mod:`claude_swap.agy` for the storage and why idle accounts are judged
+    by their last reading.
+    """
+    import json as _json
+    import time
+    from datetime import datetime, timezone
+
+    from claude_swap import agy
+    from claude_swap.printer import bold_accent
+    from claude_swap.settings import load_settings
+
+    parser = argparse.ArgumentParser(
+        prog="cswap agy",
+        description="Rotate Antigravity CLI (agy) Google logins. `cswap agy add` stores the "
+                    "current one, `cswap agy login` signs in another — per machine.",
+    )
+    sub = parser.add_subparsers(dest="action", metavar="{login,add,list,switch,auto}")
+    sub.add_parser("login", help="Store the current login, then sign in another account in agy")
+    sub.add_parser("add", help="Store the account agy is logged in with now")
+    p_list = sub.add_parser("list", help="Stored accounts with their last quota reading")
+    p_list.add_argument("--json", action="store_true", help="Machine-readable output")
+    p_switch = sub.add_parser("switch", help="Make a stored account the live login")
+    p_switch.add_argument("email")
+    p_auto = sub.add_parser("auto", help="Switch when the live account's quota reaches the threshold (loop)")
+    p_auto.add_argument("--once", action="store_true", help="One decision, then exit")
+    p_auto.add_argument("--interval", type=float, default=60.0, help="Seconds between checks")
+    p_auto.add_argument("--dry-run", action="store_true", help="Decide, never switch")
+    args = parser.parse_args(argv)
+
+    root = paths.get_backup_root()
+    settings = load_settings(root)
+    threshold = settings.threshold
+    models = [m.strip() for m in (settings.agy_models or "").split(",") if m.strip()]
+
+    def in_time(ts) -> str:
+        if not isinstance(ts, (int, float)):
+            return ""
+        left = max(0, int(ts - time.time()))
+        days, rem = divmod(left, 86400)
+        return f"resets in {days}d {rem // 3600}h" if days else f"resets in {rem // 3600}h {rem % 3600 // 60}m"
+
+    try:
+        if args.action == "login":
+            print(f"Stored agy account {agy.login(root)}")
+        elif args.action == "add":
+            print(f"Stored agy account {agy.add(root)}")
+        elif args.action == "switch":
+            previous = agy.switch(root, args.email)
+            if previous == args.email.lower():
+                print(f"{args.email} is already the live agy login")
+            else:
+                print(f"agy login: {previous or 'none'} -> {args.email.lower()}")
+                print(dimmed("New agy processes use it; running sessions keep the old login."))
+        elif args.action == "auto":
+            while True:
+                try:
+                    event = agy.auto_tick(root, threshold, models, dry_run=args.dry_run)
+                except Exception as e:  # one bad tick never ends the loop
+                    event = {"event": "agy-error", "message": f"{type(e).__name__}: {e}"}
+                event["ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+                print(_json.dumps(event), flush=True)
+                if args.once:
+                    break
+                time.sleep(max(15.0, args.interval))
+        else:  # list (default)
+            current = agy.sync_live(root)
+            emails = agy.stored_accounts(root)
+            state = agy.load_state(root)
+            now = time.time()
+            if current in emails:
+                live = agy.fetch_quota(agy.read_live() or {}, models)
+                if live.error is None:
+                    agy.record(root, current, live, now)
+                    state = agy.load_state(root)
+            order = agy.rank(emails, current, state, threshold, now)
+            rows = ([current] if current in emails else []) + order + [
+                e for e in emails if e != current and e not in order]
+            if getattr(args, "json", False):
+                print(_json.dumps({"schemaVersion": 1, "threshold": threshold, "accounts": [
+                    {"email": e, "active": e == current, "next": bool(order) and e == order[0],
+                     **(state.get(e) or {})} for e in rows]}))
+                return
+            if not emails:
+                print(dimmed("No agy accounts stored — `cswap agy add` stores the current login, "
+                             "`cswap agy login` signs in another."))
+                return
+            print(bolded("agy accounts:") + " " + muted(f"(in the order they will be used; switch at {threshold:g}%)"))
+            for e in rows:
+                tags = [bold_accent("(active)")] if e == current else (
+                    [muted("(next)")] if order and e == order[0] else
+                    [muted("(waits for its reset)")] if e not in order else [])
+                print(f"  {e} {' '.join(tags)}".rstrip())
+                entry = state.get(e)
+                if not isinstance(entry, dict) or entry.get("life") is None:
+                    print(f"     └ {muted('no reading yet (read while it is the live login)')}")
+                    continue
+                age = int((now - entry.get("at", now)) // 60)
+                print(f"     └ {100 - entry['life']:5.0f}% used   {entry.get('model') or ''}   "
+                      f"{in_time(entry.get('resetAt'))}   {muted(f'read {age} min ago')}")
+            if current and current not in emails:
+                print()
+                warning(f"The live agy login {current} is not stored — run `cswap agy add`.")
+    except agy.AgyError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def _config_command(argv: list[str]) -> None:
     """Handle `cswap config [list|get KEY|set KEY VALUE|unset KEY|path]`.
 
@@ -1317,6 +1427,9 @@ def main() -> None:
         return  # only reachable in tests where sys.exit is mocked
     if argv and argv[0] == "codex":
         _codex_command(argv[1:])
+        return
+    if argv and argv[0] == "agy":
+        _agy_command(argv[1:])
         return
     if len(sys.argv) > 1 and sys.argv[1] == "config":
         _config_command(sys.argv[2:])

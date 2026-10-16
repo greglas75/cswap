@@ -202,6 +202,9 @@ class AutoSwitchSettings:
     # Codex login. Running Codex processes keep the old login in memory, so a
     # host with long-lived sessions restarts them here. None = nothing.
     codex_after_switch: str | None = None
+    # agy (`cswap agy`): comma-separated model-id prefixes whose quota counts
+    # (e.g. "claude-opus,gemini-3.8"). None = every model with a quota.
+    agy_models: str | None = None
     # Pre-freshen: once the ACTIVE account's binding window crosses this
     # utilization, refresh the idle candidates' tokens in the background, so
     # the switch at `threshold` never has to wait on a network refresh. The
@@ -427,6 +430,10 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             "autoswitch", "codexReserveMinLifePct", "codex_reserve_min_life_pct", "float",
             0.0, 100.0,
             help="Skip the Codex reserve once less than this pct of its week is left",
+        ),
+        SettingSpec(
+            "autoswitch", "agyModels", "agy_models", "string",
+            help="agy: model-id prefixes whose quota counts (comma-separated; none = all)",
         ),
         SettingSpec(
             "autoswitch", "codexAfterSwitch", "codex_after_switch", "string",
