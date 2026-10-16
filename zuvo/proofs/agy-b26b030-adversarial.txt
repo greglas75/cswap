@@ -1,0 +1,211 @@
+artifact_kind=adversarial-review
+created_at=2026-10-16T15:45:22Z
+status=partial
+mode=code
+output_format=text
+providers_used=codex-5.3, claude, kimi
+provider_count=3
+providers_attempted=4
+provider_outcomes=codex-5.3:ok,claude:ok,muse:empty,kimi:ok
+REVIEW BY: CODEX-5.3
+REVIEW BY: CLAUDE
+REVIEW BY: KIMI
+reviewed_blob=eae4cc305b7be06b8c482f7bb4daced57c4c4efb
+input_chars=29802
+input_chars_original=29802
+input_truncated=false
+total_findings=20
+critical=1
+warning=15
+info=4
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: codex-5.3, claude, kimi (3 total)
+Mode: code
+Input size: 29802 chars
+Date: 2026-10-16T15:45:22Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CODEX-5.3
+###############################################################
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: src/claude_swap/agy.py:104  
+ID: agy.py:104:keychain-fallback-reverts-login  
+ISSUE: `read_live()` treats a keychain read failure as permission to use the token file, even though the keychain is documented as the macOS authority.  
+ATTACK VECTOR: If the keychain is locked or unavailable after a partial switch, the file can identify a different account. `_sync_live()` can then overwrite that account’s stored copy with stale credentials, and `auto_tick()` can act on the wrong login.  
+SUGGESTED FIX: On macOS, report a keychain read failure and stop synchronization; use the file only when keychain use is disabled.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: src/claude_swap/agy.py:138  
+ID: agy.py:138:partial-live-login-write  
+ISSUE: `write_live()` updates the keychain before the token file, with no rollback if the file write fails.  
+ATTACK VECTOR: A full disk or permission error leaves the two live login stores pointing to different accounts. Later reads can select either account depending on keychain availability.  
+SUGGESTED FIX: Save both previous values and restore the keychain if the file write fails.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: src/claude_swap/agy.py:147  
+ID: agy.py:147:suppressed-keychain-clear-failure  
+ISSUE: `clear_live()` suppresses keychain deletion errors, so `login()` can continue while the old login remains active.  
+ATTACK VECTOR: With a locked keychain, `agy` may still see the old account; after it exits, `login()` can misread or restore the live login despite the user’s sign-in attempt.  
+SUGGESTED FIX: Propagate keychain deletion failures and launch `agy` only after clearing succeeds.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: src/claude_swap/agy.py:276  
+ID: agy.py:276:invalid-quota-response-crashes-tick  
+ISSUE: `parse_models()` assumes `payload["models"]` is a mapping and each model name is a string.  
+ATTACK VECTOR: An unexpected API response raises `AttributeError` or `TypeError`; `fetch_quota()` does not catch errors from `parse_models()`, so a single malformed response aborts a tick.  
+SUGGESTED FIX: Validate the models mapping and names before iterating; return a quota error for an invalid response.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: src/claude_swap/agy.py:326  
+ID: agy.py:326:stale-quota-without-reset  
+ISSUE: `known_life()` keeps a low reading indefinitely when `resetAt` is absent.  
+ATTACK VECTOR: `parse_models()` accepts a model with an unparseable `resetTime` and records `reset_at=None`. If that account was exhausted, `rank()` excludes it forever, even after its quota resets.  
+SUGGESTED FIX: Treat an invalid reset time as an unknown quota reading and avoid recording it as an exhausted window.
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: src/claude_swap/agy.py:111  
+ID: agy.py:111:unverified-id-token-account-name  
+ISSUE: `email_of()` trusts an unverified JWT payload to name the account whose credentials are stored or selected.  
+ATTACK VECTOR: A malformed or altered local token can claim another email, causing `add()` to overwrite that account’s stored credentials or `_switch()` to accept credentials under the wrong account name.  
+SUGGESTED FIX: Verify the ID token before using its email as the storage identity, or obtain the account identity from a trusted source.
+
+SEVERITY: INFO  
+CONFIDENCE: high  
+FILE: src/claude_swap/agy.py:332  
+ID: agy.py:332:rank-docstring-reverses-threshold  
+ISSUE: The `rank()` docstring says an account “past the threshold waits for its reset,” but the code checks `100.0 - life >= threshold`; that is the *used quota* threshold, and an account with no reset time waits indefinitely.  
+ATTACK VECTOR: An operator reading the stated rule can expect recovery after reset while the implementation has no reset time with which to recover.  
+SUGGESTED FIX: Update the docstring to state the used quota rule and require a valid reset time for readings that can block selection.
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/agy.py:222
+ID: agy.py:222:login-interrupt-leaves-logged-out
+ISSUE: `login()` clears the live login, then runs `subprocess.call(["agy"])`. The docstring says the previous login is put back without a new sign-in, but only the "no new login" branch restores it.
+ATTACK VECTOR: The user presses Ctrl-C in agy, or the terminal closes, or `subprocess.call` raises. A `KeyboardInterrupt` skips the restore at lines 226-227. agy stays logged out on both the keychain and the token file. The daemon sees `live-login-not-stored` and does nothing. The stored copy was only written if `add()` succeeded.
+SUGGESTED FIX: Wrap `clear_live()` through `subprocess.call` in `try/except BaseException`. On any exit without a new email, call `write_live(previous)` and re-raise.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/agy.py:98
+ID: agy.py:98:keychain-error-falls-back-stale-file
+ISSUE: `read_live()` swallows every keychain error and falls back to `~/.gemini/jetski-standalone-oauth-token`. On macOS agy refreshes tokens in the keychain, and nothing guarantees the file is current.
+ATTACK VECTOR: A locked keychain (a LaunchAgent with the screen locked) or a transient `security` failure makes `read_live` return the file. The file may hold an older refresh or access token, or a different account if cswap's file write failed after the keychain write. `_sync_live` then overwrites that account's stored copy with the stale data. `_switch` takes `live_email` from the stale file, so its "live login not stored" guard is skipped. The real keychain account is overwritten.
+SUGGESTED FIX: On darwin with keychain mode, treat a keychain exception as "unknown" and return `None`. Only use the file when the keychain item is genuinely absent.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/agy.py:279
+ID: agy.py:279:reset-none-exhausted-forever
+ISSUE: An unparseable `resetTime` gives `reset=None`. `known_life` only treats an account as recovered when `resetAt` is a number, so the stored low `life` never expires.
+ATTACK VECTOR: Google returns RFC3339 with nanosecond fractions ("…:00.123456789Z"). On Python <3.11 `fromisoformat` raises `ValueError`, so `reset=None`. Once that account is read as exhausted and a switch moves away, `rank` excludes it for good. It is never retried while it is idle, and it can only recover if it becomes live again. With two accounts, `no-account-with-room` becomes permanent.
+SUGGESTED FIX: Parse the reset time robustly (truncate the fractional part to 6 digits). If it still fails, record a fallback `resetAt` such as `now + N hours`, or give `known_life` a maximum age.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/cli.py:1210
+ID: cli.py:1210:list-record-without-store-lock
+ISSUE: `cswap agy list` calls `agy.record()` without `store_lock`. `record` does a read-modify-write of `quota.json`, while `auto_tick` does the same under the lock.
+ATTACK VECTOR: The daemon and a manual `list` read the same state. Each adds its own email, and the later `os.replace` drops the other's update. The reading of an exhausted account is lost, so `rank` treats it as never-read (life 100) and switches back onto an exhausted account.
+SUGGESTED FIX: Do `agy.record` inside `with agy.store_lock(root):`, or move load, update and write into a locked `record()`.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: scripts/deploy-hosts.sh:58
+ID: deploy-hosts.sh:58:mac-missing-agy-label-fails
+ISSUE: `deploy_mac` adds `com.greglas.cswap-agy` unconditionally. A kickstart failure is recorded in `bad`. The remote path instead includes `cswap-agy` only if `ctl cat` finds the unit, and the header comment says "once logged in".
+ATTACK VECTOR: The diff adds no LaunchAgent plist. On a Mac without that agent, `launchctl kickstart` fails, `bad` gets `com.greglas.cswap-agy(kickstart)`, and every deploy reports failure.
+SUGGESTED FIX: Skip labels that are not loaded (`launchctl print gui/$(id -u)/$l >/dev/null 2>&1 || continue`), as the remote branch does.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/agy.py:381
+ID: agy.py:381:network-calls-under-exclusive-lock
+ISSUE: `auto_tick` holds the exclusive `flock` across `fetch(...)`, which makes two HTTPS calls with a 20 s timeout each.
+ATTACK VECTOR: A slow or black-holed endpoint holds the lock for up to about 40 s per tick. `cswap agy switch` and `add`, and `sync_live` in `list`, block with no timeout and no message.
+SUGGESTED FIX: Read `live` and `emails` under the lock. Fetch outside it. Retake the lock and re-check that the live email is unchanged before `record` and `_switch`.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/agy.py:281
+ID: agy.py:281:tie-picks-arbitrary-reset-time
+ISSUE: When several models share the lowest `life` (for example several at 0%), `parse_models` keeps the first one iterated, because the comparison is a strict `<`. The account's `resetAt` is therefore that model's reset.
+ATTACK VECTOR: Model X (0%, resets in 5 h) and model Y (0%, resets in 7 days) are both exhausted. If X is recorded, then after 5 h `known_life` calls the account fresh and the daemon switches onto it. The next tick reads it exhausted and switches away again, so the daemon flaps between accounts every interval.
+SUGGESTED FIX: On equal `life`, keep the later `reset`: `life < w.life or (life == w.life and (reset or 0) > (w.reset_at or 0))`.
+
+
+###############################################################
+###   PROVIDER: KIMI
+###############################################################
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/agy.py:206
+ID: agy.py:206:login-interrupt-skips-restore
+ISSUE: `login()` clears the live login, then runs interactive `agy` via `subprocess.call`; any exception/KeyboardInterrupt between `clear_live()` and the restore branch leaves the user logged out, contradicting the docstring claim "Without a new sign-in the previous login is put back."
+ATTACK VECTOR: User hits Ctrl-C (delivered to the whole process group, killing both `agy` and `cswap`) or `subprocess.call`/`read_live` raises mid-flow. The restore only happens in the explicit no-new-login branch, so the previous login — already deleted from keychain AND file — is gone. The token's only other copy is the stored backup, but the user is left with agy logged out and no hint, exactly the "partial write without rollback" case. The test only covers graceful `agy` exit.
+SUGGESTED FIX: Wrap the `subprocess.call` + re-read in `try/finally`: if no valid new login was stored, unconditionally `write_live(previous)` in the finally block.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/agy.py:307
+ID: agy.py:307:record-unlocked-read-modify-write
+ISSUE: `record()` does load-modify-write on quota.json with no lock, and the `list` path in `_agy_command` calls it outside `store_lock`, while the `auto` daemon calls it inside the lock — lost updates.
+ATTACK VECTOR: The deployed cswap-agy daemon (added in deploy-hosts.sh) ticks under `store_lock`; a user running `cswap agy list` concurrently loads state, the daemon records a fresh reading and replaces the file, then `list` writes its stale-merged snapshot — the daemon's reading (the one that gates switching until reset) is silently lost, and an exhausted account can look fresh.
+SUGGESTED FIX: Acquire `store_lock` around the fetch+record block in the `list` command path (or move locking into `record` itself).
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/agy.py:341
+ID: agy.py:341:switch-overwrites-unreadable-live-login
+ISSUE: `_switch`'s "unstored live login" guard only fires when `email_of(live)` parses; an unreadable/unparseable live login (locked keychain, missing id_token) is silently overwritten by `write_live(target)`.
+ATTACK VECTOR: On macOS a locked keychain makes `read_live()` return None (broad `except Exception` fallback hides this), and if the token file is absent/stale the keychain item still holds a real, possibly unstored login. `write_live(target)` then replaces that keychain item — the only copy of that account's login is destroyed, the exact failure the guard two lines above exists to prevent.
+SUGGESTED FIX: Refuse the switch when `live is None` but a keychain item/token file exists (distinguish "no login" from "couldn't read login"), e.g. check existence separately from parsing before `write_live`.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/agy.py:240
+ID: agy.py:240:expired-naive-datetime-local-tz
+ISSUE: `_expired` parses `expiry` with `fromisoformat` and calls `.timestamp()`; if agy writes an offset-less timestamp (RFC3339 variants without `Z`/offset), the naive datetime is interpreted in the machine's local timezone.
+ATTACK VECTOR: On a host in UTC+X, a naively-parsed expiry is off by X hours: an expired token reads as valid (fetch fails with http-401, fail-safe) or — worse — a valid token reads as expired, so `auto_tick` reports "access token expired" forever and rotation silently stalls on that machine while tests (which always use "Z") pass.
+SUGGESTED FIX: After parsing, if `dt.tzinfo is None`, assume UTC: `dt = dt.replace(tzinfo=timezone.utc)`.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/agy.py:317
+ID: agy.py:317:known-life-none-reset-never-fresh
+ISSUE: When `parse_models` fails to parse `resetTime` it stores `resetAt: None`; `known_life` then keeps that reading forever, so an account once seen exhausted is permanently excluded by `rank` — it never counts as fresh.
+ATTACK VECTOR: One malformed/legacy `resetTime` from the API (or a proxy stripping it) bricks an account for rotation: `100.0 - life >= threshold` excludes it on every tick, and since only the live account is ever re-read, the stale reading never heals without manual `cswap agy switch`. With two accounts, rotation deadlocks at "no-account-with-room".
+SUGGESTED FIX: In `known_life`, treat a missing `resetAt` as already-reset (return 100.0) or add a staleness cap on `at`; alternatively have `parse_models` skip models whose `resetTime` is unparseable rather than recording None.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/agy.py:363
+ID: agy.py:363:lock-held-across-network-fetch
+ISSUE: `auto_tick` holds the exclusive `store_lock` across two sequential HTTP POSTs (each `timeout=20`, so ~40 s worst case, plus keychain writes in `_switch`).
+ATTACK VECTOR: While the daemon ticks, every other `cswap agy` command (`list` via `sync_live`, `switch`, `add`) blocks on the flock for up to ~40 s; on a flaky network the CLI appears hung. With `--interval 15` and a 40 s tick, checks also overlap the next sleep cycle, silently halving the intended check rate.
+SUGGESTED FIX: Do the quota fetch outside the lock (re-validate `current` after re-acquiring), or pass a shorter timeout and document that commands may block for one fetch.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
