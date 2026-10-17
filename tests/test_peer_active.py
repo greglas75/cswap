@@ -57,3 +57,11 @@ def test_a_stale_record_says_nothing(temp_home, tmp_path):
     h = peered(temp_home, tmp_path, age=600.0)
     assert h.tick_with_usage({"1": _usage(100), "2": _usage(70), "3": _usage(0)}) is TickOutcome.SWITCHED
     assert h.active_number() == 3
+
+
+def test_the_other_machines_account_is_used_when_nothing_else_has_room(temp_home, tmp_path):
+    """Bug caught (2026-10-17): ryzen-dev held at 96% while the only account
+    with room was the Mac's — the fleet stopped instead of sharing."""
+    h = peered(temp_home, tmp_path, live=1)
+    assert h.tick_with_usage({"1": _usage(96), "2": _usage(100), "3": _usage(30)}) is TickOutcome.SWITCHED
+    assert h.active_number() == 3

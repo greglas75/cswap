@@ -1307,6 +1307,8 @@ class AutoSwitchEngine:
         # daemon does not repeat itself every tick and says it again only
         # when the condition changes.
         self._home_warned: str | None = None
+        # peerActiveFile: the other machine's live slot, set per tick.
+        self._tick_peer: str | None = None
         # Drain episode under dry-run lives here instead of the state file
         # (dry-run must not write anything).
         self._drain_mem: dict | None = None
@@ -1826,11 +1828,12 @@ class AutoSwitchEngine:
         self._drain2_reconcile()
 
         current = self.switcher.current_account_number()
-        # The other machine's account is no landing here (this tick only:
-        # the local set is never persisted, unlike real quarantines).
+        # The other machine's account goes last in every ranking: a landing
+        # only when nothing else has room. Excluding it outright stopped
+        # ryzen-dev at 96% while the one account with room sat under the Mac
+        # (2026-10-17) — sharing an account beats a stopped fleet.
         peer = self._peer_slot(settings)
-        if peer is not None and peer != current:
-            quarantined.add(peer)
+        self._tick_peer = peer if peer != current else None
         if current is None:
             self._emit(
                 PollEvent(active=None, headroom={}, threshold=settings.threshold)
@@ -1961,7 +1964,10 @@ class AutoSwitchEngine:
         # hold-out wins, said once) or quarantined — leaves every tick to
         # the plain rotation.
         home = self._home_slot(settings)
-        pin_active = home is not None and not self._home_inert(home, quarantined)
+        pin_active = (
+            home is not None and not self._home_inert(home, quarantined)
+            and home != self._tick_peer   # the other machine is home: rotate instead
+        )
         peer_collision = settings.peer_yield and peer is not None and peer == current
         if peer_collision and current == home:
             pin_active = False   # the home is the other machine's now: leave it
@@ -3026,6 +3032,9 @@ class AutoSwitchEngine:
                     if life is not None and life >= reserves[num]:
                         kept.append(((order.index(num),), num))
                 qualifying = kept   # keyed by configured reserve order alone
+        # The other machine's live account sorts after every other landing.
+        peer = getattr(self, "_tick_peer", None)
+        qualifying = [((num == peer,) + tuple(key), num) for key, num in qualifying]
         # Ascending by the strategy's key; list order (sequence order) breaks ties.
         qualifying.sort(key=lambda t: t[0])
         return [num for _, num in qualifying], any_known, active_reset_ts
