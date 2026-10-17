@@ -63,8 +63,13 @@ def gemini_home() -> Path:
 
 def live_files() -> list[Path]:
     """Every token file agy may read; the newest existing one is live."""
-    found = [p for p in (gemini_home() / TOKEN_FILE, gemini_home() / CLI_TOKEN_FILE) if p.exists()]
-    return sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)
+    found = []
+    for p in (gemini_home() / TOKEN_FILE, gemini_home() / CLI_TOKEN_FILE):
+        try:
+            found.append((p.stat().st_mtime, p))   # one stat: agy may rewrite it meanwhile
+        except OSError:
+            continue
+    return [p for _, p in sorted(found, reverse=True)]
 
 
 def live_file() -> Path:
@@ -155,7 +160,7 @@ def write_private(path: Path, data: dict) -> None:
         raise
 
 
-def write_live(data: dict) -> None:
+def write_live(data: dict, files: list[Path] | None = None) -> None:
     """The keychain item (macOS) and the token file both get the login."""
     if use_keychain():
         refuse_test_identity(email_of(data), live_file())
@@ -163,7 +168,7 @@ def write_live(data: dict) -> None:
         macos_keychain.set_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, KEYRING_PREFIX + encoded)
     # Both files agy versions read, when present: a stale one left behind
     # would be read back as the live login by a version that prefers it.
-    for path in live_files() or [live_file()]:
+    for path in files or live_files() or [live_file()]:
         write_private(path, data)
 
 
@@ -244,6 +249,8 @@ def login(backup_root: Path) -> str:
     previous = read_live(strict=True)
     if previous is not None:
         add(backup_root)
+    # Put a restored login back where this agy version reads it.
+    were = live_files()
     clear_live()
     fresh = None
     try:
@@ -255,7 +262,7 @@ def login(backup_root: Path) -> str:
         email = email_of(fresh)
         if (fresh is None or email is None or (previous is not None and email == email_of(previous))) \
                 and previous is not None:
-            write_live(previous)
+            write_live(previous, were)
     if fresh is None or email is None or (previous is not None and email == email_of(previous)):
         raise AgyError("no new login — the previous one is back in place")
     with store_lock(backup_root):

@@ -179,3 +179,15 @@ def test_foreign_json_in_the_store_is_not_an_account(env):
     (agy.store_dir(env) / "a@x.com.token.json").write_text(json.dumps(_login("a@x.com")))
     (agy.store_dir(env) / "probe-state.json").write_text(json.dumps({"accounts": {}}))
     assert agy.stored_accounts(env) == ["a@x.com"]
+
+
+def test_an_aborted_login_restores_into_the_file_agy_read(env, monkeypatch):
+    """Bug caught (review): after clearing, the restore guessed the path by
+    platform and could write the file this agy version does not read."""
+    jetski = agy.gemini_home() / agy.TOKEN_FILE
+    jetski.write_text(json.dumps(_login("a@x.com")))
+    monkeypatch.setattr(agy.shutil, "which", lambda name: "/bin/agy")
+    monkeypatch.setattr(agy.subprocess, "call", lambda cmd: 0)
+    with pytest.raises(agy.AgyError):
+        agy.login(env)
+    assert agy.email_of(agy.read_file(jetski)) == "a@x.com"

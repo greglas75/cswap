@@ -338,7 +338,9 @@ def parse_usage(payload: dict) -> Usage:
 
     def count(key: str) -> int | None:
         v = resets.get(key) if isinstance(resets, dict) else None
-        return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+        if isinstance(v, str) and v.strip().isdigit():
+            return int(v)
+        return int(v) if isinstance(v, int) and not isinstance(v, bool) else None
 
     return Usage(
         resets_available=count("available_count"),

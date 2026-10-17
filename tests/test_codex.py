@@ -360,6 +360,7 @@ class TestCredits:
             pytest.param({"available_count": 1, "applicable_available_count": 0}, 1, 0, id="held-not-usable"),
             pytest.param(None, None, None, id="field-absent"),
             pytest.param({"available_count": "x"}, None, None, id="garbage"),
+            pytest.param({"available_count": "2", "applicable_available_count": "1"}, 2, 1, id="numeric-strings"),
         ],
     )
     def test_parse_reads_limit_reset_credits(self, payload, available, applicable):
