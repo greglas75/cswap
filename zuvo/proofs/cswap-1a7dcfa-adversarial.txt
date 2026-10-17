@@ -1,0 +1,136 @@
+artifact_kind=adversarial-review
+created_at=2026-10-17T06:22:46Z
+status=partial
+mode=code
+output_format=text
+providers_used=byteplus-alt, claude
+provider_count=2
+providers_attempted=5
+provider_outcomes=openrouter-3:no-key,byteplus-alt:ok,byteplus-3:no-key,zai:timeout,claude:ok
+adversarial_pass=1/3
+REVIEW BY: BYTEPLUS-ALT
+REVIEW BY: CLAUDE
+reviewed_blob=cb4884ba57627b54e27342bbfcfabaf30ab9883e
+input_chars=8462
+input_chars_original=8462
+input_truncated=false
+total_findings=11
+critical=0
+warning=7
+info=4
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: byteplus-alt, claude (2 total)
+Mode: code
+Input size: 8462 chars
+Date: 2026-10-17T06:22:46Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: BYTEPLUS-ALT
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/agy.py:210
+ID: agy.py:210:stored-accounts-unvalidated-json
+ISSUE: `stored_accounts()` now derives account identity from the *contents* of every `*.json` in the store via `email_of(read_file(p))` with no error handling and no cheap pre-filter. The previous `p.name != QUOTA_STATE` guard was dropped, so `quota.json` (and any file) is parsed too.
+ATTACK VECTOR: The comment itself concedes other tools drop their own JSON into this directory ("2026-10-16: `*.token.json`, probe-state.json"). `read_file` almost certainly does `json.loads(path.read_text())`, so a single malformed file (a partially-written foreign file, a truncated cswap backup from a crashed `write_private`, or a directory accidentally named `*.json` → `IsADirectoryError`) raises out of the comprehension and breaks the entire account listing. Even for well-formed foreign files, if `email_of` doesn't return a value exactly equal to the filename stem, the entry is *silently* omitted — a corrupt or legacy account file vanishes with no warning. Listing now also reads/parses every JSON in the store on each call (was previously content-blind).
+SUGGESTED FIX: Wrap the predicate so a bad file cannot abort the listing, e.g. a helper `def _is_login(p): try: return email_of(read_file(p)) == p.name[:-len(".json")] except (OSError, ValueError): return False`, and re-add `p.name != QUOTA_STATE`.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/agy.py:67
+ID: agy.py:67:live-files-exists-stat-toctou
+ISSUE: `live_files()` tests `p.exists()` in the comprehension and then `p.stat().st_mtime` in the sort key — a check-then-use race on the real filesystem.
+ATTACK VECTOR: `agy` rewrites/rotates its login file concurrently (unlink+recreate). If the file is removed between `exists()` (returns True) and `stat()`, `stat()` raises `FileNotFoundError`, which propagates out of every caller (`live_file()`, `write_live()`, `clear_live()`). On POSIX, a rename-based writer is usually safe, but a delete/shorter window (e.g. keychain sync, another cswap instance) makes this flaky.
+SUGGESTED FIX: Compute mtime defensively, e.g. `found = [p for p in ... if p.is_file()]` and sort with a key that tolerates a vanished file: `key=lambda p: p.stat().st_mtime if p.exists() else 0.0`, or `try/except FileNotFoundError` per path.
+
+SEVERITY: WARNING
+CONFIDENCE: low
+FILE: src/claude_swap/agy.py:168
+ID: agy.py:168:write-live-fallback-missing-parent
+ISSUE: `write_live` only writes to files returned by `live_files()` and otherwise falls back to `live_file()`, which on Linux is the nested `antigravity-cli/antigravity-oauth-token`. Nothing in this code establishes the `antigravity-cli/` directory.
+ATTACK VECTOR: In exactly the scenario the comment names ("a login just cleared" / fresh machine where no token file exists), `live_files()` is empty, the fallback is `CLI_TOKEN_FILE`, and if `write_private` does not `mkdir(parents=True)`, the switch writes into a nonexistent directory and fails — or the file is written but a later agy version that prefers the platform's other path never sees it. The test helper was forced to add `path.parent.mkdir(parents=True, exist_ok=True)`, hinting the nested path is not self-creating.
+SUGGESTED FIX: Ensure the parent exists before writing, e.g. `path.parent.mkdir(parents=True, exist_ok=True)` inside `write_private` (or in `write_live` before `write_private(path, data)`).
+
+SEVERITY: WARNING
+CONFIDENCE: low
+FILE: src/claude_swap/codex.py:341
+ID: codex.py:341:reset-count-nonnumeric-nonfinite
+ISSUE: `count()` returns `None` for any non-`int`/`float` value and calls `int(v)` on any float, without validating finiteness. (`float` also truncates fractional counts.)
+ATTACK VECTOR: (a) If the API serializes a valid count as a numeric *string* (common in JSON APIs), the value is silently discarded and the `limit resets` line never appears — a silent feature regression the test even hard-codes by treating `"x"` as garbage. (b) Python's `json` parses bare `NaN`/`Infinity` by default, so a payload containing `{"available_count": NaN}` makes `int(v)` raise `ValueError`, and `{"...": Infinity}` raise `OverflowError`, aborting `parse_usage`.
+SUGGESTED FIX: Coerce strings and reject non-finite values, e.g. `return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None`, and add optional `int(str)` coercion for numeric strings.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/cli.py:1117
+ID: cli.py:1117:resets-applicable-unknown-as-zero
+ISSUE: `f" ({u.resets_applicable or 0} usable now)"` renders an absent/unknown `resets_applicable` as "0 usable now".
+ATTACK VECTOR: When the payload omits `applicable_available_count` (or it parses to `None`), the UI asserts that zero resets are usable now — a factual claim the data does not support. A user holding resets may be told none are usable.
+SUGGESTED FIX: Render the count only when known, e.g. append `f" ({u.resets_applicable} usable now)"` only if `u.resets_applicable is not None`, otherwise omit the parenthetical or show `?`.
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+Six findings, most severe first. I read the surrounding `agy.py` (`read_file`, `_parse`, `login`, `_switch`) to check them, but I didn't run any of this.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/agy.py:75
+ID: agy.py:75:restore-writes-wrong-file-after-clear
+ISSUE: When no token file exists, `live_file()` guesses the path from the platform only. On non-darwin it always picks the 1.4 file (`antigravity-cli/...`), even if the machine was running an older agy that reads `jetski-standalone-oauth-token`.
+ATTACK VECTOR: On Linux with agy ≤1.3, `login()` calls `clear_live()`, which now unlinks both files. If the user cancels or the sign-in fails, `write_live(previous)` runs with `live_files()` empty and writes only `antigravity-cli/antigravity-oauth-token`. The old agy reads the jetski file, so the machine stays logged out even though `login()` says "the previous one is back in place". The same applies to `_switch` when the live login is already gone: it writes only the 1.4 path.
+SUGGESTED FIX: Remember which files existed before `clear_live()` and restore to those. Or, when nothing exists, write both paths.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/agy.py:64
+ID: agy.py:64:mtime-decides-live-login
+ISSUE: "Newest mtime is live" is the only signal for which file is the current login, and `exists()` then `stat()` is not atomic.
+ATTACK VECTOR: Any `cp`, rsync or restore without `-p`, or a `touch`, makes the stale file the newest. `read_live()` then returns the wrong account, and `_sync_live` can write that stale token into the stored file of the account it names. A partial failure in the `write_live` loop leaves one file with the old account. `stat()` also raises `FileNotFoundError` if a file disappears between `exists()` and `stat()`. That would crash `auto_tick` and `read_live` instead of treating the file as absent.
+SUGGESTED FIX: Wrap `stat()` in `try/except OSError`, skipping the file. Prefer a file whose email matches the stored or last-synced account on a tie or a suspiciously old mtime.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/agy.py:209
+ID: agy.py:209:unparsable-stored-account-hidden
+ISSUE: `stored_accounts` now silently drops any `<email>.json` whose `id_token` doesn't decode to exactly that email. That includes a real stored account whose token file was rewritten without a usable `id_token`.
+ATTACK VECTOR: The account disappears from `list`, from `rank` and from `auto_tick`'s `emails`. `auto_tick` returns the misleading `live-login-not-stored` and stops rotating, even though the file is on disk. The only failure signal is a missing entry. It also reads and parses every file in the store on each call.
+SUGGESTED FIX: Skip only files that are clearly foreign, such as names that aren't a bare email or content that isn't a token dict. For a name-matching file with a bad `id_token`, keep it listed or log a warning.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/codex.py:340
+ID: codex.py:340:int-cast-nan-inf-crash
+ISSUE: `count()` accepts any float and calls `int(v)`, which raises on `NaN` or `Infinity`. It also truncates `1.9` to 1 and accepts negative counts.
+ATTACK VECTOR: Python's `json.loads` accepts `NaN` and `Infinity`. A malformed `available_count` makes `int()` raise `ValueError` or `OverflowError`, so `parse_usage` throws and the whole account's usage line is lost, not just the reset note. The `error` field is meant to carry this kind of failure instead.
+SUGGESTED FIX: Accept only `int`, or a float with `v.is_integer()` and `v >= 0`; otherwise return `None`.
+
+SEVERITY: INFO
+CONFIDENCE: high
+FILE: src/claude_swap/agy.py:4
+ID: agy.py:4:docstring-says-jetski-is-linux-file
+ISSUE: The module docstring says `jetski-standalone-oauth-token` "is what agy reads where no keychain exists (Linux)". The code now treats `antigravity-cli/antigravity-oauth-token` as the Linux default (line 75).
+ATTACK VECTOR: The next maintainer trusts the docstring and removes or breaks the 1.4 path, or assumes one file per platform. That contradicts the new multi-file write loop.
+SUGGESTED FIX: Update the docstring to describe both files and the newest-mtime rule.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/agy.py:164
+ID: agy.py:164:comment-promises-both-files-written
+ISSUE: The comment says "Both files agy versions read, when present", but only files that already exist are written.
+ATTACK VECTOR: If only the 1.4 file exists, nothing is written for a user who later runs an older agy on the same home. That agy finds no login, or finds a stale one it prefers once its file reappears.
+SUGGESTED FIX: Reword the comment to "every token file that exists", or write both paths unconditionally.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
