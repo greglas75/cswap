@@ -480,6 +480,19 @@ def _switch(backup_root: Path, email: str) -> str | None:
     return previous
 
 
+def remove(backup_root: Path, email: str) -> None:
+    """Forget a stored account. The live one has to be switched away from
+    first: its file would be gone while ~/.codex/auth.json still holds it."""
+    email = email.lower()
+    with store_lock(backup_root):
+        path = stored_path(backup_root, email)
+        if not path.exists():
+            raise CodexError(f"{email} is not stored")
+        if email_of(read_auth(live_auth_path())) == email:
+            raise CodexError(f"{email} is the live Codex login — switch to another one first")
+        path.unlink()
+
+
 def usages_for(backup_root: Path, emails: list[str], current: str | None) -> dict[str, Usage]:
     """Usage per stored account; the live one is read with the live tokens."""
     out: dict[str, Usage] = {}

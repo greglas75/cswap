@@ -967,7 +967,7 @@ def _codex_command(argv: list[str]) -> None:
             "then `cswap codex add` — once per account, per machine."
         ),
     )
-    sub = parser.add_subparsers(dest="action", metavar="{login,add,list,switch,auto}")
+    sub = parser.add_subparsers(dest="action", metavar="{login,add,list,switch,remove,auto}")
     p_login = sub.add_parser(
         "login",
         help="Log in another account and store it, leaving the live login intact",
@@ -981,6 +981,8 @@ def _codex_command(argv: list[str]) -> None:
     p_list.add_argument("--json", action="store_true", help="Machine-readable output")
     p_switch = sub.add_parser("switch", help="Make a stored account the live login")
     p_switch.add_argument("email")
+    p_remove = sub.add_parser("remove", help="Forget a stored account (the live one: switches away first)")
+    p_remove.add_argument("email")
     p_auto = sub.add_parser("auto", help="Switch at the weekly threshold (loop)")
     p_auto.add_argument("--once", action="store_true", help="One decision, then exit")
     p_auto.add_argument("--interval", type=float, default=60.0, help="Seconds between checks")
@@ -1023,6 +1025,24 @@ def _codex_command(argv: list[str]) -> None:
                     status = codex.run_after_switch(settings.codex_after_switch, previous, args.email.lower())
                     print(dimmed(f"after-switch hook: {status}"))
                 print(dimmed("New codex processes use it; restart running sessions to move them."))
+        elif args.action == "remove":
+            target = args.email.lower()
+            current = codex.sync_live(root)
+            if current == target:
+                emails = codex.stored_accounts(root)
+                usages = codex.usages_for(root, emails, current)
+                order = [e for e in codex.rank(usages, current, threshold, weekly, None, 0.0) if e != target]
+                if not order:
+                    raise codex.CodexError(f"{target} is the live login and no other stored account can take over")
+                codex.switch(root, order[0])
+                print(f"Codex login: {target} -> {order[0]}")
+                if settings.codex_after_switch:
+                    status = codex.run_after_switch(settings.codex_after_switch, target, order[0])
+                    print(dimmed(f"after-switch hook: {status}"))
+            codex.remove(root, target)
+            print(f"Removed Codex account {target}")
+            if reserve == target:
+                print(dimmed("It was autoswitch.codexReserveAccount — clear it: cswap config unset autoswitch.codexReserveAccount"))
         elif args.action == "auto":
             while True:
                 try:

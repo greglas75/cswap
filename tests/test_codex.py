@@ -579,3 +579,21 @@ def test_list_json_with_no_accounts_is_still_json(env, monkeypatch, capsys):
     monkeypatch.setattr(paths, "get_backup_root", lambda: env)
     cli._codex_command(["list", "--json"])
     assert json.loads(capsys.readouterr().out)["accounts"] == []
+
+
+class TestRemove:
+    def test_remove_forgets_a_stored_account(self, env):
+        _login(_auth("b@x.com"))
+        codex.add(env)
+        _login(_auth("a@x.com"))
+        codex.add(env)
+        codex.remove(env, "B@x.com")
+        assert codex.stored_accounts(env) == ["a@x.com"]
+
+    def test_remove_refuses_the_live_login(self, env):
+        """Bug caught: the live login's only stored copy deleted while Codex runs on it."""
+        _login(_auth("a@x.com"))
+        codex.add(env)
+        with pytest.raises(codex.CodexError):
+            codex.remove(env, "a@x.com")
+        assert codex.stored_accounts(env) == ["a@x.com"]
