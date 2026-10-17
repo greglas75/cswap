@@ -354,6 +354,19 @@ class TestCredits:
         })
         assert u.credits_balance == 32041.65 and u.credits_usable is False
 
+    @pytest.mark.parametrize(
+        ("payload", "available", "applicable"),
+        [
+            pytest.param({"available_count": 1, "applicable_available_count": 0}, 1, 0, id="held-not-usable"),
+            pytest.param(None, None, None, id="field-absent"),
+            pytest.param({"available_count": "x"}, None, None, id="garbage"),
+        ],
+    )
+    def test_parse_reads_limit_reset_credits(self, payload, available, applicable):
+        """Bug caught: the list hiding a limit reset the account could spend."""
+        u = codex.parse_usage({"rate_limit": {}, "rate_limit_reset_credits": payload})
+        assert (u.resets_available, u.resets_applicable) == (available, applicable)
+
 
 class TestReviewFixes:
     """zuvo:review 2026-10-05 on the codex rotation."""

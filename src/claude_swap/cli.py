@@ -1075,6 +1075,8 @@ def _codex_command(argv: list[str]) -> None:
                         "limitReached": u.limit_reached,
                         "creditsBalance": u.credits_balance,
                         "creditsUsable": u.credits_usable,
+                        "resetsAvailable": u.resets_available,
+                        "resetsApplicable": u.resets_applicable,
                         "error": u.error,
                     })
                 print(_json.dumps({
@@ -1112,6 +1114,9 @@ def _codex_command(argv: list[str]) -> None:
                 credit_note = ""
                 if u.credits_balance is not None:
                     credit_note = f"   credits {u.credits_balance:,.0f}" + ("" if u.credits_usable else " (blocked)")
+                if u.resets_available:
+                    credit_note += (f"   limit resets: {u.resets_available}"
+                                    f" ({u.resets_applicable or 0} usable now)")
                 week = f"{u.weekly_pct:5.0f}%" if u.weekly_pct is not None else "    ?"
                 print(f"     └ week:  {week}   {in_time(u.weekly_reset_at)}{muted(credit_note)}")
             if current and current not in emails:

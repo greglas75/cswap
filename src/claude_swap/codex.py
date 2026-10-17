@@ -249,6 +249,10 @@ class Usage:
     # Credits are usable: the account has them and no spend cap stopped them.
     credits_usable: bool = False
     credits_unlimited: bool = False
+    # Limit resets the account holds (`rate_limit_reset_credits`): how many in
+    # all, and how many apply right now (a reset only applies to a window in use).
+    resets_available: int | None = None
+    resets_applicable: int | None = None
 
     def on_credits_ok(self) -> bool:
         return (
@@ -330,7 +334,15 @@ def parse_usage(payload: dict) -> Usage:
         and not credits.get("overage_limit_reached")
         and not spend.get("reached")
     )
+    resets = payload.get("rate_limit_reset_credits") or {}
+
+    def count(key: str) -> int | None:
+        v = resets.get(key) if isinstance(resets, dict) else None
+        return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
     return Usage(
+        resets_available=count("available_count"),
+        resets_applicable=count("applicable_available_count"),
         credits_balance=balance,
         credits_usable=usable,
         credits_unlimited=bool(credits.get("unlimited")),
