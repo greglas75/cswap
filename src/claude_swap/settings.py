@@ -194,6 +194,15 @@ class AutoSwitchSettings:
     # it until its threshold or the reset. Reserves included — what is left
     # at the reset is gone either way. 0 = off (default).
     burn_before_reset_minutes: float = 0.0
+    # Two machines, one pool (owner, 2026-10-17: the Mac and ryzen-dev
+    # switched onto the same account in the same minute all day, burned it at
+    # twice the rate, hit 100% before the pace switch and stopped agents).
+    # ``peer_active_file`` holds the other machine's live account
+    # ({"email", "at"}), refreshed by scripts/peer-sync.sh; while fresh, that
+    # account is never a landing here. ``peer_yield``: on a collision this
+    # machine leaves (set it on ONE side only, or both would leave).
+    peer_active_file: str | None = None
+    peer_yield: bool = False
     # Codex (`cswap codex`): its own reserve — always last in the queue, and
     # dropped once less than `codex_reserve_min_life_pct` of its week is left.
     codex_reserve_account: str | None = None
@@ -413,6 +422,14 @@ SETTING_SPECS: dict[str, SettingSpec] = {
                 "Move the login onto an account whose week resets within this "
                 "many minutes and still has room, ahead of the home (0 = off)"
             ),
+        ),
+        SettingSpec(
+            "autoswitch", "peerActiveFile", "peer_active_file", "string",
+            help="File with the other machine's live account; it is never a landing here while fresh",
+        ),
+        SettingSpec(
+            "autoswitch", "peerYield", "peer_yield", "bool",
+            help="On the same account as the other machine, this one leaves (set on one side only)",
         ),
         SettingSpec(
             "autoswitch", "reserveMinLifePct", "reserve_min_life_pct", "float",

@@ -149,6 +149,8 @@ HOME_RETURN_MIN_HEADROOM_PCT = 20.0
 MIN_USEFUL_LIFE_PCT = 10.0
 # burnBeforeResetMinutes: less weekly life than this is not worth a move.
 BURN_MIN_LIFE_PCT = 2.0
+# peerActiveFile: an older record no longer says where the other machine is.
+PEER_MAX_AGE_S = 180.0
 
 
 def _home_return_margin(settings: AutoSwitchSettings) -> float:
@@ -1824,6 +1826,11 @@ class AutoSwitchEngine:
         self._drain2_reconcile()
 
         current = self.switcher.current_account_number()
+        # The other machine's account is no landing here (this tick only:
+        # the local set is never persisted, unlike real quarantines).
+        peer = self._peer_slot(settings)
+        if peer is not None and peer != current:
+            quarantined.add(peer)
         if current is None:
             self._emit(
                 PollEvent(active=None, headroom={}, threshold=settings.threshold)
@@ -1955,6 +1962,9 @@ class AutoSwitchEngine:
         # the plain rotation.
         home = self._home_slot(settings)
         pin_active = home is not None and not self._home_inert(home, quarantined)
+        peer_collision = settings.peer_yield and peer is not None and peer == current
+        if peer_collision and current == home:
+            pin_active = False   # the home is the other machine's now: leave it
         if (
             settings.home_mode == "prefer"
             and current == home
@@ -2145,7 +2155,7 @@ class AutoSwitchEngine:
         # it stays put quietly (below, no alert). The ranking judges peers
         # against the threshold line rather than the reserve's own headroom,
         # so a reserve with more room than a healthy peer still steps aside.
-        on_reserve = current in self._reserve_slots(settings, usage)
+        on_reserve = current in self._reserve_slots(settings, usage) or peer_collision
 
         def rank_headroom(h: float | None) -> float | None:
             if on_reserve and h is not None:
@@ -2449,8 +2459,11 @@ class AutoSwitchEngine:
                 # Past the threshold the ordinary paths below run.
                 self._emit(
                     NoSwitchEvent(
-                        reason="reserve-active",
+                        reason="peer-collision" if peer_collision else "reserve-active",
                         detail=(
+                            f"Account-{current} is also live on the other machine; "
+                            "no other account has room to take over yet"
+                            if peer_collision else
                             f"Account-{current} is the reserve; no other "
                             "account has room to take over yet"
                         ),
@@ -3546,6 +3559,26 @@ class AutoSwitchEngine:
             return None
         if self._home_warned and self._home_warned.startswith("unknown:"):
             self._home_warned = None
+        return number
+
+    def _peer_slot(self, settings: AutoSwitchSettings) -> str | None:
+        """The other machine's live account as a local slot, while its record
+        is fresh (``peerActiveFile``); None when off, stale or unknown here."""
+        if not settings.peer_active_file:
+            return None
+        try:
+            record = json.loads(Path(settings.peer_active_file).expanduser().read_text())
+        except (OSError, ValueError):
+            return None
+        if not isinstance(record, dict) or not isinstance(record.get("email"), str):
+            return None
+        at = record.get("at")
+        if not isinstance(at, (int, float)) or abs(self.clock() - at) > PEER_MAX_AGE_S:
+            return None
+        try:
+            number, _email, _org = self.switcher.resolve_account(record["email"])
+        except ClaudeSwitchError:
+            return None
         return number
 
     def _reserve_slots(
