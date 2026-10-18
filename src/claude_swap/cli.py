@@ -1366,6 +1366,202 @@ def _cursor_command(argv: list[str]) -> None:
         sys.exit(1)
 
 
+def _mimo_command(argv: list[str]) -> None:
+    """Handle `cswap mimo {login,add,list,switch,remove,auto}` — Xiaomi MiMo Code rotation.
+
+    See :mod:`claude_swap.mimo`: usage is not readable with the key, so the
+    auto loop probes with a 1-token request.
+    """
+    import json as _json
+    import time
+    from datetime import datetime, timezone
+
+    from claude_swap import mimo
+    from claude_swap.printer import bold_accent
+
+    parser = argparse.ArgumentParser(
+        prog="cswap mimo",
+        description="Rotate Xiaomi MiMo Code (mimo) Token Plan logins. `cswap mimo add` stores the "
+                    "current one, `cswap mimo login` signs in another — per machine.",
+    )
+    sub = parser.add_subparsers(dest="action", metavar="{login,add,list,switch,remove,auto}")
+    sub.add_parser("login", help="Store the current login, then /login another account in mimo")
+    sub.add_parser("add", help="Store the account mimo is logged in with now")
+    p_list = sub.add_parser("list", help="Stored accounts with their last probe")
+    p_list.add_argument("--json", action="store_true", help="Machine-readable output")
+    p_switch = sub.add_parser("switch", help="Make a stored account the live login")
+    p_switch.add_argument("uid")
+    p_remove = sub.add_parser("remove", help="Forget a stored account (not the live one)")
+    p_remove.add_argument("uid")
+    p_auto = sub.add_parser("auto", help="Probe the live account; move on when it is refused (loop)")
+    p_auto.add_argument("--once", action="store_true", help="One decision, then exit")
+    p_auto.add_argument("--interval", type=float, default=600.0, help="Seconds between probes (min 60)")
+    p_auto.add_argument("--dry-run", action="store_true", help="Decide, never switch")
+    args = parser.parse_args(argv)
+    root = paths.get_backup_root()
+
+    try:
+        if args.action == "login":
+            print(f"Stored mimo account {mimo.login(root)}")
+        elif args.action == "add":
+            print(f"Stored mimo account {mimo.add(root)}")
+        elif args.action == "remove":
+            mimo.remove(root, args.uid)
+            print(f"Removed mimo account {args.uid}")
+        elif args.action == "switch":
+            previous = mimo.switch(root, args.uid)
+            if previous == args.uid:
+                print(f"{args.uid} is already the live mimo login")
+            else:
+                print(f"mimo login: {previous or 'none'} -> {args.uid}")
+                print(dimmed("New mimo processes use it; running sessions keep the old login."))
+        elif args.action == "auto":
+            while True:
+                try:
+                    event = mimo.auto_tick(root, dry_run=args.dry_run)
+                except Exception as e:  # one bad tick never ends the loop
+                    event = {"event": "mimo-error", "message": f"{type(e).__name__}: {e}"}
+                event["ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+                print(_json.dumps(event), flush=True)
+                if args.once:
+                    break
+                time.sleep(max(60.0, args.interval))
+        else:  # list (default)
+            current = mimo.sync_live(root)
+            uids = mimo.stored_accounts(root)
+            state = mimo.load_state(root)
+            rows = ([current] if current in uids else []) + [u for u in uids if u != current]
+            if getattr(args, "json", False):
+                print(_json.dumps({"schemaVersion": 1, "accounts": [
+                    {"uid": u, "active": u == current, **(state.get(u) or {})} for u in rows]}))
+                return
+            if not uids:
+                print(dimmed("No mimo accounts stored — `cswap mimo add` stores the current login, "
+                             "`cswap mimo login` signs in another."))
+                return
+            print(bolded("mimo accounts:") + " " + muted("(usage is on the web console only; the daemon "
+                                                          "probes and moves on when refused)"))
+            now = time.time()
+            for u in rows:
+                print(f"  {u} {bold_accent('(active)') if u == current else ''}".rstrip())
+                entry = state.get(u)
+                if not isinstance(entry, dict):
+                    print(f"     └ {muted('not probed yet')}")
+                    continue
+                age = int((now - entry.get('at', now)) // 60)
+                detail = f" ({entry.get('status')})" if entry.get("status") not in (None, 200) else ""
+                print(f"     └ {entry.get('state')}{detail}   {muted(f'probed {age} min ago')}")
+            if current and current not in uids:
+                print()
+                warning(f"The live mimo login {current} is not stored — run `cswap mimo add`.")
+    except mimo.MimoError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _alibaba_command(argv: list[str]) -> None:
+    """Handle `cswap alibaba {login,add,list,switch,remove,auto}` — Qwen Code on
+    an Alibaba Model Studio Token Plan. See :mod:`claude_swap.alibaba`."""
+    import json as _json
+    import time
+    from datetime import datetime, timezone
+
+    from claude_swap import alibaba
+    from claude_swap.printer import bold_accent
+    from claude_swap.settings import load_settings
+
+    parser = argparse.ArgumentParser(
+        prog="cswap alibaba",
+        description="Rotate Alibaba Model Studio Token Plan accounts for Qwen Code (key + Bailian CLI "
+                    "login per account). `cswap alibaba add` stores the current one.",
+    )
+    sub = parser.add_subparsers(dest="action", metavar="{login,add,list,switch,remove,auto}")
+    sub.add_parser("login", help="Store the current account, then `bl auth login` + Token Plan key of another")
+    sub.add_parser("add", help="Store the account Qwen Code and bl use now")
+    p_list = sub.add_parser("list", help="Stored accounts with their monthly usage")
+    p_list.add_argument("--json", action="store_true", help="Machine-readable output")
+    p_switch = sub.add_parser("switch", help="Make a stored account the live one")
+    p_switch.add_argument("workspace")
+    p_remove = sub.add_parser("remove", help="Forget a stored account (not the live one)")
+    p_remove.add_argument("workspace")
+    p_auto = sub.add_parser("auto", help="Switch when the live account's usage reaches the threshold (loop)")
+    p_auto.add_argument("--once", action="store_true", help="One decision, then exit")
+    p_auto.add_argument("--interval", type=float, default=600.0, help="Seconds between checks (min 60)")
+    p_auto.add_argument("--dry-run", action="store_true", help="Decide, never switch")
+    args = parser.parse_args(argv)
+    root = paths.get_backup_root()
+    threshold = load_settings(root).threshold
+
+    def in_time(ts) -> str:
+        if not isinstance(ts, (int, float)):
+            return ""
+        left = max(0, int(ts - time.time()))
+        days, rem = divmod(left, 86400)
+        return f"resets in {days}d {rem // 3600}h" if days else f"resets in {rem // 3600}h {rem % 3600 // 60}m"
+
+    try:
+        if args.action == "login":
+            print(f"Stored Alibaba account {alibaba.login(root)}")
+        elif args.action == "add":
+            print(f"Stored Alibaba account {alibaba.add(root)}")
+        elif args.action == "remove":
+            alibaba.remove(root, args.workspace)
+            print(f"Removed Alibaba account {args.workspace}")
+        elif args.action == "switch":
+            previous = alibaba.switch(root, args.workspace)
+            if previous == args.workspace:
+                print(f"{args.workspace} is already the live Alibaba account")
+            else:
+                print(f"Alibaba account: {previous or 'none'} -> {args.workspace}")
+                print(dimmed("New qwen processes use it; running sessions keep the old key."))
+        elif args.action == "auto":
+            while True:
+                try:
+                    event = alibaba.auto_tick(root, threshold, dry_run=args.dry_run)
+                except Exception as e:  # one bad tick never ends the loop
+                    event = {"event": "alibaba-error", "message": f"{type(e).__name__}: {e}"}
+                event["ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+                print(_json.dumps(event), flush=True)
+                if args.once:
+                    break
+                time.sleep(max(60.0, args.interval))
+        else:  # list (default)
+            current = alibaba.sync_live(root)
+            workspaces = alibaba.stored_accounts(root)
+            usages = alibaba.usages_for(root, workspaces, current)
+            order = alibaba.rank(usages, current, threshold)
+            rows = ([current] if current in workspaces else []) + order + [
+                w for w in workspaces if w != current and w not in order]
+            if getattr(args, "json", False):
+                print(_json.dumps({"schemaVersion": 1, "threshold": threshold, "accounts": [
+                    {"workspace": w, "active": w == current, "next": bool(order) and w == order[0],
+                     "usedPct": usages[w].pct, "resetAt": usages[w].reset_at, "error": usages[w].error}
+                    for w in rows]}))
+                return
+            if not workspaces:
+                print(dimmed("No Alibaba accounts stored — `cswap alibaba add` stores the current one, "
+                             "`cswap alibaba login` signs in another."))
+                return
+            print(bolded("Alibaba Token Plan accounts:") + " " +
+                  muted(f"(in the order they will be used; switch at {threshold:g}%)"))
+            for w in rows:
+                tags = [bold_accent("(active)")] if w == current else (
+                    [muted("(next)")] if order and w == order[0] else
+                    [muted("(waits for its reset)")] if w not in order else [])
+                print(f"  {w} {' '.join(tags)}".rstrip())
+                u = usages[w]
+                if u.error is not None:
+                    print(f"     └ {muted('usage unknown: ' + u.error)}")
+                    continue
+                print(f"     └ {u.pct:5.1f}% used   {in_time(u.reset_at)}")
+            if current and current not in workspaces:
+                print()
+                warning(f"The live Alibaba account {current} is not stored — run `cswap alibaba add`.")
+    except alibaba.AlibabaError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def _config_command(argv: list[str]) -> None:
     """Handle `cswap config [list|get KEY|set KEY VALUE|unset KEY|path]`.
 
@@ -1567,6 +1763,12 @@ def main() -> None:
         return
     if argv and argv[0] == "cursor":
         _cursor_command(argv[1:])
+        return
+    if argv and argv[0] == "mimo":
+        _mimo_command(argv[1:])
+        return
+    if argv and argv[0] in ("alibaba", "qwen"):
+        _alibaba_command(argv[1:])
         return
     if len(sys.argv) > 1 and sys.argv[1] == "config":
         _config_command(sys.argv[2:])

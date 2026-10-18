@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # deploy-hosts.sh — put THIS checkout's HEAD on every machine cswap runs on, in one go:
 #
-#   mac        LaunchAgents com.greglas.claude-account-switcher + com.greglas.cswap-codex run
+#   mac        LaunchAgents com.greglas.claude-account-switcher + cswap-codex/agy/cursor/mimo/alibaba run
 #              this checkout's .venv (editable install) — they only need a restart.
 #   ryzen-dev  user greglas, systemd --user units cswap-auto + cswap-codex (cc-remote), cswap-agy once logged in, cswap-cursor.
 #   ryzen      ryzen-tf, as root: the CI user gha, system units cswap-auto + cswap-codex.
@@ -55,7 +55,7 @@ done
 '
 
 deploy_mac() {
-  local labels=(com.greglas.claude-account-switcher com.greglas.cswap-codex com.greglas.cswap-agy com.greglas.cswap-cursor) l old new bad=""
+  local labels=(com.greglas.claude-account-switcher com.greglas.cswap-codex com.greglas.cswap-agy com.greglas.cswap-cursor com.greglas.cswap-mimo com.greglas.cswap-alibaba) l old new bad=""
   for l in "${labels[@]}"; do
     old=$(launchctl list "$l" 2>/dev/null | awk -F'= ' '/"PID"/{gsub(/;/,"",$2); print $2}')
     launchctl kickstart -k "gui/$(id -u)/$l" >/dev/null 2>&1 || { bad="$bad $l(kickstart)"; continue; }
