@@ -1355,7 +1355,7 @@ def _cursor_command(argv: list[str]) -> None:
                 if u.error is not None:
                     print(f"     └ {muted('usage unknown: ' + u.error)}")
                     continue
-                extra = (f"   on-demand ${u.on_demand_used:g}/${u.on_demand_limit:g}"
+                extra = (f"   on-demand ${u.on_demand_used or 0:g}/${u.on_demand_limit:g}"
                          if u.on_demand_limit else "")
                 print(f"     └ {u.pct:5.0f}% used   {in_time(u.reset_at)}{extra}")
             if current and current not in emails:

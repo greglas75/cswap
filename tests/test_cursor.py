@@ -63,8 +63,10 @@ def test_half_written_login_is_not_named(piece):
                      42.0, 1793370023.0, None, id="ms-cycle-end"),
         pytest.param({"billingCycleEnd": 1793370023, "planUsage": {"totalPercentUsed": 1}},
                      1.0, 1793370023.0, None, id="seconds-cycle-end"),
-        pytest.param({"planUsage": {"limit": 40000}}, 0.0, None, None,
-                     id="proto3-omits-zero-percent"),
+        pytest.param({"billingCycleEnd": "4102444800000", "planUsage": {"limit": 40000}},
+                     0.0, 4102444800.0, None, id="proto3-omits-zero-percent"),
+        pytest.param({"billingCycleEnd": "1000000000000", "planUsage": {"limit": 40000}},
+                     None, 1000000000.0, "no plan usage in the reply", id="missing-percent-past-cycle"),
         pytest.param({"planUsage": {"totalPercentUsed": True}}, None, None,
                      "no plan usage in the reply", id="bool-is-not-a-percent"),
         pytest.param({}, None, None, "no plan usage in the reply", id="empty-reply"),
@@ -149,18 +151,23 @@ def test_failed_config_write_puts_the_old_tokens_back(env, monkeypatch):
     with pytest.raises(OSError):
         cursor.switch(env, "b@x.com")
     assert cursor.read_live() == _login("a@x.com")
+    assert cursor.stored_accounts(env) == ["a@x.com", "b@x.com"]
 
 
-def test_switch_refuses_an_unidentifiable_live_login(env):
+@pytest.mark.parametrize("damage", ["foreign-token", "no-authinfo"])
+def test_switch_refuses_an_unidentifiable_live_login(env, damage):
     """Bug caught: overwriting a live login nobody has a copy of because its
-    pieces disagree."""
+    pieces disagree or its authInfo is gone."""
     _two(env)
-    torn = _login("a@x.com")
+    torn = _login("new@x.com")
     torn["accessToken"] = _jwt("auth0|someone-else")
     _live(torn)
+    if damage == "no-authinfo":
+        cursor.config_file().write_text("{}")
+    before = cursor.read_live()
     with pytest.raises(cursor.CursorError, match="cannot be identified"):
         cursor.switch(env, "b@x.com")
-    assert cursor.read_live() == torn
+    assert cursor.read_live() == before
 
 
 def test_switch_refuses_when_the_live_login_is_not_stored(env):
@@ -219,6 +226,18 @@ def test_failed_login_puts_the_previous_one_back(env, monkeypatch):
     assert calls == [["cursor-agent", "login"]]
     assert cursor.read_live() == _login("a@x.com")
     assert cursor.stored_accounts(env) == ["a@x.com"]
+
+
+def test_failed_login_keeps_an_unnamed_login_as_it_was(env, monkeypatch):
+    """Bug caught: tokens without authInfo deleted by a login that then fails."""
+    _live(_login("a@x.com"), {"model": "auto"})
+    cursor.config_file().write_text(json.dumps({"model": "auto"}))
+    before = cursor.read_live()
+    _fake_login(monkeypatch)
+    with pytest.raises(cursor.CursorError):
+        cursor.login(env)
+    assert cursor.read_live() == before
+    assert json.loads(cursor.config_file().read_text()) == {"model": "auto"}
 
 
 def test_relogin_of_the_same_account_keeps_the_fresh_tokens(env, monkeypatch):

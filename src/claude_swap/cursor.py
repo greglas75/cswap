@@ -121,8 +121,10 @@ def email_of(login: dict | None) -> str | None:
 
 
 def read_live(strict: bool = False) -> dict | None:
-    """The live login: tokens plus authInfo. ``strict`` raises when the keychain
-    cannot be read (callers about to overwrite the login)."""
+    """The live login: tokens plus authInfo (None when cli-config.json lacks it:
+    tokens nobody can name are still a login, never "logged out").
+    ``strict`` raises when the keychain cannot be read (callers about to
+    overwrite the login)."""
     if use_keychain():
         try:
             access = macos_keychain.get_password(ACCESS_SERVICE, KEYCHAIN_ACCOUNT)
@@ -134,10 +136,11 @@ def read_live(strict: bool = False) -> dict | None:
     else:
         tokens = _read_json(auth_file()) or {}
         access, refresh = tokens.get("accessToken"), tokens.get("refreshToken")
-    info = (_read_json(config_file()) or {}).get("authInfo")
-    if not access or not isinstance(info, dict):
+    if not access:
         return None
-    return {"accessToken": access, "refreshToken": refresh, "authInfo": info}
+    info = (_read_json(config_file()) or {}).get("authInfo")
+    return {"accessToken": access, "refreshToken": refresh,
+            "authInfo": info if isinstance(info, dict) else None}
 
 
 def _read_config() -> dict:
@@ -159,21 +162,29 @@ def _read_config() -> dict:
 
 
 def _write_pieces(login: dict) -> None:
+    """All three pieces exactly as given — a missing refresh token or authInfo
+    is removed, never left over from the account before."""
     if use_keychain():
         macos_keychain.set_password(ACCESS_SERVICE, KEYCHAIN_ACCOUNT, login["accessToken"])
-        macos_keychain.set_password(REFRESH_SERVICE, KEYCHAIN_ACCOUNT, login["refreshToken"])
+        if login.get("refreshToken"):
+            macos_keychain.set_password(REFRESH_SERVICE, KEYCHAIN_ACCOUNT, login["refreshToken"])
+        else:
+            macos_keychain.delete_password(REFRESH_SERVICE, KEYCHAIN_ACCOUNT)
     else:
         _write_private(auth_file(), {"accessToken": login["accessToken"],
-                                     "refreshToken": login["refreshToken"]})
+                                     "refreshToken": login.get("refreshToken")})
     config = _read_config()
-    config["authInfo"] = login["authInfo"]
+    if login.get("authInfo") is not None:
+        config["authInfo"] = login["authInfo"]
+    else:
+        config.pop("authInfo", None)
     _write_private(config_file(), config)
 
 
 def write_live(login: dict, previous: dict | None = None) -> None:
     """Make ``login`` the live one: access + refresh token + authInfo, all of
-    one verified account. A failure part-way puts ``previous`` back, so the
-    live pieces never describe two accounts."""
+    one verified account. A failure part-way puts ``previous`` back; when that
+    fails too, the error says the live login may be mixed."""
     email = email_of(login)
     if email is None:
         raise CursorError("refusing to write a login whose tokens and authInfo disagree")
@@ -181,18 +192,22 @@ def write_live(login: dict, previous: dict | None = None) -> None:
     _read_config()   # fail before touching the tokens, not after
     try:
         _write_pieces(login)
-    except BaseException:
-        if previous is not None and email_of(previous) is not None:
-            with contextlib.suppress(Exception):
+    except BaseException as e:
+        if previous is not None:
+            try:
                 _write_pieces(previous)
+            except Exception as rollback:  # noqa: BLE001
+                raise CursorError(
+                    f"writing {email} failed ({e}) and putting the previous login back failed too "
+                    f"({rollback}) — the live Cursor login may be mixed: run `cursor-agent login`"
+                ) from e
         raise
 
 
 def clear_live() -> None:
     if use_keychain():
-        for service in (ACCESS_SERVICE, REFRESH_SERVICE):
-            with contextlib.suppress(Exception):
-                macos_keychain.delete_password(service, KEYCHAIN_ACCOUNT)
+        for service in (ACCESS_SERVICE, REFRESH_SERVICE):   # absent counts as deleted
+            macos_keychain.delete_password(service, KEYCHAIN_ACCOUNT)
     else:
         with contextlib.suppress(FileNotFoundError):
             auth_file().unlink()
@@ -263,23 +278,29 @@ def add(backup_root: Path) -> str:
 def login(backup_root: Path) -> str:
     """Store the current login, clear it locally (no `logout`: that may revoke
     the tokens server-side), run `cursor-agent login`, store the new one.
-    Without a new login the previous one is put back."""
+    Without a new login the previous one is put back (also one nobody could
+    name — it is kept exactly as it was)."""
     if shutil.which("cursor-agent") is None:
         raise CursorError("cursor-agent is not on PATH")
-    previous = read_live(strict=True)
-    if previous is not None:
-        add(backup_root)
     with store_lock(backup_root):   # not mid-switch of the auto daemon
-        clear_live()
+        previous = read_live(strict=True)
+        if email_of(previous) is not None:
+            _write_private(stored_path(backup_root, email_of(previous)), previous)
     fresh = email = None
+    read_failed = False
     try:
+        with store_lock(backup_root):
+            clear_live()
         subprocess.call(["cursor-agent", "login"])
+        read_failed = True
         fresh = read_live(strict=True)
+        read_failed = False
         email = email_of(fresh)
     finally:
-        if email is None and previous is not None:
+        # A keychain hiccup right after a good login must not replace it.
+        if email is None and previous is not None and not read_failed:
             with store_lock(backup_root):
-                write_live(previous)
+                _write_pieces(previous)
     if email is None:
         raise CursorError("no new login — the previous one is back in place" if previous is not None
                           else "no new login")
@@ -296,7 +317,7 @@ def remove(backup_root: Path, email: str) -> None:
         path = stored_path(backup_root, email)
         if not path.exists():
             raise CursorError(f"{email} is not stored")
-        if email_of(read_live()) == email:
+        if email_of(read_live(strict=True)) == email:
             raise CursorError(f"{email} is the live Cursor login — switch to another one first")
         path.unlink()
 
@@ -335,7 +356,7 @@ def parse_usage(payload: dict) -> Usage:
         except (TypeError, ValueError):
             return None
 
-    if pct is None and plan:
+    if pct is None and reset is not None and reset > time.time():
         pct = 0   # proto3 JSON leaves zero-valued fields out (a fresh cycle)
     if not isinstance(pct, (int, float)) or isinstance(pct, bool) or not 0 <= pct <= 1000:
         return Usage(None, reset, error="no plan usage in the reply")
@@ -375,8 +396,10 @@ def usages_for(backup_root: Path, emails: list[str], current: str | None) -> dic
 def rank(usages: dict[str, Usage], current: str | None, threshold: float) -> list[str]:
     """Targets: accounts with room, soonest cycle end first (that quota expires
     first), then most room; under MIN_USEFUL_LIFE_PCT of room after those.
-    An idle account whose access token expired is unreadable but not known to
-    be empty: it comes last (cursor-agent refreshes it once it is live).
+    An idle account whose access token expired is unreadable but comes last,
+    not never: the stored copy is refreshed every tick while live, so expiry
+    (~60 days) means idle for longer than a monthly cycle — its usage has
+    reset since. cursor-agent refreshes the token once it is live.
     Exhausted and otherwise unreadable accounts never."""
     keyed = []
     for email, usage in usages.items():
@@ -400,6 +423,7 @@ def _switch(backup_root: Path, email: str) -> str | None:
     target = _read_json(stored_path(backup_root, email))
     if target is None or email_of(target) != email:
         raise CursorError(f"{email} is not stored — log in with it and run: cswap cursor add")
+    _read_config()   # an unparseable cli-config.json: say so, touch nothing
     live = read_live(strict=True)
     live_email = email_of(live)
     if live is not None and live_email is None:
