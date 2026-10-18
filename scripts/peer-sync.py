@@ -11,6 +11,7 @@ Usage: peer-sync.py [host] [--once]     (default host: ryzen-dev)
 """
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -27,10 +28,12 @@ SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
 # Runs on the host: store the Mac's record, print the host's live account.
 REMOTE = r'''
 import json, os, sys, tempfile
+import time
 root = os.path.expanduser(sys.argv[1])
 fd, tmp = tempfile.mkstemp(dir=root, prefix=".peer-active.")
 with os.fdopen(fd, "w") as fh:
-    fh.write(sys.argv[2])
+    # Stamped with THIS host's clock: the reader compares against its own.
+    json.dump({"email": sys.argv[2], "at": time.time()}, fh)
 os.replace(tmp, os.path.join(root, "peer-active.json"))
 seq = json.load(open(os.path.join(root, "sequence.json")))
 n = str(seq.get("activeAccountNumber"))
@@ -56,13 +59,20 @@ def write_peer(root, email):
 
 def once(host):
     mine = live_email(LOCAL_ROOT)
-    record = json.dumps({"email": mine, "at": time.time()}) if mine else "{}"
+    if not mine:
+        # Unreadable mid-rewrite: send nothing rather than "no account" over a good record.
+        print(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                          "skipped": "local sequence.json unreadable"}), flush=True)
+        return
+    record = mine
     # The code goes over stdin and the arguments quoted: ssh joins argv into
     # one string for the remote shell, which split the JSON and the script.
     out = subprocess.run(SSH + [host, "python3 - %s %s" % (shlex.quote(REMOTE_ROOT), shlex.quote(record))],
                          input=REMOTE, capture_output=True, text=True, timeout=60)
-    theirs = out.stdout.strip()
-    if out.returncode == 0 and "@" in theirs:
+    # The last line only (a login banner may come first), and only an address.
+    lines = out.stdout.strip().splitlines()
+    theirs = lines[-1].strip() if lines else ""
+    if out.returncode == 0 and re.fullmatch(r"[^@\s]+@[^@\s]+", theirs):
         write_peer(LOCAL_ROOT, theirs)
     print(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "mac": mine,
                       host: theirs or None, "rc": out.returncode}), flush=True)

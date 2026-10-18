@@ -1031,7 +1031,7 @@ def _codex_command(argv: list[str]) -> None:
             if current == target:
                 emails = codex.stored_accounts(root)
                 usages = codex.usages_for(root, emails, current)
-                order = [e for e in codex.rank(usages, current, threshold, weekly, None, 0.0) if e != target]
+                order = [e for e in codex.rank(usages, current, threshold, weekly, reserve, reserve_min_life) if e != target]
                 if not order:
                     raise codex.CodexError(f"{target} is the live login and no other stored account can take over")
                 codex.switch(root, order[0])

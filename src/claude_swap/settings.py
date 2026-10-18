@@ -198,8 +198,9 @@ class AutoSwitchSettings:
     # switched onto the same account in the same minute all day, burned it at
     # twice the rate, hit 100% before the pace switch and stopped agents).
     # ``peer_active_file`` holds the other machine's live account
-    # ({"email", "at"}), refreshed by scripts/peer-sync.sh; while fresh, that
-    # account is never a landing here. ``peer_yield``: on a collision this
+    # ({"email", "at"}), refreshed by scripts/peer-sync.py; while fresh, that
+    # account sorts after every other landing — used only when nothing else
+    # has room (sharing beats a stopped fleet). ``peer_yield``: on a collision this
     # machine leaves (set it on ONE side only, or both would leave).
     peer_active_file: str | None = None
     peer_yield: bool = False
@@ -425,7 +426,7 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         ),
         SettingSpec(
             "autoswitch", "peerActiveFile", "peer_active_file", "string",
-            help="File with the other machine's live account; it is never a landing here while fresh",
+            help="File with the other machine's live account; while fresh it is the last landing here",
         ),
         SettingSpec(
             "autoswitch", "peerYield", "peer_yield", "bool",
