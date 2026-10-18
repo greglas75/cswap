@@ -1,0 +1,769 @@
+artifact_kind=adversarial-review
+created_at=2026-10-18T11:27:17Z
+status=ok
+mode=code
+output_format=text
+providers_used=cursor-agent, agy, codex-5.3, claude, qwen
+provider_count=5
+providers_attempted=5
+provider_outcomes=cursor-agent:ok,agy:ok,codex-5.3:ok,claude:ok,qwen:ok
+adversarial_pass=3/3
+REVIEW BY: CURSOR-AGENT
+REVIEW BY: AGY
+REVIEW BY: CODEX-5.3
+REVIEW BY: CLAUDE
+REVIEW BY: QWEN
+input_chars=26828
+input_chars_original=26828
+input_truncated=false
+total_findings=32
+critical=9
+warning=20
+info=3
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: cursor-agent, agy, codex-5.3, claude, qwen (5 total)
+Mode: code
+Input size: 26828 chars
+Date: 2026-10-18T11:27:17Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CURSOR-AGENT
+###############################################################
+
+Adversarial review of **chunk 1/2** (`alibaba.py`, related CLI, deploy-hosts label list). `mimo` module implementation is not in this artifact—only CLI wiring.
+
+---
+
+**SEVERITY:** CRITICAL  
+**CONFIDENCE:** high  
+**FILE:** src/claude_swap/alibaba.py:172  
+**ID:** alibaba.py:172:bailian-wipe-crash-loss  
+**ISSUE:** `login()` writes `{}` to live `~/.bailian/config.json` before interactive `bl auth login`; a crash/kill before the `finally` block leaves Bailian empty with no on-disk rollback.  
+**ATTACK VECTOR:** SIGKILL, power loss, or OOM after the wipe but before `finally` → lost Bailian login; Qwen may still have the old Token Plan key → usage reads and auto-switch logic diverge from the key actually in use.  
+**SUGGESTED FIX:** Write bailian to a temp path and atomically replace only after a complete new account (or restore previous) in `finally`; or backup to a sidecar under the store lock before clearing live config.
+
+---
+
+**SEVERITY:** CRITICAL  
+**CONFIDENCE:** high  
+**FILE:** src/claude_swap/alibaba.py:73  
+**ID:** alibaba.py:73:bailian-before-qwen-torn  
+**ISSUE:** `_write_pieces` updates `~/.bailian/config.json` before `~/.qwen/settings.json`; rollback runs only on catchable exceptions, not on kill mid-sequence.  
+**ATTACK VECTOR:** Process dies after bailian write, before qwen write (or before rollback) → Token Plan key and Bailian workspace permanently refer to different accounts; later `read_live()` / `bl usage` / Qwen disagree on “current” account.  
+**SUGGESTED FIX:** Single atomic unit: write both to staging files, `fsync`, then rename both (or write qwen key first if that’s the safer failure mode for your ops); document recovery if only one file updated.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** src/claude_swap/alibaba.py:65  
+**ID:** alibaba.py:65:empty-bailian-read-live  
+**ISSUE:** `read_live()` treats missing bailian as `None`, but `{}` is accepted and returned with a qwen key; `workspace_of()` then yields no workspace while the Token Plan key remains live.  
+**ATTACK VECTOR:** After a partial `login()` wipe, manual edit, or corrupt config, cswap sees “no complete account” while Qwen still sends requests with `BAILIAN_TOKEN_PLAN_API_KEY` → `add`/`sync`/`auto_tick` skip or mis-classify the live identity; user may not notice until rotation fails.  
+**SUGGESTED FIX:** Treat empty/missing `workspace_id` in bailian like “no live account” (`return None` or raise), or require `workspace_of(live) is not None` anywhere live identity is used.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** src/claude_swap/alibaba.py:163  
+**ID:** alibaba.py:163:login-qwen-bailian-mismatch  
+**ISSUE:** During `login()`, only bailian is cleared/replaced; qwen `env.BAILIAN_TOKEN_PLAN_API_KEY` stays on the previous account until `finally` completes (potentially minutes of interactive `bl auth login` + getpass).  
+**ATTACK VECTOR:** Qwen (or another tool) runs in the same HOME during login → API calls use account A’s key while `bl usage` (after new login) reflects account B → wrong usage display, wrong manual switches, or auto loop decisions if a tick overlaps login.  
+**SUGGESTED FIX:** Hold an explicit “login in progress” lock (file or extend lock scope), and/or temporarily unset the Token Plan key (with in-memory backup) until the new pair is validated and written together.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/alibaba.py:298  
+**ID:** alibaba.py:298:auto-tick-stale-usage  
+**ISSUE:** `auto_tick` releases the store lock while `usages_for` runs (each `bl usage` up to 60s × N workspaces), then decides switch from that snapshot.  
+**ATTACK VECTOR:** Long `list`/multi-account probe or slow `bl`/network → active account crosses threshold (or another account fills) before re-lock → switch too late (stay on exhausted account) or pick a target that no longer has “room” per fresh usage.  
+**SUGGESTED FIX:** Re-fetch usage for the live workspace immediately before `_switch`, or shorten the decision window (e.g. single live usage for threshold + rank idle from last-known with conservative margins).
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/alibaba.py:251  
+**ID:** alibaba.py:251:live-usage-ignores-stored  
+**ISSUE:** `fetch_usage(..., live=True)` never seeds temp HOME from the passed `bailian` dict; `bl` always uses whatever is on disk in real `~/.bailian/config.json`.  
+**ATTACK VECTOR:** Live disk bailian out of sync with stored backup (failed partial write, concurrent login, manual `bl auth`) while qwen key matches stored snapshot → `usages_for` reports usage for the wrong workspace; rank/auto picks the wrong “next” account.  
+**SUGGESTED FIX:** For `live=True`, optionally verify `workspace_id` on disk matches `current` (and stored snapshot) before trusting usage; fail closed (`active-usage-unknown`) on mismatch.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/alibaba.py:120  
+**ID:** alibaba.py:120:store-lock-not-live  
+**ISSUE:** Coordination is `filestore.lock(store_dir(backup_root))` only; reads/writes to `~/.qwen/settings.json` and `~/.bailian/config.json` are not guarded by that lock across processes.  
+**ATTACK VECTOR:** Two LaunchAgents/users: `cswap alibaba login` interleaved with `auto_tick` / `switch` / manual Qwen edits → torn live configs, duplicate `_write_pieces`, or rollback restoring stale `previous` over a newer manual login.  
+**SUGGESTED FIX:** One lock file covering live qwen + bailian paths (same pattern as store lock), held for entire `write_live`, `login`, and `_switch`.
+
+---
+
+**Comment–code (design claim):** Module/`login` docstrings say the previous account is put back without a complete new account; `finally` depends on `_write_pieces(previous)` or `raw_bailian` restore—if those writes fail, the user can be left with new bailian on disk and old qwen key until manual repair (see torn-write finding above). That weakens the documented guarantee but shares root cause with **alibaba.py:73**; not counted separately.
+
+**Not in artifact:** `claude_swap/mimo.py` (probe/refusal logic, auth.json handling)—cannot review switch/login integrity for MiMo in this chunk.
+
+
+###############################################################
+###   PROVIDER: AGY
+###############################################################
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/alibaba.py:216
+ID: alibaba:216:partial-live-account-silent-overwrite
+ISSUE: `_switch` silently overwrites unbacked-up live key or Bailian login when either piece is missing
+ATTACK VECTOR: `_switch` checks `if live is not None and (live_ws is None or not stored_path(backup_root, live_ws).exists())` to prevent overwriting unstored credentials. However, `read_live()` returns `None` if *either* the key in `~/.qwen/settings.json` is missing or `~/.bailian/config.json` is absent. If a user has a valid Token Plan key in `settings.json` but no Bailian CLI login yet (or vice-versa), `live` evaluates to `None`. The safety check is bypassed, `_switch` proceeds without warning, and `write_live` unconditionally overwrites and destroys the active credential.
+SUGGESTED FIX: Before switching, check independently whether `filestore.read_json(qwen_settings())` contains `ENV_KEY` or `bailian_config().exists()`, and refuse to switch if any live credential is present without being stored.
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/alibaba.py:112
+ID: alibaba:112:sync-live-wrong-account-key
+ISSUE: `_sync_live` pairs mismatched live key with current Bailian workspace, overwriting stored accounts with the wrong key
+ATTACK VECTOR: `workspace_of(live)` derives the identity `ws` solely from `~/.bailian/config.json`'s `workspace_id` without verifying that the key in `~/.qwen/settings.json` belongs to that workspace or matches the stored account. If a user logs into or changes workspaces in Bailian CLI (e.g. to `ws-b`) while `qwen/settings.json` still holds `ws-a`'s key, `_sync_live` reads `ws = "ws-b"`, sees `ws-b.json` exists in `store_dir`, and overwrites `ws-b.json` with `{"qwenKey": key-a, "bailian": ws-b}`. This permanently destroys `ws-b`'s valid key and places `ws-a`'s key under the wrong account.
+SUGGESTED FIX: In `_sync_live`, verify that the stored account's `qwenKey` matches `live["qwenKey"]` before updating the file, or only sync refreshed `bailian` session tokens into the stored account rather than replacing the key.
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/alibaba.py:190
+ID: alibaba:190:login-rollback-previous-omitted
+ISSUE: `login()` calls `write_live(fresh)` without passing `previous`, leaving split state on write failure
+ATTACK VECTOR: In `login()`, `write_live(fresh)` is invoked inside `finally:` with default `previous=None`. If `_write_pieces(fresh)` succeeds in updating `bailian_config()` but fails when writing `qwen_settings()` (e.g. disk write error or permission issue), `write_live` cannot roll back to `previous`. The exception aborts `finally:`, leaving `~/.bailian/config.json` updated with the new account's credentials while `~/.qwen/settings.json` retains the old account's key. Furthermore, activating `fresh` before `filestore.write_private(stored_path(...))` leaves an unstored live account if writing to `store_dir` fails.
+SUGGESTED FIX: Call `write_live(fresh, previous=previous)` in `login()`, and save `fresh` to `stored_path` before or atomically alongside activating the account.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/alibaba.py:293
+ID: alibaba:293:rank-past-reset-time-priority
+ISSUE: `rank()` sorts by raw epoch timestamp, prioritizing expired/past reset times over impending resets
+ATTACK VECTOR: `rank()` sorts candidate accounts by `(life < MIN_USEFUL_LIFE_PCT, usage.reset_at if usage.reset_at is not None else float("inf"), -life)`. If an account's monthly reset time occurred in the past (`reset_at < time.time()`), its raw unix timestamp is smaller than any future timestamp. Consequently, an account whose quota has already reset (and is valid for a full month) is sorted ahead of an account whose quota resets in minutes, wasting the impending quota before reset.
+SUGGESTED FIX: In `rank()`, compute the remaining time until reset `max(0.0, usage.reset_at - time.time())`, or order accounts with past reset times (`reset_at <= now`) behind upcoming resets.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/alibaba.py:280
+ID: alibaba:280:usages-for-toctou-stale-write
+ISSUE: `usages_for` TOCTOU race overwrites concurrent updates to stored accounts with stale state
+ATTACK VECTOR: In `usages_for`, `account = filestore.read_json(stored_path(backup_root, ws))` is read outside the lock before invoking `fetch_usage` (which blocks on `subprocess.run`). If a token refresh occurs, it acquires the lock and writes `{**account, "bailian": after}`. If another process updated `stored_path` (e.g. manual key rotation or `cswap alibaba add`) while `bl` was executing, those updates are wiped and replaced by the stale `account` dictionary.
+SUGGESTED FIX: Re-read `stored_path(backup_root, ws)` inside `with filestore.lock(store_dir(backup_root)):` before writing back `{**latest, "bailian": after}`.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/alibaba.py:74
+ID: alibaba:74:write-pieces-non-dict-env-crash
+ISSUE: `_write_pieces` crashes with `TypeError` if `settings.json` contains a non-dict `"env"` field
+ATTACK VECTOR: `settings.setdefault("env", {})[ENV_KEY] = account["qwenKey"]` assumes `settings.get("env")` is either missing or already a dictionary. If the user's `~/.qwen/settings.json` contains `"env": null` or a non-dict value, `setdefault` returns that value (e.g. `None`), causing `None[ENV_KEY] = ...` to raise `TypeError: 'NoneType' object does not support item assignment`.
+SUGGESTED FIX: Verify `isinstance(settings.get("env"), dict)` before assignment: `env = settings.get("env"); if not isinstance(env, dict): env = settings["env"] = {}; env[ENV_KEY] = account["qwenKey"]`.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/alibaba.py:61
+ID: alibaba:61:workspace-of-non-dict-bailian-crash
+ISSUE: `workspace_of` raises `AttributeError` if `bailian` is a non-dict value, crashing `stored_accounts`
+ATTACK VECTOR: In `workspace_of`, `ws = (account.get("bailian") or {}).get("workspace_id")` assumes `account.get("bailian")` is either a dictionary or falsy. If a stored JSON file contains a non-dict truthy value (e.g. `{"bailian": "invalid", "qwenKey": "..."}`), `.get()` on the string raises `AttributeError`. Because `stored_accounts` iterates over all files in `store_dir` evaluating `workspace_of`, a single corrupted file crashes `stored_accounts()`, breaking `list`, `switch`, and `auto`.
+SUGGESTED FIX: Guard the type explicitly: `bailian = account.get("bailian"); ws = bailian.get("workspace_id") if isinstance(bailian, dict) else None`.
+
+
+###############################################################
+###   PROVIDER: CODEX-5.3
+###############################################################
+
+SEVERITY: CRITICAL  
+CONFIDENCE: high  
+FILE: src/claude_swap/alibaba.py:153  
+ID: alibaba.py:153:login-restores-stale-settings  
+ISSUE: An unsuccessful login restores a snapshot of the old Qwen settings, overwriting changes made during the interactive login.  
+ATTACK VECTOR: While `bl auth login` or the key prompt is open, the user changes `~/.qwen/settings.json`. The `finally` block calls `_write_pieces(previous)`, which writes the settings read before the prompt and discards those changes.  
+SUGGESTED FIX: Restore only the account key in freshly read settings; preserve all other fields.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: src/claude_swap/alibaba.py:260  
+ID: alibaba.py:260:refreshed-login-overwrites-newer-account  
+ISSUE: An idle usage probe can overwrite a newer stored login with the probe’s stale copy.  
+ATTACK VECTOR: `usages_for` reads an account and runs `bl` outside the lock. If another command updates that stored account during the probe, this write replaces its login with the older copy and possibly attaches it to the wrong key.  
+SUGGESTED FIX: Under the lock, reread the stored account and update its login only if it still matches the account probed.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: src/claude_swap/alibaba.py:296  
+ID: alibaba.py:296:stale-usage-drives-switch-decision  
+ISSUE: `auto_tick` validates only the live workspace after probing, so it can switch using usage measured for an earlier login or key.  
+ATTACK VECTOR: The live account is changed and then changed back to the same workspace, or its credentials are refreshed, while `bl` runs. The workspace check passes and the old usage result drives the switch.  
+SUGGESTED FIX: Snapshot the live account credentials before probing and compare them under the lock before deciding.
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: src/claude_swap/alibaba.py:159  
+ID: alibaba.py:159:new-login-not-stored-atomically  
+ISSUE: A successful new login becomes live before its account is stored.  
+ATTACK VECTOR: If the final store write fails or the process exits between those operations, the user is left on a live account that `switch` refuses to leave until it is added manually.  
+SUGGESTED FIX: Store the validated new account before making it live, with cleanup if the live write fails.
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+Seven findings, most severe first. I reviewed the diff only: `filestore.py` isn't in it, and line numbers are approximate.
+
+---
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/alibaba.py:189
+ID: alibaba.py:189:login-write-live-no-previous-rollback
+ISSUE: `login()` calls `write_live(fresh)` in `finally` without `previous`. If that call fails, the new Bailian login stays in place, the old Token Plan key stays in settings, and the `elif previous` restore branch is skipped.
+ATTACK VECTOR:
+- `bl auth login` has already written the new account's `~/.bailian/config.json`.
+- If `write_live(fresh)` then raises, nothing restores the old login. `read_settings` raises on a corrupt or JSONC `settings.json`, `refuse_test_identity` can raise, and a disk or permission error can stop the second write.
+- With no `previous`, the partial-write rollback inside `write_live` is a no-op. The live state is then account A's key paired with account B's bailian login.
+- The exception also masks the original error.
+
+SUGGESTED FIX: Call `write_live(fresh, previous=previous)`. Wrap it in try/except. On failure, fall through to `_write_pieces(previous)`, or to restoring `raw_bailian` if there was no previous.
+
+---
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/alibaba.py:118
+ID: alibaba.py:118:sync-live-key-bailian-mismatch
+ISSUE: `workspace_of(live)` takes the workspace from the Bailian config only. Nothing ties `qwenKey` to that workspace. `_sync_live` and `add` write whatever pair is live into the stored file for that workspace.
+ATTACK VECTOR:
+- The daemon's `auto_tick` runs every 10 minutes and doesn't hold the lock during `login`'s `bl auth login` or `getpass` wait.
+- If the user re-logs into an already-stored account B while settings still hold A's key, the daemon sees workspace B with A's key. It overwrites B's stored file with A's key.
+- The same happens after a SIGKILL or terminal close mid-`login`, or after a manual `bl auth login`.
+- Later `switch` operations then put A's key under B, and both accounts burn the same plan.
+
+SUGGESTED FIX: Don't sync or add when the pair can't be verified. Store a key fingerprint and check it against the stored entry for that workspace. Or hold the lock for the whole of `login`, so the daemon can't observe the intermediate state.
+
+---
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/alibaba.py:158
+ID: alibaba.py:158:key-works-transient-failure-discards-login
+ISSUE: `key_works` returns False for any `URLError` or `OSError`, including timeouts, 429, 5xx and no network. `login` reports "That key does not work" and discards the completed login. The key is also asked for only once.
+ATTACK VECTOR:
+- A transient network blip after a successful `bl auth login` makes the whole account addition fail.
+- The user has to redo the console login, and the previous account is restored.
+- A valid key is called invalid.
+
+SUGGESTED FIX: Treat only HTTP 401/403 as "does not work". Retry other failures, or accept the key with a warning. Re-prompt on a bad key instead of aborting.
+
+---
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/alibaba.py:181
+ID: alibaba.py:181:pasted-key-not-bound-to-workspace
+ISSUE: The pasted Token Plan key is checked only for validity, not for belonging to the account just logged in. A key already stored for another workspace passes.
+ATTACK VECTOR:
+- If the user pastes the previous account's key, for example from their clipboard, `login` stores it under the new workspace.
+- Two stored accounts then share one key. `usages_for` reports each account's own Bailian usage, so the account looks fresh while Qwen keeps spending the exhausted plan.
+- The auto-switch never helps.
+
+SUGGESTED FIX: Reject a key equal to any other stored account's `qwenKey`. Optionally compare the key's identity with the new login if the API exposes it.
+
+---
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/alibaba.py:288
+ID: alibaba.py:288:usages-for-stale-read-modify-write
+ISSUE: `usages_for` reads `account` outside the lock, then runs `bl` for up to 60 s per account. It later writes `{**account, "bailian": after}` under the lock without re-reading, so the write can overwrite newer content.
+ATTACK VECTOR:
+- During the `bl` run, a concurrent `cswap alibaba login`, `add`, or `switch` can update that stored file. A rotated key is one example.
+- The stale `qwenKey`, or a stale login for the same workspace, is written back and the newer data is lost.
+- `list` calls the same function with no lock around the earlier reads.
+
+SUGGESTED FIX: Re-read the stored file inside the lock before merging. Write only if `workspace_of` still matches and the bailian value is unchanged from the snapshot.
+
+---
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/alibaba.py:270
+ID: alibaba.py:270:fetch-usage-timeout-drops-refreshed-login
+ISSUE: On timeout or any exception, `fetch_usage` returns `None` for the resulting login and never reads the temp HOME. `bl` may already have refreshed and rotated its token there.
+ATTACK VECTOR:
+- If `bl` rotates a refresh token and is then killed by the 60 s timeout, the stored copy still holds the old, now-invalidated token.
+- The idle account's console login silently dies and its usage reads "unknown" from then on.
+- The account is dropped from rotation without any visible cause.
+
+SUGGESTED FIX: In the exception path, read `bailian_config(home)` before the temp dir exits, and return it so `usages_for` can persist it.
+
+---
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/cli.py:~1478 (`_alibaba_command`)
+ID: cli.py:1478:threshold-frozen-at-daemon-start
+ISSUE: `threshold = load_settings(root).threshold` is read once before the `auto` loop. A long-running daemon never sees a later `cswap config set threshold …`.
+ATTACK VECTOR:
+- The user lowers the threshold to switch earlier. The launchd or systemd daemon keeps the old value until it is restarted.
+- Switch decisions use a stale threshold, and the user believes the new one is active.
+
+SUGGESTED FIX: Call `load_settings(root).threshold` inside the loop, before each `auto_tick`.
+
+
+###############################################################
+###   PROVIDER: QWEN
+###############################################################
+
+**SEVERITY:** CRITICAL
+**CONFIDENCE:** high
+**FILE:** src/claude_swap/alibaba.py:83 (`_write_pieces`), interacting with scripts/deploy-hosts.sh:58 (`deploy_mac`)
+**ID:** alibaba:83:torn-two-file-switch-poisons-stored-account
+**ISSUE:** An account is two files (`~/.bailian/config.json` + `~/.qwen/settings.json`) written sequentially with no journal; a SIGKILL between them leaves a mismatched pair that `_sync_live` then persists into the store, binding one account's key to another's login.
+**ATTACK VECTOR:** `write_live`'s rollback (`alibaba.py:97-105`) only covers *exceptions* — `BaseException` propagates through `_write_pieces` but the daemon's own `_switch`/`write_live` are never re-entered after a process kill. `deploy_mac` does `launchctl kickstart -k` on the new `com.greglas.cswap-alibaba` label — i.e. `deploy-hosts.sh` deliberately SIGKILLs the daemon at an arbitrary moment, including mid-`_switch`. If the kill lands after line 88 (`write_private(bailian_config(), account["bailian"])`) and before line 89, the live state is *B's console login + A's Token Plan key* while B is not yet recorded as live anywhere. On restart the first `auto_tick`/`list` calls `_sync_live` (line 118): `workspace_of` derives the workspace from the *bailian* piece only, so it writes `{qwenKey: A's key, bailian: B's login}` to `alibaba/B.json`, destroying B's stored key. Every later switch to B ships A's (exhausted, possibly quota-spent) key, and A's own record may already have been overwritten by the same tick.
+**SUGGESTED FIX:** Make the pair recoverable rather than atomic-by-hope: write a marker (`store_dir/<ws>.switching`) with the intended target before line 88 and delete it after line 89; have `_sync_live`/`read_live` refuse to persist the live pair when the marker exists (or when its `bailian.workspace_id != marker ws`) and re-run `_write_pieces(target)` from the marker instead. (Writing `bailian_config` last also reduces exposure — but note the mirror hazard: key=B, login=A resolves as `ws=A`, so B's key then lands in `A.json`.)
+
+---
+
+**SEVERITY:** CRITICAL
+**CONFIDENCE:** medium-high
+**FILE:** src/claude_swap/alibaba.py:162 (`login`)
+**ID:** alibaba:162:ignored-bl-exit-binds-key-to-wrong-login
+**ISSUE:** `subprocess.call([bl, "auth", "login"])` discards its exit status, and `fresh` is assembled from whatever `~/.bailian/config.json` happens to contain, so a new Token Plan key can be paired with the *old* account's console login and stored under the old workspace.
+**ATTACK VECTOR:** The only gate is `if bailian.get("workspace_id")` (line 163). `bl auth login` is interactive: if the user aborts the console flow, the browser hands back an existing/already-authenticated session, or bl exits non-zero after writing (or leaving) a config that still carries the previous `workspace_id`, the code proceeds to prompt for the new key, validates it with `key_works` — which only checks that *some* key works on `/models` (line 145) and never that it belongs to that workspace — and then line 181 does `write_private(stored_path(root, ws), fresh)` where `ws` is the **old** workspace. Result: the old account's stored record is clobbered with `{new key, old login}` (its previous good key is unrecoverable — the store is the only copy), Qwen Code is now live with a key the user believes is on a second plan, and the CLI prints "Stored Alibaba account <old ws>", so the second plan is never actually added.
+**SUGGESTED FIX:** Capture `bl auth login`'s exit code and abort on non-zero; after the prompt, verify the new key belongs to the console login (compare `bl auth whoami`/workspace from the stored credentials, or reject if `bailian == raw_bailian`); and refuse to overwrite an existing `stored_path(ws)` whose `qwenKey != fresh["qwenKey"]` — require an explicit `cswap alibaba add` for that.
+
+---
+
+**SEVERITY:** CRITICAL
+**CONFIDENCE:** medium-high
+**FILE:** src/claude_swap/alibaba.py:306 (`auto_tick`, guard at line 302 / usage branch 317-318)
+**ID:** alibaba:306:auto-switch-freezed-on-usage-error-with-no-fallback
+**ISSUE:** Any failure to read usage halts rotation entirely, and the live account's console login is deliberately *not* restored from the store before the read, so a bl refresh that invalidates the on-disk token silently disables the switcher forever.
+**ATTACK VECTOR:** `fetch_usage(..., live=True)` (line 266, called at line 302 with `live = ws == current`) reads the **real** `~/.bailian/config.json` and discards the stored copy — contrast the idle path, which re-seeds the temp HOME from the store. `bl usage token-plan` is the only probe in `auto_tick`; the Token Plan key path (`key_works`) is never consulted. The module's whole purpose is "switch when the live account hits the threshold", yet: (a) if `bl` rotates/refreshes the console token server-side and leaves the file unusable, the next tick returns `bl rc=…` → line 318 returns `active-usage-unknown`, `_sync_live` has already written the same stale login back to the store (line 118), and every subsequent tick repeats this — the daemon emits one JSON line per interval and never switches, so the user rides the plan to hard rate-limiting with idle accounts sitting free; (b) the same early return fires if `~/.bailian/config.json` is merely missing, because `read_live` (line 66) returns `None` when the login is absent even though `BAILIAN_TOKEN_PLAN_API_KEY` is set → `alibaba-no-switch/live-account-not-stored`. Nothing escalates either state beyond the event line.
+**SUGGESTED FIX:** Treat repeated `active-usage-unknown` as a switchable signal: after N consecutive failures, fall back to the key-only probe (`key_works`, or a 1-token request against the plan endpoint) and switch on that. On a usage error, don't `_sync_live` the possibly-invalid login back over the stored copy; if `bl` fails, retry once restoring `bailian` from `stored_path(current)` before reading `after`.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** high
+**FILE:** src/claude_swap/alibaba.py:127 (`stored_accounts`)
+**ID:** alibaba:127:stored-accounts-compares-raw-ws-to-sanitized-filename
+**ISSUE:** `stored_accounts` validates entries by comparing the raw `workspace_id` to the filename, but `stored_path` writes the filename through `filestore.safe_name`, so any workspace needing sanitization is stored yet invisible to every consumer.
+**ATTACK VECTOR:** Line 128-131 keeps a file only if `workspace_of(read_json(p)) == p.name[:-len(".json")]`, while line 110 wrote it as `f"{filestore.safe_name(ws)}.json"`. A `workspace_id` containing anything `safe_name` rewrites (`/`, `:`, spaces, non-ASCII, leading/trailing punctuation) yields `p.name != ws` → the account vanishes from `stored_accounts`, hence from `auto_tick`'s `workspaces` (line 300) and `usages_for`/`rank` — it can never be auto-selected or even listed, with no diagnostic; meanwhile `switch(root, <raw ws>)` still finds the file, and `_switch`'s "live account is not stored" test uses `stored_path(...).exists()` (line 196), so the two paths disagree about whether the account exists. Conversely, two distinct workspaces that sanitize to the same name collide on one file, and the last writer silently replaces the other's key.
+**SUGGESTED FIX:** Never derive identity from the filename: list `*.json`, read each, and key on `workspace_of(...)` (guarding `None`); optionally reject duplicates where two paths map to one `safe_name`.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/alibaba.py:237 (`parse_usage`) and 253 (`rank`)
+**ID:** alibaba:237:reset-time-assumed-epoch-ms-unvalidated
+**ISSUE:** The stated selection rule ("soonest monthly reset first") is not what `rank` implements, and it ranks on `per1MonthResetTime` trusting an undocumented milliseconds assumption with no sanity check — a stale or past timestamp wins first place.
+**ATTACK VECTOR:** Three coupled defects. (1) `rank`'s docstring and the module docstring promise reset-soonest ordering, but the tuple's *first* element is the `life < MIN_USEFUL_LIFE_PCT` boolean (line 253), so an account with 0.1% life outranks one with 90% and an earlier reset — the stated rule is silently overridden by an undocumented tier. (2) `reset_at = float(reset)/1000.0` (line 238): if the endpoint ever returns seconds, the value collapses to ~1970 and sorts **first**, so every tick picks the account whose reset time is bogus — the opposite of the intended choice; there is no `reset_at > now` check anywhere. (3) Clock/timing: `parse_usage` accepts `reset_at` alongside a *pre*-reset reading, and the snapshot is taken before `_switch` (line 302 vs 328). If the reset boundary falls inside that window, `bl` on the target (line 190) already reports ~0% while the ranker still holds its pre-reset pct, so `rank` returns nothing → `no-account-with-room` → the daemon sits on a throttled account until the next tick, and `list` prints that target with a `reset_at` in the past as "waits for its reset".
+**SUGGESTED FIX:** Document/implement one rule; clamp `reset_at` to a plausible future window (drop it to `None` otherwise, which already sorts last), and re-fetch or re-run `rank` after a `no-account-with-room` result whose deciding accounts have `reset_at <= tick_start`.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** high
+**FILE:** src/claude_swap/alibaba.py:280 (`usages_for`) — also 153 (`login`)
+**ID:** alibaba:280:read-outside-lock-merge-write-clobbers-concurrent-update
+**ISSUE:** Store records are read outside the lock and written back as a merged dict inside it, so a concurrent `login`/`switch`/`_sync_live` update is silently reverted; the same lock release/re-acquire pattern lets the interactive `login` flow stomp a daemon switch.
+**ATTACK VECTOR:** In `auto_tick`, `usages_for` is intentionally called *outside* the lock (comment at line 305, because `bl` is slow). For each non-live account, `usages_for` reads `account` (line 276) with no lock, runs `bl` for up to 60s, then writes `{**account, "bailian": after}` under the lock (line 280-281). If the user runs `cswap alibaba login`/`add` for that workspace during the `bl` window — which writes a new `qwenKey` to `alibaba/<ws>.json` — the merge resurrects the *stale* `account["qwenKey"]`, so the freshly added key is lost and the auto switch that follows uses the old key. Worse, `login` releases the lock across the minutes-long interactive `bl auth login` (lines 155-161) while holding `previous`/`raw_bailian` in memory and mutating the live files: if the daemon's `_switch` completes in that window, `login`'s `finally` (line 174-180) unconditionally writes `previous` back, reverting the switch and leaving Qwen Code pointed at a key whose plan is spent — exactly the state the tool exists to avoid, with only "no new account" printed.
+**SUGGESTED FIX:** Re-read the record inside the lock and merge onto the *current* contents (or write only the `bailian` field), and hold a distinct "live files in use by login" lock across `login` that `_switch`/`auto_tick` respect.
+
+---
+
+**SEVERITY:** INFO
+**CONFIDENCE:** high
+**FILE:** src/claude_swap/alibaba.py:42 (`_home`)
+**ID:** alibaba:42:cswap-alibaba-home-not-applied-to-bl-subprocess
+**ISSUE:** `CSWAP_ALIBABA_HOME` redirects every path cswap reads/writes, but `bl` is still run with the real `HOME`, so the file layer and the CLI operate on two different accounts.
+**ATTACK VECTOR:** `_home()` honours `CSWAP_ALIBABA_HOME` for `qwen_settings()`/`bailian_config()` (lines 46-51), but `_bl_env` only sets `HOME` when an explicit temp `home` is passed (line 140), so `login()` (`_bl_env(None)`, line 161) and the live `fetch_usage` (line 269) drive `bl` against `~/.bailian/config.json`. With the override set (the documented knob for a non-default home — and the one thing `refuse_test_identity(ws, qwen_settings())` at line 91 is there to police), `bl auth login` writes the real home, `login` reads the override home (empty → no prompt → new console session orphaned, real `~/.bailian` left with an unclaimed login), and the live-usage probe reports the *real* account's usage while `auto_tick` switches the override account. Also note the comment at line 138-139 asserts a launchd/node PATH constraint that hardcodes `/opt/homebrew/bin`, which the same daemon must satisfy under systemd units on ryzen/ryzen-dev per the deploy header.
+**SUGGESTED FIX:** In `_bl_env`, default to `env["HOME"] = str(_home())` when no temp home is supplied, and add the node directory for the non-mac prefix alongside `/opt/homebrew/bin`.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
+
+=== APPENDED PASS 2026-10-18T11:27:17Z ===
+artifact_kind=adversarial-review
+created_at=2026-10-18T11:26:09Z
+status=ok
+mode=code
+output_format=text
+providers_used=cursor-agent, agy, codex-5.3, claude, qwen
+provider_count=5
+providers_attempted=5
+provider_outcomes=cursor-agent:ok,agy:ok,codex-5.3:ok,claude:ok,qwen:ok
+adversarial_pass=3/3
+REVIEW BY: CURSOR-AGENT
+REVIEW BY: AGY
+REVIEW BY: CODEX-5.3
+REVIEW BY: CLAUDE
+REVIEW BY: QWEN
+input_chars=24619
+input_chars_original=24619
+input_truncated=false
+total_findings=31
+critical=4
+warning=24
+info=3
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: cursor-agent, agy, codex-5.3, claude, qwen (5 total)
+Mode: code
+Input size: 24619 chars
+Date: 2026-10-18T11:26:09Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CURSOR-AGENT
+###############################################################
+
+Adversarial review of **chunk 2/2** (`filestore.py`, `mimo.py`; Alibaba production code not in this artifact). Findings sorted by severity, then confidence.
+
+---
+
+**SEVERITY:** CRITICAL  
+**CONFIDENCE:** high  
+**FILE:** src/claude_swap/mimo.py:61  
+**ID:** mimo.py:61:auth-json-toctou-write  
+**ISSUE:** `write_live` read-modify-write on `auth.json` is not serialized with any lock on the live file path.  
+**ATTACK VECTOR:** MiMo Code, another `cswap mimo` process, or any tool that touches `auth.json` between `read_settings` and `write_private` can add or change providers (or refresh the xiaomi key). The later write replaces the whole file from a stale snapshot, dropping other providers or reverting keys—exactly the “settings/login lost” failure mode the tests assume away with a single writer.  
+**SUGGESTED FIX:** Take an exclusive lock on the live config (e.g. `fcntl` on `auth.json` or a sibling `.lock` next to it) for the full read→merge→`write_private` sequence; keep the store lock only for backup paths.
+
+---
+
+**SEVERITY:** CRITICAL  
+**CONFIDENCE:** high  
+**FILE:** src/claude_swap/mimo.py:126  
+**ID:** mimo.py:126:login-unlocked-interactive-window  
+**ISSUE:** `login()` clears live auth and runs interactive `subprocess.call` with no lock held on the store or live file.  
+**ATTACK VECTOR:** While the user is in `/login`, another `cswap mimo switch`, `auto_tick`, or `add` can run under the store lock and call `write_live` / `_sync_live`. You can end with the wrong account live, a restored “previous” login overwriting a completed new login, or stored snapshots updated from a half-written `auth.json` during MiMo’s write.  
+**SUGGESTED FIX:** Document exclusive ownership (single operator) or hold a “login in progress” lock for the whole flow (including subprocess), and refuse `switch`/`auto_tick` while that lock is held; only release after final store + verify `read_live`.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** src/claude_swap/mimo.py:219  
+**ID:** mimo.py:219:lock-held-during-probes  
+**ISSUE:** `auto_tick` holds `filestore.lock(store_dir(...))` for the entire tick, including every `probe_fn` call (default 30s timeout each).  
+**ATTACK VECTOR:** A long auto loop blocks `add`, `switch`, `login`, and `sync_live` for minutes. Manual recovery during an outage waits on the lock; concurrent operators may retry and interleave once the lock drops, worsening auth TOCTOU races above.  
+**SUGGESTED FIX:** Hold the lock only for state read/update and `_switch`; run probes outside the lock, then re-acquire briefly to compare-and-switch (re-read live/stored before committing).
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** src/claude_swap/mimo.py:246  
+**ID:** mimo.py:246:state-at-type-crash  
+**ISSUE:** Recheck skip uses `now - last.get("at", 0)` with no validation that `"at"` is numeric.  
+**ATTACK VECTOR:** Hand-edited or partially written `.state.json` (string `"at"`, `null`, or missing after merge) raises `TypeError` and kills the auto loop—no rotation, often with no structured “reason” if the caller doesn’t catch it.  
+**SUGGESTED FIX:** Coerce defensively, e.g. `at = last.get("at"); at = float(at) if isinstance(at, (int, float)) else 0`, or treat bad entries as stale and overwrite on next `record`.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/mimo.py:186  
+**ID:** mimo.py:186:403-as-exhausted-failover  
+**ISSUE:** `classify` maps HTTP 403 (and 402/429) to `"exhausted"`, which triggers failover in `auto_tick`.  
+**ATTACK VECTOR:** Wrong model, region, or WAF/rate-limit responses that return 403—not quota—mark the live account exhausted and probe-burn through backups, switching onto the next `"ok"` account and leaving the user on a key that wasn’t actually out of quota (or skipping a still-good live account).  
+**SUGGESTED FIX:** Narrow exhaustion (e.g. parse body for quota/limit tokens), or treat 403 as `"unknown"` unless the body matches known quota messages; require repeated exhausted signals before switch.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** src/claude_swap/mimo.py:234  
+**ID:** mimo.py:234:live-unknown-no-failover  
+**ISSUE:** When the live probe is `"unknown"` (network, 5xx, bad `base_url`), `auto_tick` returns without trying other accounts.  
+**ATTACK VECTOR:** Live quota is exhausted but the endpoint returns 500/502/503 during an incident; classification stays `"unknown"`, so the loop never rotates despite backup accounts that would probe `"ok"`—stuck on a dead account until someone intervenes.  
+**SUGGESTED FIX:** Optional policy: if live is `"unknown"` for N consecutive ticks, probe backups; or treat persistent 5xx after live `"exhausted"` history as failover-eligible.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** src/claude_swap/mimo.py:140  
+**ID:** mimo.py:140:login-store-after-live  
+**ISSUE:** After a successful interactive login, the new entry is live in `auth.json` before `write_private(stored_path(...))`; there is no rollback if that backup write fails.  
+**ATTACK VECTOR:** Disk full or permission error on the backup tree leaves the new Token Plan key only in live `auth.json`. The next `auto_tick` / `switch` assumes backups are authoritative; rotation and “stored accounts” lists can disagree with reality and the user can lose the only stored copy of the previous account if earlier steps partially succeeded.  
+**SUGGESTED FIX:** Write backup first (or write backup then live in one locked transaction); on backup failure, roll back live to `previous` in the same `except` path (mirror the `test_failed_login_puts_the_previous_one_back` pattern for the final store step).
+
+---
+
+**Note:** `filestore.lock` only serializes writers under `<backup>/mimo/`; it does **not** cover `live_file()` (`CSWAP_MIMO_HOME` / default mimocode `auth.json`). That split is the root enabler for the first two CRITICAL items. Alibaba implementation was not in this chunk, so no production findings for `cswap alibaba` here—only the listed MiMo/filestore paths.
+
+
+###############################################################
+###   PROVIDER: AGY
+###############################################################
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/mimo.py:134
+ID: mimo.py:134:ctrl-c-wipes-new-login
+ISSUE: Quitting `mimo` with Ctrl+C as instructed raises `KeyboardInterrupt`, causing `finally` to overwrite and lose the fresh login.
+ATTACK VECTOR: In `mimo.login`, the user is prompted: `finish in the browser, then quit mimo (ctrl+c)`. In a terminal, pressing Ctrl+C sends `SIGINT` to the process group. Python's `subprocess.call` receives `SIGINT` and raises `KeyboardInterrupt`, jumping straight to the `finally` block before `fresh = read_live()` on line 135 can execute. Because `fresh` remains `None`, the `finally` block assumes login failed and calls `write_live(previous)`, clobbering the new login written by `mimo` into `auth.json` with the old credentials.
+SUGGESTED FIX: Catch `KeyboardInterrupt` around `subprocess.call` and ensure `fresh = read_live()` is read before deciding whether rollback is needed:
+```python
+        try:
+            subprocess.call([binary], env={**os.environ, "MIMOCODE_DISABLE_CLAUDE_IMPORT": "1"})
+        except KeyboardInterrupt:
+            pass
+        fresh = read_live()
+```
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/mimo.py:231
+ID: mimo.py:231:store-lock-held-during-network
+ISSUE: `auto_tick` holds `filestore.lock` across slow HTTP network probes, blocking interactive CLI commands and violating repository concurrency conventions.
+ATTACK VECTOR: `mimo.auto_tick` wraps the entire function in `with filestore.lock(store_dir(backup_root)):`. Inside this lock, it calls `probe_fn` (which has a 30.0 s network timeout) on the active account and iteratively on candidate accounts. In `cursor.py` and `alibaba.py`, network/subprocess probes run outside the lock, and the lock is only acquired briefly to sync and re-verify state before switching. In `mimo.py`, any network slowdown or timeout locks `store_dir`, causing manual commands (`cswap mimo add`, `cswap mimo switch`, `cswap mimo login`) to hang for up to several minutes.
+SUGGESTED FIX: Run `probe_fn` calls outside `filestore.lock`, then re-acquire the lock before switching, checking `if read_live() != current` to guard against concurrent switches.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/alibaba.py:271
+ID: alibaba.py:271:trailing-output-breaks-json-loads
+ISSUE: `json.loads` fails with `Extra data` if `bl` emits any trailing output (such as npm update notices), disabling automatic account rotation.
+ATTACK VECTOR: `out.stdout[out.stdout.index("{"):]` passes everything from the first `{` to the end of stdout to `json.loads`. If `bailian-cli` or Node.js prints any notice after the JSON payload (such as an npm update check banner or telemetry notice), `json.loads` raises `json.JSONDecodeError` ("Extra data"). Line 272 catches this as a `ValueError` and returns `error="bl printed no JSON"`. Under `auto_tick`, `live.error` being set triggers `active-usage-unknown` and halts rotation indefinitely.
+SUGGESTED FIX: Use `json.JSONDecoder().raw_decode` from the start index instead of `json.loads` to consume only the valid JSON object and ignore trailing text:
+```python
+    try:
+        start = out.stdout.index("{")
+        payload, _ = json.JSONDecoder().raw_decode(out.stdout[start:])
+    except ValueError:
+        return Usage(None, None, error="bl printed no JSON"), after
+```
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/mimo.py:52
+ID: mimo.py:52:non-dict-metadata-attribute-error
+ISSUE: `(entry.get("metadata") or {}).get(...)` raises `AttributeError` if `metadata` is a non-dict value, breaking account listing and auto-tick.
+ATTACK VECTOR: In `uid_of` (line 52) and `probe` (line 198), `(entry.get("metadata") or {})` assumes `metadata` can only be `None` or a `dict`. If an account JSON file contains a non-dict truthy value (e.g. `{"metadata": "custom"}` or `{"metadata": true}`), the expression evaluates to the string/bool, causing `.get(...)` to raise `AttributeError`. Since `stored_accounts` invokes `uid_of` on every JSON file in `store_dir`, a single unexpected metadata field crashes `stored_accounts`, `sync_live`, and `auto_tick`.
+SUGGESTED FIX: Explicitly verify that `metadata` is a dictionary:
+```python
+    meta = entry.get("metadata")
+    if not isinstance(meta, dict):
+        return None
+    uid = meta.get("uid")
+```
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/mimo.py:212
+ID: mimo.py:212:probe-unhandled-http-exceptions
+ISSUE: `probe()` only catches `(urllib.error.URLError, OSError)`, letting `http.client.HTTPException` and `ValueError` crash `auto_tick`.
+ATTACK VECTOR: In Python's standard library, `http.client.HTTPException` (and subclasses like `IncompleteRead`, `BadStatusLine`, `LineTooLong`) inherits from `Exception`, not `OSError` or `urllib.error.URLError`. Additionally, `urllib.request.urlopen` can raise `ValueError` / `InvalidURL` on malformed URL components. When a server drops a connection mid-response or returns an invalid status line, these unhandled exceptions propagate out of `probe()` and crash the background `auto_tick` daemon.
+SUGGESTED FIX: Catch `http.client.HTTPException` and `ValueError` in `probe()`:
+```python
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as e:
+        return Probe("unknown", None, type(e).__name__)
+```
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/alibaba.py:282
+ID: alibaba.py:282:live-refreshed-token-not-stored
+ISSUE: `usages_for` explicitly skips persisting refreshed tokens for the active account, leaving `stored_path` with a stale token.
+ATTACK VECTOR: When `usages_for` probes the live account (`ws == current`), `bl` runs against `~/.bailian/config.json` and may refresh the access token. `fetch_usage` returns this new token in `after`. However, line 282 checks `if ws != current ...`, explicitly preventing `stored_path(backup_root, current)` from being updated. If `auto_tick` does not trigger a switch (e.g., usage is below threshold), `stored_path` retains the old token. If the user later switches away and returns to this account, `_switch` overwrites `~/.bailian/config.json` with the stale token from `stored_path`.
+SUGGESTED FIX: Remove the `ws != current` guard so that `stored_path` is kept up to date whenever `after` contains a refreshed configuration:
+```python
+        if after and after != account.get("bailian") and after.get("workspace_id") == ws:
+            with filestore.lock(store_dir(backup_root)):
+                filestore.write_private(stored_path(backup_root, ws), {**account, "bailian": after})
+```
+
+
+###############################################################
+###   PROVIDER: CODEX-5.3
+###############################################################
+
+SEVERITY: CRITICAL  
+CONFIDENCE: high  
+FILE: src/claude_swap/mimo.py:129  
+ID: mimo.py:129:login-restores-stale-account  
+ISSUE: A failed login restores the entry captured before MiMo ran, even if MiMo wrote a new login that lacks a UID.  
+ATTACK VECTOR: `/login` can leave a valid key without `metadata.uid`; `finally` replaces it with the previous account, losing the new login.  
+SUGGESTED FIX: Restore the previous entry only if the Xiaomi entry is still absent; preserve any newly written entry and report its missing UID.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: src/claude_swap/mimo.py:183  
+ID: mimo.py:183:forbidden-response-misclassified-exhausted  
+ISSUE: Every HTTP 403 and 429 is treated as exhausted quota.  
+ATTACK VECTOR: Permission, policy, or rate limit refusals trigger an account switch even when the Token Plan has room.  
+SUGGESTED FIX: Require a documented quota error code in the response body before classifying a refusal as exhausted.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: src/claude_swap/mimo.py:90  
+ID: mimo.py:90:unreadable-live-entry-overwrites-backup  
+ISSUE: `_sync_live` treats an unreadable `auth.json` as no login, while `login` can subsequently remove Xiaomi from a fresh `{}`.  
+ATTACK VECTOR: If `auth.json` is unreadable during `login`, `previous` becomes `None`; once reading works, `write_live(None)` removes the existing login without saving it.  
+SUGGESTED FIX: Read the live settings strictly before login and abort on read or parse failure.
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: src/claude_swap/filestore.py:47  
+ID: filestore.py:47:atomic-rename-loses-concurrent-settings  
+ISSUE: The read, edit, and atomic rename of a shared settings file are not coordinated with its owning application.  
+ATTACK VECTOR: MiMo can update `auth.json` between `read_settings` and `os.replace`; the replacement silently discards that update, including another provider’s login.  
+SUGGESTED FIX: Before replacement, detect whether the file changed since reading and retry or abort.
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/mimo.py:128
+ID: mimo.py:128:login-drops-uidless-previous-login
+ISSUE: `login()` removes a live xiaomi login that has no `metadata.uid` and never stores it. If the new login succeeds, the old one is gone.
+ATTACK VECTOR: The previous login is only stored when `uid_of(previous) is not None` (line 123). `write_live(None)` at line 128 still deletes it from auth.json. The `finally` restore runs only if the new login fails, so a successful `/login` overwrites the only copy of the old key. `_switch` guards this case ("live login … is not stored"), and `test_switch_refuses_to_overwrite_a_login_nobody_has` covers it there. `login` has no such guard and no test.
+SUGGESTED FIX: At the top of `login`, raise `MimoError` if `previous is not None and uid_of(previous) is None`. Do the same for a previous login whose stored copy cannot be written.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/mimo.py:131
+ID: mimo.py:131:login-ctrl-c-discards-fresh-login
+ISSUE: The prompt tells the user to quit mimo with ctrl+c. A `KeyboardInterrupt` in `subprocess.call` skips `fresh = read_live()`, so the `finally` restores the previous login over the fresh one.
+ATTACK VECTOR: The user finishes `/login` in the browser and presses ctrl+c as instructed. If mimo's terminal mode lets SIGINT reach Python, `subprocess.call` kills the child and re-raises. `fresh` is still `None`, so `finally` calls `write_live(previous)`, which overwrites the just-created login in auth.json. The exception then propagates before the store write, so the new account is never saved and the user has to log in again.
+SUGGESTED FIX: Wrap `subprocess.call` in `try/except KeyboardInterrupt: pass`, then read `fresh = read_live()` after it, inside the `try`.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/mimo.py:228
+ID: mimo.py:228:network-probes-under-exclusive-lock
+ISSUE: `auto_tick` holds the exclusive store lock while it runs up to N sequential HTTPS probes, each with a 30 s timeout.
+ATTACK VECTOR: With a handful of accounts and a slow or hanging endpoint, the lock stays held for minutes. `cswap mimo switch/add/remove/login` block on `flock` with no feedback, and the login restore in `finally` waits too. A second auto loop queues behind the first. The `timeout` argument also applies per socket operation, not to the whole request, so a slow-drip response can run longer than 30 s. Commit 0b2946d ("no network under the lock") fixed the same pattern for cursor, so this is convention drift.
+SUGGESTED FIX: Under the lock, snapshot the live uid and the stored entries. Release it and probe. Re-take the lock to record state and switch, and re-check that the live uid is unchanged before `_switch`.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/mimo.py:187
+ID: mimo.py:187:rate-limit-and-forbidden-read-as-exhausted
+ISSUE: 429 and 403 are classified as "exhausted" on status code alone, and the body is ignored. The probe model and the "quota means these statuses" mapping are assumptions.
+ATTACK VECTOR: A per-minute 429 (the user is actively using mimo while the loop probes), a WAF/geo 403, or a plan without access to the hard-coded `mimo-v2.5` makes a healthy live account look used up. The loop then moves the user to another account and burns that account's quota. If real exhaustion comes back as 400 or another status, it maps to "unknown" and the loop never switches. Nothing in the diff confirms what a Token Plan refusal looks like.
+SUGGESTED FIX: Require a quota-specific marker in the body for 403 and 429 (or a few consecutive refusals, with retry-after honoured). Take the probe model from the entry's own config instead of a constant.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/mimo.py:205
+ID: mimo.py:205:probe-uncaught-http-exceptions
+ISSUE: `probe` catches only `URLError` and `OSError`. `http.client.IncompleteRead`/`HTTPException`, and the `ValueError` for a bad header value, escape it.
+ATTACK VECTOR: A truncated 200 body makes `resp.read()` raise `IncompleteRead`, which is not an `OSError`. A key with a newline raises `ValueError` while the request is built. The exception propagates out of `auto_tick` while the lock is held, and the daemon loop dies or fails every tick instead of recording "unknown". `e.read(600)` in the `HTTPError` branch can raise the same way.
+SUGGESTED FIX: Catch `(urllib.error.URLError, OSError, http.client.HTTPException, ValueError)` around the whole request/read, and return `Probe("unknown", None, type(e).__name__)`.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/filestore.py:54
+ID: filestore.py:54:unguarded-read-modify-write-auth-json
+ISSUE: `read_settings` followed by `write_private` is a read-modify-write of a file that mimo also writes. The cswap lock only coordinates cswap processes. The write also does not fsync, and `os.replace` swaps the inode.
+ATTACK VECTOR: If mimo refreshes a token or adds another provider between cswap's read and replace, that change is silently dropped. If auth.json is a symlink (dotfiles setups), `os.replace` replaces the link with a regular file and the real file goes stale. After a crash, a rename with no `fsync` can leave a zero-length auth.json, and the next `read_settings` then refuses to run.
+SUGGESTED FIX: `fsync` the temp file before `os.replace`. Resolve the path with `path.resolve()` before writing. Re-check the file's mtime before the replace and retry once if it changed.
+
+SEVERITY: INFO
+CONFIDENCE: high
+FILE: src/claude_swap/filestore.py:28
+ID: filestore.py:28:unicode-error-escapes-read-settings
+ISSUE: `read_text(encoding="utf-8")` raises `UnicodeDecodeError`, a `ValueError` subclass. It is outside the `except OSError` clause, so the "unreadable → `error`" contract does not hold for a non-UTF-8 file.
+ATTACK VECTOR: A corrupted or binary auth.json or settings.json gives a raw traceback instead of the user-facing "fix or remove it" error. The file is not overwritten, so there is no data loss. The same `try` also does not catch `UnicodeDecodeError` for `read_json` callers that expect `None`. They are fine only because that function catches `ValueError` itself.
+SUGGESTED FIX: Change the first handler to `except (OSError, ValueError)` and raise `error(...)` for both.
+
+
+###############################################################
+###   PROVIDER: QWEN
+###############################################################
+
+I reviewed the diff only (no tools, per instructions). Findings, most severe first.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/filestore.py:71-76 (used by mimo.py:155-163, 166-176, 190-193)
+ID: filestore:safe_name:no-unique-stem-normalization
+ISSUE: `safe_name` only rejects separators/`..`/leading dot — it never normalizes the name, so distinct uids can map to the *same* `<uid>.json` on a normalization-insensitive filesystem (APFS/HFS+, i.e. this host: darwin), and `add`/`_sync_live` overwrite the previous account's only stored copy.
+ATTACK VECTOR: Two Xiaomi uids that differ only by Unicode composition (`"ǎ"` NFC vs NFD), or any two uids differing only by case on a case-insensitive volume, produce one file. The last `cswap mimo add` / every `switch` silently destroys the other account's key. The failure then degrades *unsafely*: `stored_accounts` (line 113) drops the file because `uid_of(...) != stem`, but `_switch` re-reads `stored_path(target)` and compares the file's own uid to the requested one — with a case-only mismatch (`"abc"` vs `"ABC"`) that comparison **passes**, and the other account's key is written into `auth.json`, i.e. exactly "keys under the wrong account" — while `auto_tick` believes the account is merely untracked.
+SUGGESTED FIX: `uid = unicodedata.normalize("NFC", str(uid))` once in `uid_of`, and in `safe_name` compare `unicodedata.normalize("NFC", name) == name and name.casefold() == name` (reject otherwise). Additionally, in `add`/`_sync_live`, refuse to write a path that already exists with a different `uid_of`, instead of clobbering it.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/mimo.py:404-407
+ID: mimo:classify:402-403-429-as-exhausted
+ISSUE: The HTTP-status → quota mapping treats 403 (permission / model-ACL / region) and 429 (transient rate limit) as "the account is used up".
+ATTACK VECTOR: The probe pins one model (`PROBE_MODEL = "mimo-v2.5"`, line 291). A 403 from an account that simply isn't entitled to that model, or a 429 from a per-minute TPM limit (very likely if anything else on the box uses the same key, and the probe itself is retried every tick), is recorded as `exhausted` for the live account → immediate switch → that account is then skipped for `RECHECK_EXHAUSTED_S` (3600 s) by the round at line 453-455. The loop can ping-pong between healthy accounts and end in "no-account-answers" with every account wrongly blacklisted, while the real monthly quota is nearly untouched. This directly contradicts the module docstring (line 8-10): "a quota/limit refusal means the account is used up".
+SUGGESTED FIX: Only 402 → `exhausted`; for 429 (and 403) require a quota signal in the body (e.g. `"quota"`/`"limit"`/`"insufficient"` substring) before marking exhausted, otherwise `unknown`. Re-probe with the account's own configured model rather than a hardcoded one, or treat a model-4xx as `unknown`.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/filestore.py:52-61 (with mimo.py:31-32, 105)
+ID: filestore:write-private:no-fsync-durability
+ISSUE: The docstring (line 44) promises "Atomic 0600 write (temp file in the same directory, then rename)" — `os.replace` gives atomicity only, never durability: no `fh.flush()`/`os.fsync(fd)` before the rename and no directory fsync.
+ATTACK VECTOR: On crash/power loss (or forced unmount), the rename can be persisted while the temp file's data blocks are not, leaving `auth.json` zero-length or a torn write. Because `write_live` rewrites the *whole* file, every other provider's login in `auth.json` (e.g. `kimi`) is destroyed too — and cswap only ever backs up the `xiaomi` entry, so those logins are unrecoverable. The strict reader then correctly refuses to touch the file, so every subsequent `switch`/`add`/`auto_tick` fails on a "does not parse" that the tool itself created.
+SUGGESTED FIX: Before `os.replace`: `fh.flush(); os.fsync(fh.fileno())`. After the replace, open `path.parent` and `os.fsync` that fd (best-effort, wrapped in `contextlib.suppress(OSError)`).
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/mimo.py:155-163 (root pattern: 166-176, 190-193)
+ID: mimo:remove:guard-uses-lenient-read-json
+ISSUE: `remove` decides "is this the live login?" from `read_live()`, which is built on `filestore.read_json` — that reader returns `None` for *any* `OSError` (EACCES, ELOOP, `ETXTBSY` while `mimo` rewrites the file) as well as for a malformed file, so an unreadable live file is indistinguishable from a logged-out one.
+ATTACK VECTOR: Run `cswap mimo remove <uid>` (or `switch`, which has the same guard at line 192 and skips the "the live login is not stored" refusal) during a torn/locked/`auth.json`-unreadable moment: the check passes, the account's **only** stored copy is unlinked while that key is still the live mimo login → login permanently lost. The codebase already has the correct primitive one file over (`read_settings`, which raises unless the file is genuinely absent) and its docstring states exactly this invariant; it is just not used on the destructive read path. Same leniency in `auto_tick` line 216 (`current not in uids` → silent "live-login-not-stored", the auto loop stops switching and only the JSON return value says why).
+SUGGESTED FIX: Add a strict live-entry reader (read via `read_settings(..., MimoError)`, then take `PROVIDER`) and use it in `remove`, `_switch`'s guard, and `auto_tick`'s `current not in uids` check; a `MimoError` should abort the removal, not be treated as "no live login".
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/mimo.py:136 (lock held across `probe`, lines 381-401)
+ID: mimo:auto-tick:network-probe-under-exclusive-lock
+ISSUE: `auto_tick` holds the exclusive store lock for the entire sequential probe of every stored account, and `urllib.request.urlopen(timeout=...)` bounds per-socket operations, not the total request — `resp.read()` on a drip-fed server can block indefinitely.
+ATTACK VECTOR: With a few accounts and one unresponsive endpoint (black-holed TLS, a server trickling bytes), a tick pins the lock for minutes-to-forever. Any user command — `add`, `switch`, `remove`, and `login` *before it prints the "/login" instruction* (line 146) — then hangs with no message and no timeout, looking like a cswap deadlock. Worse for an "auto loop": the next scheduled tick queues behind the previous one instead of skipping, so the queue grows without bound. `lock()` (filestore.py:64-74) only ever takes `LOCK_EX` blocking, with no `LOCK_NB` or deadline option.
+SUGGESTED FIX: Use `fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)` with a `TimeoutExpired`-style error (or an `alarm`/deadline wrapper) so a contended lock fails fast; in `auto_tick`, probe outside the lock and take it only for the `_switch`/`record` writes; add an overall wall-clock budget to the probe loop.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/mimo.py:120-133 (restore guard line 128)
+ID: mimo:login:no-new-login-loses-fresh-key
+ISSUE: A fresh login that mimo wrote into `auth.json` without a `metadata.uid` fails `uid_of`, and the `finally` block unconditionally rewrites the xiaomi entry with the *previous* key — deleting the new one and never storing it anywhere.
+ATTACK VECTOR: If MiMo ever omits or renames `uid` in `metadata` (a client update is enough), `cswap mimo login` logs the user in on account B in the browser, then silently restores account A and raises "no new login — the previous one is back in place". B's Token Plan key exists nowhere on disk and is gone from `auth.json`; the user must re-run `/login`, and the operator's stated failure mode "losing a login" is met while the message reads as a benign no-op. Note the asymmetry: `fresh` is *always* stored when it has a uid (line 132), so the uid-less case is the only one that discards a working key.
+SUGGESTED FIX: Before restoring, keep the fresh entry: if `fresh` has a key but no uid, either abort with "logged in but the login carries no uid — nothing was swapped, your new login is still in auth.json" (leave it in place), or stash it under a generated name so it can be inspected/recovered.
+
+---
+
+SEVERITY: INFO
+CONFIDENCE: high
+FILE: src/claude_swap/mimo.py:178 (and 392, 381)
+ID: mimo:switch:assumes-metadata-is-a-dict
+ISSUE: `uid_of` guards `entry` itself but assumes `metadata` is a mapping (`(entry.get("metadata") or {}).get("uid")`), and `probe` assumes `entry["key"]` exists; neither holds for JSON read back from `auth.json` or a store file.
+ATTACK VECTOR: A `mimo` version that writes `"metadata": []`/`"metadata": "..."`, or a half-written store file with `key` absent, makes every cswap command raise `AttributeError`/`KeyError`/`TypeError` — an opaque traceback instead of a `MimoError` — including inside `auto_tick` while the lock is held, after `record()` already blacklisted the live account as exhausted.
+SUGGESTED FIX: `meta = entry.get("metadata"); meta = meta if isinstance(meta, dict) else None` (return `None` from `uid_of` when absent), have `probe` return `Probe("unknown", None, "no key in the login")` instead of indexing `entry['key']`, and let callers read the entry through the strict reader so a malformed file is an error, not a crash.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
