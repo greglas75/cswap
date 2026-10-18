@@ -1,0 +1,512 @@
+artifact_kind=adversarial-review
+created_at=2026-10-18T06:20:50Z
+status=partial
+mode=code
+output_format=text
+providers_used=codex-5.3, byteplus-alt, zai, claude
+provider_count=4
+providers_attempted=5
+provider_outcomes=codex-5.3:ok,openrouter-alt:timeout,byteplus-alt:ok,zai:ok,claude:ok
+adversarial_pass=1/3
+REVIEW BY: CODEX-5.3
+REVIEW BY: BYTEPLUS-ALT
+REVIEW BY: ZAI
+REVIEW BY: CLAUDE
+input_chars=23588
+input_chars_original=23588
+input_truncated=false
+total_findings=25
+critical=5
+warning=15
+info=5
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: codex-5.3, byteplus-alt, zai, claude (4 total)
+Mode: code
+Input size: 23588 chars
+Date: 2026-10-18T06:20:50Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CODEX-5.3
+###############################################################
+
+SEVERITY: CRITICAL  
+CONFIDENCE: high  
+FILE: src/claude_swap/cursor.py:94  
+ID: cursor.py:94:unverified-token-email-binding  
+ISSUE: `email_of` accepts an email when the token has no readable `sub` or `authInfo` has no `authId`.  
+ATTACK VECTOR: During a partial login or token refresh, `add` or `_sync_live` can overwrite an account’s stored credentials with another account’s token under the existing email.  
+SUGGESTED FIX: Require a valid token subject and matching `authId` before storing or syncing a login.
+
+SEVERITY: CRITICAL  
+CONFIDENCE: high  
+FILE: src/claude_swap/cursor.py:141  
+ID: cursor.py:141:refresh-token-remains-after-switch  
+ISSUE: `write_live` leaves the existing keychain refresh token in place when the target account has no refresh token.  
+ATTACK VECTOR: After a switch, Cursor can use the previous account’s refresh token alongside the new account’s access token.  
+SUGGESTED FIX: Require a refresh token for stored logins, or delete the existing keychain refresh token when the target lacks one.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: src/claude_swap/cursor.py:270  
+ID: cursor.py:270:failed-login-keeps-fresh-credentials  
+ISSUE: The `login` cleanup restores the previous login only when `fresh` is missing, invalid, or the same account.  
+ATTACK VECTOR: If `cursor-agent login` writes valid credentials and then fails, the exception propagates while the new login remains live and unstored.  
+SUGGESTED FIX: Check the subprocess result and store a validated fresh login before returning or propagating failure; otherwise restore the previous login.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: src/claude_swap/cursor.py:145  
+ID: cursor.py:145:partial-live-switch-without-rollback  
+ISSUE: `write_live` changes tokens before writing `authInfo`, with no rollback if a later write fails.  
+ATTACK VECTOR: A keychain or filesystem error can leave the live token and identity describing different accounts, and a later sync may store that mixed state.  
+SUGGESTED FIX: Save the previous live state and restore it on failure; validate the complete live state after writing.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: src/claude_swap/cursor.py:316  
+ID: cursor.py:316:unknown-live-login-can-be-overwritten  
+ISSUE: `_switch` permits a switch when `read_live(strict=True)` returns credentials but `email_of` cannot identify them.  
+ATTACK VECTOR: A partially written or unfamiliar live login has no stored copy, yet switching overwrites it without the protection applied to identified unstored accounts.  
+SUGGESTED FIX: Refuse to switch when live credentials exist but their account cannot be validated.
+
+
+###############################################################
+###   PROVIDER: BYTEPLUS-ALT
+###############################################################
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/cursor.py:142
+ID: cursor.py:142:write-live-stale-refresh-token
+ISSUE: `write_live` only writes the refresh token when truthy, so switching to an account whose stored `refreshToken` is `None`/empty leaves the previous account's refresh token in the keychain.
+ATTACK VECTOR: A stored file can legitimately have `refreshToken: null` (keychain `get_password` returns `None` without raising, or a Linux `auth.json` that never had one). After `_switch` writes account B's access token and `authInfo`, the `cursor-refresh-token`/`cursor-user` keychain entry still belongs to account A. `cursor-agent` will then refresh using A's refresh token while presenting B's identity — invoices/usage land on the wrong account, and the rotation silently mixes two logins.
+SUGGESTED FIX: Always write the refresh entry (and delete it when empty):
+```python
+if login.get("refreshToken"):
+    macos_keychain.set_password(REFRESH_SERVICE, KEYCHAIN_ACCOUNT, login["refreshToken"])
+else:
+    with contextlib.suppress(Exception):
+        macos_keychain.delete_password(REFRESH_SERVICE, KEYCHAIN_ACCOUNT)
+```
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/cursor.py:339
+ID: cursor.py:339:switch-unverified-live-login-lost
+ISSUE: `_switch` only guards against clobbering an unstored live login when `email_of(live)` is non-`None`; if the live login is present but unverifiable, the guard is skipped, `_sync_live` does not back it up, and the live keychain tokens are overwritten with no copy anywhere.
+ATTACK VECTOR: A live login whose `authInfo`/JWT can't be reconciled (missing/invalid `authId`, or `authInfo` without `email`) yields `live_email is None`; `_sync_live` then returns `None` and `previous != email` triggers `write_live(target)`. The previously-live account's tokens are destroyed with no stored copy — exactly the "losing a login" failure mode this code is meant to prevent.
+SUGGESTED FIX: When a live login exists but is unverifiable, refuse the switch:
+```python
+live = read_live(strict=True)
+if live is not None and email_of(live) is None:
+    raise CursorError("the live Cursor login cannot be identified — run `cswap cursor add` before switching")
+previous = _sync_live(backup_root)
+```
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/cursor.py:115
+ID: cursor.py:115:email-of-identity-check-bypass
+ISSUE: The `email_of` docstring claims the email is returned "only when authInfo describes the same user as the token," but the mismatch check is skipped whenever the token has no decodable `sub` claim, so nothing is verified in that case.
+ATTACK VECTOR: An opaque/legacy or half-written access token (no `sub`) passes straight through and its `authInfo` email is returned unchecked. A partial login — e.g. `authInfo` updated but the token still belonging to another account — is therefore accepted and stored under the wrong name, contradicting the stated safety guarantee.
+SUGGESTED FIX: Either require corroboration when both `sub` and `authId` exist and reject when only one is present, or tighten the docstring to state that identity is verified only when the token exposes a `sub`.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/cursor.py:353
+ID: cursor.py:353:auto-tick-lock-during-network
+ISSUE: `auto_tick` holds the exclusive `store_lock` while `usages_fn` performs a synchronous, 20 s-timeout HTTP request per account, so the lock is held across slow/failing network I/O.
+ATTACK VECTOR: On a machine with several accounts and a degraded/hanging `api2.cursor.sh`, the lock can be held for `N × 20 s`. Any concurrent `cswap cursor add/list/switch/auto` (e.g. a second process, or the periodic unit) blocks on `flock` for the whole window, and a hung request stalls rotation entirely.
+SUGGESTED FIX: Compute usages before taking the lock, or only lock around the read-modify-write of `_switch`/`_sync_live`, passing the already-fetched `usages` in.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/cursor.py:138
+ID: cursor.py:138:write-live-non-atomic-keychain
+ISSUE: `write_live` mutates three independent stores sequentially (access keychain entry, refresh keychain entry, `cli-config.json`) with no rollback; a failure partway leaves token(s) for one account and `authInfo` for another.
+ATTACK VECTOR: If the process is interrupted or a keychain write errors between the access-token `set_password` and the config write, `cursor-agent` reads account B's token while `authInfo` still names account A (or vice versa) — a mixed-identity state that the next `add`/`sync_live` can then persist to the store directory.
+SUGGESTED FIX: At minimum write `cli-config.json` last (already the case) and record/restore prior values on exception; ideally validate `email_of(login)` and write both keychain entries before touching config so a partial failure is detectable.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/cursor.py:277
+ID: cursor.py:277:parse-usage-epoch-unit-assumption
+ISSUE: `reset_at` is computed as `float(end) / 1000.0` unconditionally, assuming `billingCycleEnd` is milliseconds with no unit validation.
+ATTACK VECTOR: If the endpoint ever returns seconds (or a pre-scaled float), `reset_at` is off by 1000×; `in_time` then prints a bogus "resets in …" and the sort key in `rank` (soonest cycle end first) orders accounts on a meaningless timestamp, potentially choosing the wrong next account.
+SUGGESTED FIX: Sanity-check the magnitude (e.g. treat values below ~1e11 as seconds) or clamp to a plausible range before dividing.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: scripts/deploy-hosts.sh:58
+ID: deploy-hosts.sh:58:labels-subscript-space
+ISSUE: The unchanged-but-now-load-bearing loop uses `"${labels[ @]}"` (stray space in the subscript) rather than `"${labels[@]}"` in the same function the diff edits to add `com.greglas.cswap-cursor`.
+ATTACK VECTOR: Depending on the bash version, the spaced subscript may be rejected ("bad array subscript") or expand differently, meaning the newly added Cursor LaunchAgent label is never kicked, so the deploy reports success while the cursor job keeps running the old binary.
+SUGGESTED FIX: Use `"${labels[@]}"`.
+
+Note: I did not flag the pre-existing `_switch`/`remove` shared root cause (`email_of(read_live()) == email` guard) separately, since the `remove` path is the same unverified-identity weakness as the `_switch` finding above.
+
+
+###############################################################
+###   PROVIDER: ZAI
+###############################################################
+
+Adversarial review of chunk 1/2. Findings sorted by severity:
+
+---
+
+**SEVERITY:** CRITICAL
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/cursor.py:128 (write_live)
+**ID:** cursor.py:128:refresh-token-omitted-mixed-account
+**ISSUE:** `write_live` only writes the refresh token `if login.get("refreshToken")` — a stored/login dict with a missing/None refresh token leaves the PREVIOUS account's refresh token paired with the NEW account's access token, and `write_live` performs three separate stores (keychain access, keychain refresh, cli-config authInfo) with no rollback if a later one fails.
+**ATTACK VECTOR:** `cursor switch` to an account whose stored file lacks `refreshToken` (e.g., saved from a keychain read where refresh came back None — `read_live` happily returns `refresh=None` when only the access item exists). cursor-agent next refreshes against the old account's refresh token and overwrites the access token back to the old account — the "active" account silently reverts, or tokens land under the wrong identity. Similarly, if the cli-config write fails after keychain writes succeed, authInfo says account A while tokens say account B.
+**SUGGESTED FIX:** In `write_live`, always write (or delete) the refresh service so it can never retain a stale value; on failure of any store, restore the prior three-piece state (capture before overwriting) or at minimum raise a loud error instead of leaving a mixed state.
+
+---
+
+**SEVERITY:** CRITICAL
+**CONFIDENCE:** high
+**FILE:** src/claude_swap/cursor.py:101 (email_of)
+**ID:** cursor.py:101:email-of-skips-identity-check
+**ISSUE:** The docstring claims "a half-written login must never be stored under the wrong name," but `email_of` skips the cross-check entirely when `sub` or `authId` is absent (`if sub and auth_id and sub != auth_id`) — mismatch is only detected when BOTH identifiers exist.
+**ATTACK VECTOR:** cursor-agent rotates the access token (new `sub` in claims) but the `authInfo` block in cli-config.json is stale/half-written from the previous account. `sub` and `authId` don't match, but if the token is opaque or authId is missing, `email_of` returns the stale email; `add`/`_sync_live` then overwrite account A's stored file with account B's tokens — silent cross-account token clobbering, exactly the failure mode the docstring promises against.
+**SUGGESTED FIX:** Return `None` when `sub` and `authId` are both present and differ, and also when `sub` is present but `authId` is absent (cannot confirm match) — or at minimum require both identifiers to agree before returning an email for *storing* paths.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** high
+**FILE:** src/claude_swap/cursor.py:338 (auto_tick / usages_for under lock)
+**ID:** cursor.py:338:network-under-store-lock
+**ISSUE:** `auto_tick` holds `store_lock` (an exclusive `flock`) across `usages_for`, which performs one HTTP request per stored account with a 20 s timeout each.
+**ATTACK VECTOR:** With N stored accounts and a flaky network, the lock is held up to N×20 s (5 accounts ≈ 100 s). Any concurrent `cswap cursor list` / `switch` / `add` (all take the same lock) blocks for minutes with no output; a LaunchAgent restart during this window can also race the lock file.
+**SUGGESTED FIX:** Snapshot the needed login dicts inside the lock, release it, then fetch usages; re-acquire only for the `_switch` mutation.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/cursor.py:203 (login)
+**ID:** cursor.py:203:login-restore-failure-data-loss
+**ISSUE:** In `login`, if `write_live(previous)` inside the `finally` raises (keychain write failure, `refuse_test_identity` rejection), the exception propagates and the user's live login — already cleared by `clear_live()` — is silently lost; additionally, when `previous is None` the error message "no new login — the previous one is back in place" is false (there was nothing to restore, and any pre-login state was destroyed).
+**ATTACK VECTOR:** `clear_live()` succeeds, the interactive `cursor-agent login` is aborted, and the keychain write of `previous` fails → the user has zero stored logins locally (only the store copy if they had ever run `add`), while the CLI reports the previous login was restored.
+**SUGGESTED FIX:** Restore BEFORE treating the flow as failed and surface restore failure explicitly (`CursorError("restore failed: …; tokens still in store")`); make the error message conditional on `previous is not None`.
+
+---
+
+**SEVERITY:** INFO
+**CONFIDENCE:** high
+**FILE:** src/claude_swap/cli.py:1315 (auto --interval help vs loop)
+**ID:** cli.py:1315:interval-help-min-60s
+**ISSUE:** `--interval` help claims "Seconds between checks" but the loop enforces `time.sleep(max(60.0, args.interval))` — values below 60 are silently raised to 60 s.
+**ATTACK VECTOR:** An operator setting `--interval 10` for fast failover gets 60 s worst-case latency between threshold breach and switch, with no warning; the documented contract is not enforced by the code.
+**SUGGESTED FIX:** Either honor small intervals or reject/warn when `args.interval < 60` and update the help text.
+
+---
+
+**SEVERITY:** INFO
+**CONFIDENCE:** low
+**FILE:** src/claude_swap/cursor.py:80 (_write_private)
+**ID:** cursor.py:80:chmod-0700-existing-dir
+**ISSUE:** `_write_private` unconditionally `chmod 0700`s the parent directory — including pre-existing shared dirs like `~/.cursor` and `~/.config/cursor` that the user may have created with different permissions.
+**ATTACK VECTOR:** First switch on a machine silently tightens permissions on Cursor's own config directory; if any other tool/user group relied on that mode, access breaks with no record that cswap changed it.
+**SUGGESTED FIX:** Only chmod directories cswap itself created (check existence before `mkdir`), or leave existing dirs' modes untouched.
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/cursor.py:151
+ID: cursor.py:151:read-json-or-empty-wipes-config
+ISSUE: `write_live` does `_read_json(config_file()) or {}`. A missing, half-written or unparseable `cli-config.json` becomes `{}`, and the file is then replaced with only `{"authInfo": …}`.
+ATTACK VECTOR: `_read_json` returns None on any `OSError` or `ValueError`. cursor-agent rewrites this file while it runs and holds its own copy of the settings in memory. A `cswap cursor switch` or an auto-tick at that moment replaces the whole file, so the user's permissions, model and editor settings are gone. The write is unlocked read-modify-write, so cursor-agent can also overwrite the new `authInfo` with the old account's afterwards. `clear_live` handles this correctly (`config is not None`); `write_live` does not.
+SUGGESTED FIX: Read the file explicitly. If it exists but does not parse, raise `CursorError` and write nothing. Use `{}` only when the file is absent.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/cursor.py:145
+ID: cursor.py:145:keychain-refresh-token-not-overwritten
+ISSUE: In keychain mode, `write_live` only writes the refresh token `if login.get("refreshToken")`. When the target's stored refresh token is None, the previous account's refresh token stays in the keychain next to the new account's access token.
+ATTACK VECTOR: `read_live` and `add` store `refreshToken: None` when the keychain returns None for that item. Switching to such an account leaves a mixed login: access token B, refresh token A, `authInfo` B. When the access token expires, cursor-agent refreshes with A's token and the live login silently becomes account A. The next `_sync_live` then stores A's tokens, or a mismatched pair, under B. File mode writes `None` and clears the old value, so the two modes behave differently.
+SUGGESTED FIX: In `write_live`, delete the refresh-token item when the target has none. Better, refuse to store or switch to a login without a refresh token.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/cursor.py:116
+ID: cursor.py:116:email-of-identity-guard-optional
+ISSUE: `email_of` only rejects a mismatch when both `sub` and `authId` are present. `write_live` is also non-atomic: tokens are written first, then `authInfo`, with no rollback. `_switch` treats `live_email is None` as "nothing to protect".
+ATTACK VECTOR:
+- If the `sub` claim or `authId` is missing, a failure between the two writes (disk full, keychain error) leaves the new tokens with the old email. The next `_sync_live` or `add` stores those tokens over the old account's file, so the stored login for that account is overwritten with another account's tokens.
+- `_switch` overwrites a live login whose identity cannot be read (tokens present, `authInfo` mismatched) without checking whether it is stored.
+SUGGESTED FIX:
+- Make `write_live` restore the previous pieces if any step fails.
+- In `email_of`, return None when `sub` or `authId` is absent, or compare the token's `sub` with the stored copy's `sub`.
+- In `_switch`, refuse when tokens exist but `email_of(live)` is None.
+
+SEVERITY: WARNING
+CONFIDENCE: low
+FILE: src/claude_swap/cursor.py:290
+ID: cursor.py:290:zero-usage-field-omitted-unreadable
+ISSUE: `parse_usage` returns an error when `planUsage.totalPercentUsed` is not a number. A Connect/proto3 JSON reply normally omits zero-valued fields.
+ATTACK VECTOR: A fresh account on a new billing cycle, with 0% used, may have no `totalPercentUsed` field. It is then marked "usage unknown" and `rank` never picks it, even though it is the best target. The same applies to the `individualUsed` / `individualLimit` dollars: int64 values arrive as JSON strings, which `dollars()` silently drops. `billingCycleEnd` is handled with `float()`, but `dollars()` is not.
+SUGGESTED FIX: Treat a present reply with `planUsage` or `totalPercentUsed` absent as 0.0 (keep `error` for a malformed reply). Parse numeric strings in `dollars`.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/cursor.py:361
+ID: cursor.py:361:store-lock-held-during-network
+ISSUE: `auto_tick` holds the exclusive `store_lock` while `usages_fn` makes up to N sequential HTTPS calls with a 20 s timeout each. The flock has no timeout.
+ATTACK VECTOR: With slow or unreachable Cursor API, `cswap cursor list`, `switch`, `remove` and `sync_live` all block for N×20 s or more. A manual `switch` during a rotation waits silently, and a hung request stalls everything. Network results also come from before the lock is released, so a manual switch sneaking in right after is judged on stale data.
+SUGGESTED FIX: Take the lock only for the sync and the switch. Fetch usages outside the lock, then re-check `current` under the lock before `_switch`.
+
+SEVERITY: WARNING
+CONFIDENCE: low
+FILE: src/claude_swap/cursor.py:234
+ID: cursor.py:234:login-clears-live-outside-lock
+ISSUE: In `login()`, `clear_live()`, the `cursor-agent login` call and `write_live(previous)` all run outside `store_lock`. The auto daemon can run during that window.
+ATTACK VECTOR: The daemon holds the lock and switches to account B. `login()` then clears or restores its stale `previous` (A) over B, or removes B's login mid-switch. After a transient `read_live()` failure at line 238, the freshly entered new login is overwritten by `previous` and the user has to redo it.
+SUGGESTED FIX: Hold `store_lock` around the clear/restore steps, but not around the interactive login. Use `read_live(strict=True)` for the post-login read so a transient failure does not trigger a restore.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/cursor.py:241
+ID: cursor.py:241:relogin-same-account-restores-stale
+ISSUE: When `cursor-agent login` signs in the same account again (`same`), the fresh tokens are thrown away and the older `previous` tokens are written back, with the error "no new login".
+ATTACK VECTOR: A re-login (done to repair an expired or revoked login) can invalidate the old refresh token server-side. The code then reinstates the stale pair and also keeps it in the store, so the working login is lost.
+SUGGESTED FIX: If `same` is true and the fresh login is valid, keep it and store it under the same email. Restore `previous` only when there is no valid fresh login.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
+
+=== APPENDED PASS 2026-10-18T06:20:50Z ===
+artifact_kind=adversarial-review
+created_at=2026-10-18T06:20:49Z
+status=partial
+mode=code
+output_format=text
+providers_used=codex-5.3, byteplus-alt, claude, qwen
+provider_count=4
+providers_attempted=5
+provider_outcomes=codex-5.3:ok,openrouter-alt:timeout,byteplus-alt:ok,claude:ok,qwen:ok
+adversarial_pass=1/3
+REVIEW BY: CODEX-5.3
+REVIEW BY: BYTEPLUS-ALT
+REVIEW BY: CLAUDE
+REVIEW BY: QWEN
+input_chars=6631
+input_chars_original=6631
+input_truncated=false
+total_findings=18
+critical=3
+warning=10
+info=5
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: codex-5.3, byteplus-alt, claude, qwen (4 total)
+Mode: code
+Input size: 6631 chars
+Date: 2026-10-18T06:20:49Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CODEX-5.3
+###############################################################
+
+NO ISSUES FOUND.
+
+
+###############################################################
+###   PROVIDER: BYTEPLUS-ALT
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: tests/test_cursor.py:90
+ID: test_cursor.py:90:rank-order-not-soonest
+ISSUE: `test_rank_prefers_soonest_cycle_end_among_accounts_with_room` asserts `["soon @x.com", "late @x.com", "tiny @x.com"]` (resets 500, 900, 1), placing the soonest-resetting account (`tiny`, reset=1.0) last — the opposite of the test's name/docstring, which claims preference for the soonest cycle end.
+ATTACK VECTOR: `tiny` (93% used, reset=1.0, room) would be selected first by any "prefer soonest cycle end" implementation, so a correct implementation fails this test; conversely a buggy/inverted `rank` that sinks soon-resetting accounts passes and ships. No other assertion in the file disambiguates the two, so the test locks in whichever behavior the author happened to observe.
+SUGGESTED FIX: Decide the intended policy and make name, docstring, and vector agree. If soon-resetting accounts are deliberately deprioritized, rename the test/docstring accordingly (e.g. "prefers soonest cycle end that is not imminent"); otherwise fix the expected order to `["tiny @x.com", "soon @x.com", "late @x.com"]`.
+
+SEVERITY: WARNING
+CONFIDENCE: low
+FILE: tests/test_cursor.py:40
+ID: test_cursor.py:40:live-write-real-config
+ISSUE: `_live`/`auth_file`/`config_file` write via paths that depend solely on `CSWAP_CURSOR_HOME`; the fixture comment only claims it "keeps the keychain out" and never establishes that `config_file()` (documented as `~/.cursor/cli-config.json`) is also redirected.
+ATTACK VECTOR: If `config_file()` resolves to the real home, every test calling `_live` overwrites the developer's actual `~/.cursor/cli-config.json` (authInfo, model, settings), i.e. the test suite can log the user's own cursor-agent out — exactly the data loss the module is meant to avoid. Non-hermetic tests also produce environment-dependent results.
+SUGGESTED FIX: Have the fixture force `config_file()` (and any other real path) under `tmp_path` via an explicit override/assertion, or add an assertion that `cursor.config_file()` starts with `str(tmp_path)` so a non-redirected path fails loudly instead of clobbering the real config.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: tests/test_cursor.py:157
+ID: test_cursor.py:157:foreign-file-silent-drop
+ISSUE: `test_foreign_files_in_the_store_are_not_accounts` asserts `stored_accounts(env) == ["a @x.com", "b @x.com"]` for `c @x.com.json` whose content names `d @x.com`, so a file whose content email diverges from its filename is silently dropped rather than surfaced.
+ATTACK VECTOR: A genuine stored login can become invisible (and effectively lost for rotation) if its filename and `authInfo.email` ever diverge — e.g. an email change, a rename, or a partially-written file — with no error. The test legitimizes this silent drop, so a future regression that should error instead goes unnoticed.
+SUGGESTED FIX: Assert the mismatched entry is either reported via an error/log or explicitly counted as unknown, rather than only checking the final list; at minimum document that filename/content divergence means silent exclusion.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: tests/test_cursor.py:63
+ID: test_cursor.py:63:bool-usage-error-message
+ISSUE: The `bool-is-not-a-percent` case supplies `{"planUsage": {"totalPercentUsed": True}}` yet expects the message `"no plan usage in the reply"` — the same string used for the genuinely empty `{}` reply.
+ATTACK VECTOR: A malformed-but-present plan usage is reported identically to a missing one, so operators cannot distinguish "Cursor changed the field type" from "no plan data", hiding an upstream API contract change behind a benign-looking message.
+SUGGESTED FIX: Expect a distinct error (e.g. an "invalid plan usage" variant) for the non-numeric percent, so type corruption is not conflated with absent data.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: tests/test_cursor.py:77
+ID: test_cursor.py:77:expired-token-no-call-unverified
+ISSUE: `test_expired_token_is_unknown_without_calling_out` asserts only that `error.startswith("access token expired")`; nothing verifies the network was not contacted, despite the name claiming "without calling out".
+ATTACK VECTOR: An implementation that still issues the usage request (and only reports expiry on failure/other path) can satisfy the prefix assertion, so the test cannot catch an expired-token request leaking to the API, defeating its own stated purpose.
+SUGGESTED FIX: Monkeypatch the HTTP/transport layer to raise if invoked and assert it is never called, making the "without calling out" claim actually enforced.
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: tests/test_cursor.py:88
+ID: test_cursor.py:88:rank-order-contradicts-soonest-cycle-end
+ISSUE: `test_rank` asserts `tiny@x.com` (reset 1.0, the earliest) comes last, which contradicts the test name and docstring ("prefers soonest cycle end"). The fixture uses epoch-second values (1.0, 10.0, 100.0 and so on), all in the past, so the test never exercises a real future reset time.
+ATTACK VECTOR: The expected order only holds if `rank` has a hidden rule, such as treating a past `reset_at` as stale or ordering by headroom. The test doesn't say which rule. A refactor that changes that rule, or a production `reset_at` that is a real future timestamp, goes unchecked. The "wasting quota that expires first" bug the docstring names is not actually pinned.
+SUGGESTED FIX: Build the timestamps relative to `time.time()`, with future resets only. Add a separate, explicitly named case for a past or stale `reset_at`. Make the name and docstring match what is asserted.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: tests/test_cursor.py:18
+ID: test_cursor.py:18:jwt-far-future-exp-hides-stale-tokens
+ISSUE: Every fixture login uses `exp=4102444800` (year 2100), so no stored account's token ever expires. `test_expired_token_is_unknown_without_calling_out` shows an expired access token is classified as an error and never offered by `rank`.
+ATTACK VECTOR: In production only the live login is refreshed by cursor-agent. Stored accounts keep a frozen `accessToken`. Once their short-lived JWTs expire, every stored account reads as "access token expired" and is dropped from `rank`. Rotation then reports "nowhere to go" even though the refresh tokens are valid, and the owner stays stuck on the exhausted account. No test covers a stored account with an expired access token but a valid `refreshToken` being rotated to or refreshed.
+SUGGESTED FIX: Add a test where the target is stored with an expired access token and a refresh token. Decide and assert whether `auto_tick` refreshes the token, or at least reports it distinctly instead of silently excluding the account.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: tests/test_cursor.py:131
+ID: test_cursor.py:131:auto-tick-unreadable-live-usage-untested
+ISSUE: `test_auto_tick` only covers readable usages (`Usage(pct, 100.0)`). It has no case where the live account's usage is unreadable (`Usage(None, None, error=...)`), or where the only alternative is unreadable.
+ATTACK VECTOR: The focus is wrong switch decisions. A transient 401, timeout or malformed reply for the live account is a likely production state. If `auto_tick` treats `pct=None` as "over threshold" it moves off a healthy account. If it treats it as 0% it never moves. Nothing pins either behaviour, and a swap triggered by a network blip rewrites the login files.
+SUGGESTED FIX: Add parametrized cases: live usage error → `cursor-no-switch` with the live login unchanged; live exhausted and every other account errored → no switch.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: tests/test_cursor.py:142
+ID: test_cursor.py:142:failed-login-mock-never-logs-out
+ISSUE: In `test_failed_login_puts_the_previous_one_back` the fake `subprocess.call` returns 1 without touching the live login. The final assertion therefore passes unless `login()` itself removes the live login first and then fails to restore it. The test also replaces the global `shutil.which` and `subprocess.call` (via `cursor.shutil` and `cursor.subprocess`, which are the real modules), so it affects any other caller in the process. It never checks that the store is unchanged either.
+ATTACK VECTOR: The test claims to catch "an aborted login leaving the machine logged out", but the fake never simulates the login wiping or half-writing credentials. A regression where `login()` stops saving or restoring the previous login, or where a partial write leaves new tokens under the old `authInfo`, would still pass. The patched global `which` returns a path for any binary name, including any `security` lookup.
+SUGGESTED FIX: Make the fake `call` delete or overwrite the live files, as cursor-agent would, before returning 1. Then assert the restored tokens and config equal the originals and the store is unchanged. Patch `cursor.subprocess.call` and `cursor.shutil.which` with narrow, name-checked fakes.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: tests/test_cursor.py:99
+ID: test_cursor.py:99:no-token-file-permission-or-atomicity-check
+ISSUE: No test checks that stored account files and the live `auth.json` are written with owner-only permissions (0600). No test checks that a failure mid-switch leaves the live login intact. `_live` writes with the default umask, so permissions can't be asserted from the fixtures either.
+ATTACK VECTOR: Refresh and access tokens are stored as plaintext JSON under the backup dir. A world-readable file exposes every stored Cursor account. A crash or exception between writing the tokens and writing `cli-config.json` leaves tokens of one account with the identity of another. That is the "tokens under the wrong account" failure, and `test_half_written_login_is_not_named` only covers reading it.
+SUGGESTED FIX: Assert `stat().st_mode & 0o777 == 0o600` on stored files and the live auth file after `add` and `switch`. Add a test that makes the second write fail (monkeypatch `config_file` write) and asserts the live tokens and identity are still consistent.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: tests/test_cursor.py:61
+ID: test_cursor.py:61:parse-usage-ms-seconds-boundary-untested
+ISSUE: The only `billingCycleEnd` case is a millisecond string. There are no cases for second-resolution values, numeric (non-string) input, an out-of-range percent (over 100, negative, NaN, or the string "42"), or a malformed timestamp.
+ATTACK VECTOR: Whether the ms→s conversion is a magnitude heuristic or an unconditional division is unpinned. A reply in seconds would give a `reset_at` in 1970 or in the far future, which misorders `rank`. A string or NaN percent could be accepted as a real value and count as having room.
+SUGGESTED FIX: Add parametrized cases for second-resolution and numeric `billingCycleEnd`, and for `totalPercentUsed` that is a string, NaN or negative. Assert each yields an error or a correctly scaled value.
+
+
+###############################################################
+###   PROVIDER: QWEN
+###############################################################
+
+Reading the artifact only: findings below.
+
+---
+
+**SEVERITY:** CRITICAL
+**CONFIDENCE:** high
+**FILE:** tests/test_cursor.py:91
+**ID:** test_cursor:91:rank-order-contradicts-soonest-reset-docstring
+**ISSUE:** The asserted `rank()` order cannot be produced by the sort its docstring promises, so the "move to the account whose quota expires soonest" policy is not actually pinned by any test.
+**ATTACK VECTOR:** `reset_at` values are `soon=500.0`, `late=900.0`, `tiny=1.0`; the expectation is `["soon", "late", "tiny"]` — neither ascending nor descending by `reset_at`, and not by `pct` either (50, 10, 93). So `rank()` orders on some other key (insertion/pct/whatever), while line 81-82 claims "wasting quota that expires first" is guarded against. Worse, `tiny @x.com` with `reset_at=1.0` (a 1970 epoch end, i.e. exactly the ms-vs-seconds misparse that line 68 says was the original bug) is accepted as a legal switch target. In production this means: on a plan that renews on a different cadence, rotation picks the account that will be *renewed last*, burns quota that would otherwise be refreshed, and will happily target an account whose cycle-end value is garbage — the daemon then flips identities onto an already-exhausted account and oscillates. It also means this assertion is a regression lock on the *wrong* behavior: fix `rank()` to sort by `reset_at` and this test fails, so the next author keeps the bug.
+**SUGGESTED FIX:** Make the fixture unambiguous and assert the documented invariant: use distinct, plausible epoch-scale `reset_at` values (e.g. 500/900/1700000000), expect `["tiny", "soon", "late"]` if soonest-wins is the spec; and add a case where a `reset_at` in the past (or below `time.time()`) is excluded from candidates rather than ranked. If the intended key is actually "max remaining quota", delete the docstring claim rather than the ordering.
+
+---
+
+**SEVERITY:** CRITICAL
+**CONFIDENCE:** medium
+**FILE:** tests/test_cursor.py:138
+**ID:** test_cursor:138:spawned-login-patches-only-which-and-call
+**ISSUE:** The rollback test neutralizes only `shutil.which` and `subprocess.call`, so any other execution path silently launches the real `cursor-agent login` against the real `~/.cursor` and the real keychain.
+**ATTACK VECTOR:** The mock surface is tied to implementation details (`cursor.shutil`, `cursor.subprocess.call`) that the test does not own. `login` is the one place an interactive flow is plausible, so an implementation using `subprocess.run(...)`, `Popen`, `os.execvp`, or a shell string — or importing `from subprocess import call` (making `setattr` on the module attribute the wrong object, or `AttributeError`) — is completely uncovered, and the test then *passes* while having really logged the machine out / opened a browser. The `env` fixture's redirect is `CSWAP_CURSOR_HOME` (line 33) only; `HOME`/`~/.cursor`/keychain are untouched, so the child process writes the *real* credential store. That is precisely the "losing a login" failure mode, now triggered by running the test suite in CI or on the author's laptop. Additionally, nothing asserts which argv was passed, so a regression that spawns `cursor-agent logout` (or login for the wrong account) would stay green.
+**SUGGESTED FIX:** Intercept every exec path, not one symbol: `monkeypatch.setattr(cursor.subprocess, "run", boom)`, `"call"`, `"Popen"`, `"check_call"`, and patch `os.system`/`os.exec*` if used; also `monkeypatch.setenv("HOME", str(tmp_path))` so a leaked spawn cannot reach the real home. Record the argv the module tried to run and assert on it.
+
+---
+
+**SEVERITY:** CRITICAL
+**CONFIDENCE:** medium
+**FILE:** tests/test_cursor.py:52
+**ID:** test_cursor:52:half-written-guard-never-checks-access-vs-refresh
+**ISSUE:** The "half-written login" detection only cross-checks `authInfo.authId` against the access token's `sub`; a mismatch between `accessToken` and `refreshToken` is never tested, so tokens of one account can still be stored under another account's email.
+**ATTACK VECTOR:** Cursor renews `accessToken` from `refreshToken` and writes both fields into `auth.json`; an interrupted write yields `{accessToken: A, refreshToken: B}`. Both existing name-checks (line 52-54) pass — `authId` and `sub` agree — so `email_of()` confidently names the pair "a@x.com". `cursor.add()`/`switch()` then persist B's long-lived refresh token under A's key (the storage path is derived from the email, line 102), and the *next* rotation silently authenticates as B while the store says A: quota is charged to the wrong plan, the real owner of B is never tracked as live, and `remove()` can delete the only copy of B's credentials under A's name. The test data makes this unobservable: `_login(..., refresh="r")` (line 23) hard-codes an opaque constant that carries no identity, so no test can ever express a divergent pair.
+**SUGGESTED FIX:** Give the refresh token real structure (e.g. `_jwt(sub)` for it too) and add `login["refreshToken"] = _jwt("auth0|someone-else")` → `assert cursor.email_of(login) is None`. If the refresh token genuinely has no decodable subject, then make `add()`/`switch()` re-verify identity after a refresh round-trip before writing to the store, and test that.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** high
+**FILE:** tests/test_cursor.py:77
+**ID:** test_cursor:77:no-network-claim-unenforced-and-real-home-reachable
+**ISSUE:** The test named "...without calling out" never asserts that no request was made, and it runs without the `env` fixture, so it can hit the real network and the real `~/.cursor`/keychain.
+**ATTACK VECTOR:** The only evidence is the returned error string. If the expiry pre-check is moved *after* the HTTP call, the test still passes (a 401 also yields that string) while every CI run now sends a fabricated credential to `api2.cursor.sh` and depends on real DNS/TLS/proxy behavior — i.e. slow, flaky, and an outbound request nobody intended. Because line 73 takes no `env`, the module's default path resolution is live: a `fetch_usage` that caches or falls back to reading the auth file (or a keychain lookup) touches the developer's actual Cursor login. Silent fallback of this kind is exactly how "unreadable usage" gets mistaken for "0% used".
+**SUGGESTED FIX:** Add the guard the docstring claims: `monkeypatch.setattr(cursor, "urlopen", boom)` (or patch the http client / install a non-default transport), assert it was not called, and give the test the `env` fixture so no real home is reachable.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** high
+**FILE:** tests/test_cursor.py:60
+**ID:** test_cursor:60:parse-usage-never-tested-for-non-numeric-cycle-end
+**ISSUE:** `parse_usage` is only exercised with a numeric-string `billingCycleEnd` plus well-formed `planUsage`; no malformed, non-numeric, seconds-form, or `None` variant is tested, so the "never raise, always return an error Usage" contract is unproven.
+**ATTACK VECTOR:** The expected `1793370023.0` at line 61 implies the implementation coerces and scales a raw API field (`int(...)/1000` or a magnitude heuristic). A server-side change to an ISO-8601 string, `"1793370023"` already-in-seconds, `null`, or a field renamed, then raises `ValueError`/`TypeError`/`KeyError` out of `parse_usage` instead of returning `Usage(..., error=...)` — and the auto-tick loop dies (or, if wrapped in a broad `except`, the exception is swallowed into a default `Usage(0.0, ...)` and rotation switches *away* from a healthy account). Note the test's own id `"bool-is-not-a-percent"` (line 63) shows the author hit exactly this "type accepted where it shouldn't be" class, yet only patched the `pct` side. This is the boundary-validation gap behind the ms-vs-seconds bug the docstring at line 68 claims to have fixed: one unit is pinned, the other is not.
+**SUGGESTED FIX:** Parametrize the failure shapes: `{"billingCycleEnd": "2026-11-01T00:00:00Z"}`, `"1793370023"` (seconds), `None`, `""`, and missing `planUsage`, each asserting `usage.error` is set and `pct/reset_at is None`. Then assert `auto_tick` tolerates an error/exception-shaped usage for the *current* account (see below).
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** medium
+**FILE:** tests/test_cursor.py:120
+**ID:** test_cursor:120:auto-tick-never-tests-unreadable-live-usage
+**ISSUE:** Every `auto_tick` case supplies a readable float for the live account; the state that actually motivates rotation — the live account's usage is unreadable (`Usage(None, None, error=...)`, e.g. expired token mid-cycle) — is untested, and the exact-threshold boundary is also missing.
+**ATTACK VECTOR:** `None` percentage has no defined comparison, so depending on how `auto_tick` coerces it (`pct or 0`, `pct >= threshold` with `None`, a swallowed exception), the same expired token either does nothing forever (plan stays dead, user sees 401s and no rotation — the "silent failure that hides data loss" shape) or is read as exhausted and rotates away from an account that still had a full month of quota. That second branch is worse because rotation is *irreversible from the user's point of view*: the previous identity is gone from the live file, and if the switch also tore the auth/config write pair (`email_of` → `None` at line 54 while `switch` raises `"not stored"` at line 111), the daemon enters a state where the live login is unnamed, unswitchable and un-`remove`able (line 145 refuses the live login) — a hard brick recoverable only by hand. No test pins either direction. Also `100.0/50.0` straddle the threshold but nothing tests `pct == 95.0`, which `rank` (line 91) already treats as *ineligible*, so tick and rank may disagree about ">=" vs ">".
+**SUGGESTED FIX:** Add params `live_pct=None` with an error and `live_pct=95.0` (and `94.999`), asserting `event` and — explicitly — that the live identity is byte-for-byte unchanged when the decision is unknown. Add one `switch` test that a torn `auth.json`/`cli-config.json` pair can still be repaired (document `--force` or re-`add` path).
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** medium
+**FILE:** tests/test_cursor.py:102
+**ID:** test_cursor:102:raw-email-as-store-filename-no-case-or-path-guard
+**ISSUE:** Account identity is used verbatim as an on-disk filename (`stored_path(env, "a @x.com")`, and the test suite normalizes keys with embedded spaces), with no case-folding, encoding, or traversal guard exercised.
+**ATTACK VECTOR:** `email_of` returns whatever string the identity claims, and that string becomes the path component holding a refresh token. Two consequences: (a) collisions/overwrites — `A@x.com` vs `a@x.com`, or a `+alias` variant, resolve to the same or adjacent store entry, so `add()` silently replaces one account's credentials with another's (the "storing tokens under the wrong account" failure) and `rank()` then offers a target whose file is not what its name says; (b) writes outside the store — a value containing `/`, `\`, `..`, or an absolute path (reachable from a server-supplied `email`/`authId`, or a unicode look-alike/RTL address) escapes `store_dir`, so credentials land in an arbitrary world-writable location and `stored_accounts()` loses the account entirely. On macOS the case-insensitive filesystem makes (a) deterministic rather than theoretical. `test_foreign_files_in_the_store_are_not_accounts` (line ~150) checks the *read* direction but nothing checks the write direction.
+**SUGGESTED FIX:** Have `stored_path` derive a canonical name from the verified `authId`/normalized email (lowercase, strip/validate against `^[^/\0]+$`, or a quoted/hashed filename), and add tests for `A@x.com`/`a@x.com` colliding, for `a/b@x.com` being rejected, and for a unicode-address round-trip.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
