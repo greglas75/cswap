@@ -3,7 +3,7 @@
 #
 #   mac        LaunchAgents com.greglas.claude-account-switcher + com.greglas.cswap-codex run
 #              this checkout's .venv (editable install) — they only need a restart.
-#   ryzen-dev  user greglas, systemd --user units cswap-auto + cswap-codex (cc-remote), cswap-agy once logged in.
+#   ryzen-dev  user greglas, systemd --user units cswap-auto + cswap-codex (cc-remote), cswap-agy once logged in, cswap-cursor.
 #   ryzen      ryzen-tf, as root: the CI user gha, system units cswap-auto + cswap-codex.
 #   waw        waw-tf, same as ryzen.
 #
@@ -40,7 +40,7 @@ run "rm -rf ~/.local/src/cswap && mv ~/.local/src/cswap.new/cswap ~/.local/src/c
 run "uv tool install --force ~/.local/src/cswap >/dev/null 2>&1" || { echo "FAIL uv tool install"; exit 1; }
 installed=$(stat -c %Y "$H/.local/share/uv/tools/claude-swap/uv-receipt.toml")
 units=""
-for u in cswap-auto cswap-codex cswap-agy; do ctl cat $u.service >/dev/null 2>&1 && units="$units $u"; done
+for u in cswap-auto cswap-codex cswap-agy cswap-cursor; do ctl cat $u.service >/dev/null 2>&1 && units="$units $u"; done
 [ -n "$units" ] || { echo "FAIL no cswap units here"; exit 1; }
 ctl restart $units
 sleep 8
@@ -55,7 +55,7 @@ done
 '
 
 deploy_mac() {
-  local labels=(com.greglas.claude-account-switcher com.greglas.cswap-codex com.greglas.cswap-agy) l old new bad=""
+  local labels=(com.greglas.claude-account-switcher com.greglas.cswap-codex com.greglas.cswap-agy com.greglas.cswap-cursor) l old new bad=""
   for l in "${labels[@]}"; do
     old=$(launchctl list "$l" 2>/dev/null | awk -F'= ' '/"PID"/{gsub(/;/,"",$2); print $2}')
     launchctl kickstart -k "gui/$(id -u)/$l" >/dev/null 2>&1 || { bad="$bad $l(kickstart)"; continue; }

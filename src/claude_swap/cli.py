@@ -1258,6 +1258,114 @@ def _agy_command(argv: list[str]) -> None:
         sys.exit(1)
 
 
+def _cursor_command(argv: list[str]) -> None:
+    """Handle `cswap cursor {login,add,list,switch,remove,auto}` — Cursor CLI rotation.
+
+    See :mod:`claude_swap.cursor` for the storage and the usage endpoint.
+    """
+    import json as _json
+    import time
+    from datetime import datetime, timezone
+
+    from claude_swap import cursor
+    from claude_swap.printer import bold_accent
+    from claude_swap.settings import load_settings
+
+    parser = argparse.ArgumentParser(
+        prog="cswap cursor",
+        description="Rotate Cursor CLI (cursor-agent) logins. `cswap cursor add` stores the "
+                    "current one, `cswap cursor login` signs in another — per machine.",
+    )
+    sub = parser.add_subparsers(dest="action", metavar="{login,add,list,switch,remove,auto}")
+    sub.add_parser("login", help="Store the current login, then sign in another account in cursor-agent")
+    sub.add_parser("add", help="Store the account cursor-agent is logged in with now")
+    p_list = sub.add_parser("list", help="Stored accounts with their usage this billing cycle")
+    p_list.add_argument("--json", action="store_true", help="Machine-readable output")
+    p_switch = sub.add_parser("switch", help="Make a stored account the live login")
+    p_switch.add_argument("email")
+    p_remove = sub.add_parser("remove", help="Forget a stored account (not the live one)")
+    p_remove.add_argument("email")
+    p_auto = sub.add_parser("auto", help="Switch when the live account's usage reaches the threshold (loop)")
+    p_auto.add_argument("--once", action="store_true", help="One decision, then exit")
+    p_auto.add_argument("--interval", type=float, default=300.0, help="Seconds between checks")
+    p_auto.add_argument("--dry-run", action="store_true", help="Decide, never switch")
+    args = parser.parse_args(argv)
+
+    root = paths.get_backup_root()
+    threshold = load_settings(root).threshold
+
+    def in_time(ts) -> str:
+        if not isinstance(ts, (int, float)):
+            return ""
+        left = max(0, int(ts - time.time()))
+        days, rem = divmod(left, 86400)
+        return f"resets in {days}d {rem // 3600}h" if days else f"resets in {rem // 3600}h {rem % 3600 // 60}m"
+
+    try:
+        if args.action == "login":
+            print(f"Stored Cursor account {cursor.login(root)}")
+        elif args.action == "add":
+            print(f"Stored Cursor account {cursor.add(root)}")
+        elif args.action == "remove":
+            cursor.remove(root, args.email)
+            print(f"Removed Cursor account {args.email.lower()}")
+        elif args.action == "switch":
+            previous = cursor.switch(root, args.email)
+            if previous == args.email.lower():
+                print(f"{args.email} is already the live Cursor login")
+            else:
+                print(f"Cursor login: {previous or 'none'} -> {args.email.lower()}")
+                print(dimmed("New cursor-agent processes use it; running sessions keep the old login."))
+        elif args.action == "auto":
+            while True:
+                try:
+                    event = cursor.auto_tick(root, threshold, dry_run=args.dry_run)
+                except Exception as e:  # one bad tick never ends the loop
+                    event = {"event": "cursor-error", "message": f"{type(e).__name__}: {e}"}
+                event["ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+                print(_json.dumps(event), flush=True)
+                if args.once:
+                    break
+                time.sleep(max(60.0, args.interval))
+        else:  # list (default)
+            current = cursor.sync_live(root)
+            emails = cursor.stored_accounts(root)
+            usages = cursor.usages_for(root, emails, current)
+            order = cursor.rank(usages, current, threshold)
+            rows = ([current] if current in emails else []) + order + [
+                e for e in emails if e != current and e not in order]
+            if getattr(args, "json", False):
+                print(_json.dumps({"schemaVersion": 1, "threshold": threshold, "accounts": [
+                    {"email": e, "active": e == current, "next": bool(order) and e == order[0],
+                     "usedPct": usages[e].pct, "resetAt": usages[e].reset_at,
+                     "onDemandUsed": usages[e].on_demand_used, "onDemandLimit": usages[e].on_demand_limit,
+                     "error": usages[e].error} for e in rows]}))
+                return
+            if not emails:
+                print(dimmed("No Cursor accounts stored — `cswap cursor add` stores the current login, "
+                             "`cswap cursor login` signs in another."))
+                return
+            print(bolded("Cursor accounts:") + " " + muted(f"(in the order they will be used; switch at {threshold:g}%)"))
+            for e in rows:
+                tags = [bold_accent("(active)")] if e == current else (
+                    [muted("(next)")] if order and e == order[0] else
+                    [muted("(waits for its reset)")] if e not in order else [])
+                print(f"  {e} {' '.join(tags)}".rstrip())
+                u = usages[e]
+                if u.error is not None:
+                    print(f"     └ {muted('usage unknown: ' + u.error)}")
+                    continue
+                extra = (f"   on-demand ${u.on_demand_used:g}/${u.on_demand_limit:g}"
+                         if u.on_demand_limit else "")
+                print(f"     └ {u.pct:5.0f}% used   {in_time(u.reset_at)}{extra}")
+            if current and current not in emails:
+                print()
+                warning(f"The live Cursor login {current} is not stored — run `cswap cursor add`.")
+    except cursor.CursorError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def _config_command(argv: list[str]) -> None:
     """Handle `cswap config [list|get KEY|set KEY VALUE|unset KEY|path]`.
 
@@ -1456,6 +1564,9 @@ def main() -> None:
         return
     if argv and argv[0] == "agy":
         _agy_command(argv[1:])
+        return
+    if argv and argv[0] == "cursor":
+        _cursor_command(argv[1:])
         return
     if len(sys.argv) > 1 and sys.argv[1] == "config":
         _config_command(sys.argv[2:])
