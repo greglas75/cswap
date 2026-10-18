@@ -144,6 +144,7 @@ def test_hand_edited_key_of_another_account_is_never_stored(env):
 
 def _fake_bl_login(monkeypatch, bailian: dict | None, key: str, verdict: str = "ok"):
     def call(argv, env):
+        assert argv[1:4] == ["auth", "login", "--console"]   # bare `bl auth login` only prints help
         if bailian is not None:
             cfg = Path(env["HOME"]) / ".bailian" / "config.json"
             cfg.parent.mkdir(parents=True)

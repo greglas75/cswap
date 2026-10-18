@@ -195,8 +195,10 @@ def login(backup_root: Path) -> str:
         if ws_prev is not None:
             filestore.write_private(stored_path(backup_root, ws_prev), previous)
     with tempfile.TemporaryDirectory(prefix="cswap-bl-login-") as tmp:
-        print("Log in with the console (browser) option — its workspace is how usage is read.")
-        rc = subprocess.call([bl, "auth", "login"], env=_bl_env(Path(tmp)))
+        # Bare `bl auth login` only prints its help; the console login gives the workspace
+        # whose usage cswap reads (the Token Plan key is asked for below).
+        rc = subprocess.call([bl, "auth", "login", "--console", "--console-site", "international"],
+                             env=_bl_env(Path(tmp)))
         bailian = filestore.read_json(bailian_config(Path(tmp)))
     ws = workspace_of({"qwenKey": "-", "bailian": bailian})
     if rc != 0 or ws is None:
