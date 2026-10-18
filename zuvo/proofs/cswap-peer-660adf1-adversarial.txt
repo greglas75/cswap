@@ -1,0 +1,384 @@
+artifact_kind=adversarial-review
+created_at=2026-10-18T05:44:09Z
+status=ok
+mode=code
+output_format=text
+providers_used=openrouter-alt, byteplus-alt, zai, claude, qwen
+provider_count=5
+providers_attempted=5
+provider_outcomes=openrouter-alt:ok,byteplus-alt:ok,zai:ok,claude:ok,qwen:ok
+adversarial_pass=2/3
+REVIEW BY: OPENROUTER-ALT
+REVIEW BY: BYTEPLUS-ALT
+REVIEW BY: ZAI
+REVIEW BY: CLAUDE
+REVIEW BY: QWEN
+reviewed_blob=7893d6af98792f26bcb809617baa3aa387f16825
+input_chars=19053
+input_chars_original=19053
+input_truncated=false
+total_findings=33
+critical=3
+warning=21
+info=9
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: openrouter-alt, byteplus-alt, zai, claude, qwen (5 total)
+Mode: code
+Input size: 19053 chars
+Date: 2026-10-18T05:44:09Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-ALT
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: settings.py:202 (repeated in the user-facing help at settings.py:428)
+ID: settings.py:202:peer-never-landing-claim-contradicted
+ISSUE: Comment and `SettingSpec` help claim the peer's account "is never a landing here while fresh", but the ranking only sorts it last — the artifact's own test (`test_the_other_machines_account_is_used_when_nothing_else_has_room`) switches onto it, and autoswitch.py:1831 says "a landing only when nothing else has room".
+ATTACK VECTOR: An operator reading `cswap config` help believes cswap can never land on the other machine's account, so they leave `peerYield` off on both sides and don't investigate when a switch does land there; the stated guarantee is simply false, and it contradicts the engine comment and the test name in the same change.
+SUGGESTED FIX: Reword both strings to "it is the last landing here while fresh — used only when nothing else has room".
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: peer-sync.py:77
+ID: peer-sync.py:77:once-failure-exit-code-zero
+ISSUE: In `--once` mode an exception is caught, logged, and then `main()` falls through to a normal `return`, so a failed round exits 0; the error record also omits the `ts`/`rc` fields the success record carries.
+ATTACK VECTOR: launchd/cron runs `peer-sync.py --once`; ssh timeouts, host down, or a missing backup root are reported as success, so monitoring never sees failures and peer records silently age past 180 s — both machines start colliding again with no alert anywhere.
+SUGGESTED FIX: Set a failure flag in the `except` block and `sys.exit(1)` (and emit `rc`/`ts` in the error JSON) when `--once` was requested.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: autoswitch.py:3585
+ID: autoswitch.py:3585:peer-age-cross-machine-clock-skew
+ISSUE: `at` is stamped with the Mac's `time.time()` before the ssh round trip (peer-sync.py:59) and written verbatim into the host's file, then compared on the host against its own clock with a 180 s window using `abs()`.
+ATTACK VECTOR: Clock skew >180 s between Mac and ryzen-dev (or a slow ssh adding up to 60 s of transit before the record is even written, plus up to 30 s until the host reads it) makes every record appear stale, so `_peer_slot` returns None forever and collision avoidance is silently off; skew in the other direction accepts records older than 180 s of real time.
+SUGGESTED FIX: Have the remote script re-stamp `at` with the host's own clock at write time (`rec = json.loads(sys.argv[2]); rec["at"] = time.time()`) instead of persisting the sender's pre-transit timestamp.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: peer-sync.py:44
+ID: peer-sync.py:44:sequence-read-failure-published-unknown
+ISSUE: `live_email` swallows `OSError`/`ValueError` (including a partial read of sequence.json while cswap is rewriting it) and returns None, which `once()` then publishes as `{}` — an active "I have no live account" claim that overwrites the peer's previously accurate fresh record.
+ATTACK VECTOR: One transient read failure at sync time immediately clears the other machine's view of the Mac; the host's `_peer_slot` returns None and it switches onto the Mac's actual account — the exact double-riding the feature exists to prevent — while the sync log shows rc 0 and no error.
+SUGGESTED FIX: Only publish `{}` for `FileNotFoundError`/genuinely-empty state; on any other read error, skip the round (leave the old record to expire naturally) and log it.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: peer-sync.py:64
+ID: peer-sync.py:64:remote-stdout-unvalidated-email
+ISSUE: Remote stdout is taken verbatim as the peer email with `"@" in theirs"` as the only validation, so any extra stdout line (pam MOTD, sitecustomize warning, banner) is written into peer-active.json as the `email` value.
+ATTACK VECTOR: A MOTD/warning line makes `email` a multi-line string; `switcher.resolve_account` then raises `ClaudeSwitchError` on every tick, `_peer_slot` returns None, and peer avoidance is silently dead while the sync log still shows rc 0.
+SUGGESTED FIX: Require `theirs` to be a single line matching a bare address (e.g. `re.fullmatch(r"[^@\s]+@[^@\s]+", theirs)`) before `write_peer`; otherwise log and skip the update.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: cli.py:1034
+ID: cli.py:1034:codex-remove-rank-reserve-none
+ISSUE: The takeover pick calls `codex.rank(usages, current, threshold, weekly, None, 0.0)` — no reserve, 0.0 min-life — although the configured reserve is in scope (`reserve` is read at cli.py:1044).
+ATTACK VECTOR: `cswap codex remove <live-email>` can select the codex reserve account as the immediate live login, breaking the documented invariant that the codex reserve is "always last in the queue", and diverges from how `codex auto` ranks the same pool.
+SUGGESTED FIX: Pass the already-loaded `reserve` and its `codex_reserve_min_life_pct` instead of `None, 0.0` (the removed account is filtered out of `order` anyway).
+
+SEVERITY: INFO
+CONFIDENCE: high
+FILE: settings.py:201
+ID: settings.py:201:peer-sync-script-filename-mismatch
+ISSUE: Comment says the peer file is "refreshed by scripts/peer-sync.sh", but the artifact adds `scripts/peer-sync.py`.
+ATTACK VECTOR: An operator (or a later edit) wires launchd/cron to the nonexistent `peer-sync.sh`, peer sync never runs, records go stale after 180 s, and both machines resume colliding with no error surfaced anywhere.
+SUGGESTED FIX: Change the comment to `scripts/peer-sync.py`.
+
+
+###############################################################
+###   PROVIDER: BYTEPLUS-ALT
+###############################################################
+
+I reviewed the full diff (peer-sync.py, autoswitch.py peer logic, codex `remove`, settings, tests). Findings below, sorted by severity then confidence.
+
+---
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: scripts/peer-sync.py:65
+ID: peer-sync.py:65:peer-email-space-sentinel
+ISSUE: The sanity check `if out.returncode == 0 and " @" in theirs:` only matches strings that contain a space before `@`; real email addresses never do.
+ATTACK VECTOR: `theirs` is the host's live account email (e.g. `alice@example.com`). `" @" in theirs` is False, so `write_peer(LOCAL_ROOT, theirs)` never runs and the Mac's `peer-active.json` is never refreshed with ryzen's account. The hold-out is then one-directional: ryzen avoids the Mac's account, but the Mac does not avoid ryzen's, so the Mac can still land on the account ryzen is burning — the exact collision the feature exists to prevent. It is invisible in tests because every fixture email is malformed with a space (`"a @x.com"`, `"c @example.com"`), and peer-sync.py itself has no test.
+SUGGESTED FIX: Validate the shape of an email instead of a literal space, e.g. `if out.returncode == 0 and "@" in theirs and " " not in theirs.strip():`.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/settings.py:201
+ID: settings.py:201:peer-comment-never-landing
+ISSUE: The `peer_active_file` comment claims the other machine's account is "never a landing here" and names `scripts/peer-sync.sh`, but the implementation deliberately allows it as a last resort and the script is `peer-sync.py`.
+ATTACK VECTOR: Both claims are contradicted by the code in the same diff: autoswitch.py comment "The other machine's account goes last in every ranking: a landing only when nothing else has room", and `test_the_other_machines_account_is_used_when_nothing_else_has_room` asserts a switch *onto* the peer. An operator reading the setting doc would believe the account is fully excluded, and would look for a non-existent `.sh`. This is a documentation-vs-code mismatch, not cosmetic: it changes what an operator thinks the safety property is.
+SUGGESTED FIX: Reword to "sorted last, used only when no other account has room", and change `peer-sync.sh` to `peer-sync.py`.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/codex.py:491
+ID: codex.py:491:remove-live-auth-missing
+ISSUE: `remove()` unconditionally does `email_of(read_auth(live_auth_path()))`; if Codex is not currently logged in (no `~/.codex/auth.json`), `read_auth` can raise and removal fails instead of removing the stored (non-live) account.
+ATTACK VECTOR: A user who has logged out of Codex, or a fresh machine where `auth.json` is absent, runs `cswap codex remove <stored>`; the CLI path (`current = codex.sync_live(root)` → `codex.remove`) reaches this line and raises an unhandled OSError/traceback, so stored accounts can never be pruned while logged out. Every test supplies a live login first, so this branch is unexercised.
+SUGGESTED FIX: Treat a missing live auth as "not live": e.g. wrap the read in try/except OSError and skip the comparison, or only compare when `live_auth_path().exists()`.
+
+---
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: scripts/peer-sync.py:59
+ID: peer-sync.py:59:peer-timestamp-cross-clock
+ISSUE: The freshness timestamp `at` is generated on the Mac (`time.time()` in `once`/`write_peer`) but consumed on ryzen-dev, where `_peer_slot` compares it against the *host's* `self.clock()`.
+ATTACK VECTOR: Any wall-clock skew between the two machines beyond `PEER_MAX_AGE_S` (180s) makes a freshly pushed record look stale on the host (or a dead one look live), silently disabling `peerYield`/hold-out on that side. `abs(...)` bounds but does not eliminate this; the code assumes the two clocks agree, which tests (single injected clock) never exercise.
+SUGGESTED FIX: Compute age from a monotonic source on the reading side, or tighten the tolerance and document the NTP requirement; at minimum note the cross-host clock dependency in the docstring.
+
+---
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: scripts/peer-sync.py:24
+ID: peer-sync.py:24:controlpath-stray-space
+ISSUE: `ControlPath=~/.ssh/cm-peer-%r @%h:%p` contains a stray space (`%r @%h:%p`), which is almost certainly not intended.
+ATTACK VECTOR: The expanded path becomes `~/.ssh/cm-peer-<user> @<host>:<port>` — a filename containing a space. It usually still works because the literal is consistent per invocation, but it silently defeats any config/cleanup tooling that expects the canonical `cm-peer-%r@%h:%p` name and is fragile across ssh/OS handling of spaces in socket paths. The author's own review is unlikely to notice a single character.
+SUGGESTED FIX: Remove the space: `ControlPath=~/.ssh/cm-peer-%r@%h:%p`.
+
+---
+
+Notes on things I checked and deliberately did **not** flag: the `(num == peer,) + tuple(key)` sort prepend is correct (False<True puts the peer last, stable sort preserves existing tie-breaks); `self._tick_peer` being zeroed on collision while local `peer` is retained is required for `peer_collision` to fire; the ssh argv/`shlex.quote` construction is injection-safe given the input is the account email; and the `mkstemp`+`os.replace` writes on both sides are atomic reads for the daemon.
+
+
+###############################################################
+###   PROVIDER: ZAI
+###############################################################
+
+## Adversarial Code Review Findings
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** high
+**FILE:** src/claude_swap/autoswitch.py:3575
+**ID:** autoswitch.py:3575:peer-freshness-clock-skew
+**ISSUE:** Peer-record freshness uses the receiver's clock against a sender-generated timestamp (`abs(self.clock() - at) > PEER_MAX_AGE_S`), with no skew tolerance, and `abs()` treats future timestamps as fully fresh.
+**ATTACK VECTOR:** peer-sync.py writes `"at": time.time()` from the Mac; ryzen validates it against ryzen's clock. If the machines' clocks drift >180s (no NTP, VM clock drift), the record is permanently "stale" and the collision protection silently never engages — recreating exactly the 2026-10-17 double-burn incident with no error anywhere. Conversely, if the Mac's clock is *ahead*, `abs()` grants ryzen a freshness window of 180s + the full skew (e.g., a 10-minute-ahead Mac keeps a dead record "fresh" for 13 minutes after ryzen's copy of peer-sync dies).
+**SUGGESTED FIX:** Sign the age check (`self.clock() - at > PEER_MAX_AGE_S` for future-skew) and either sync via NTP or stamp the record with the *receiver's* clock (peer-sync already runs on both ends of the ssh call — let the remote script write `at` using its own `time.time()` when storing, and have the local `write_peer` use the timestamp echoed back from the remote).
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** high
+**FILE:** scripts/peer-sync.py:63
+**ID:** peer-sync.py:63:silent-stale-peer-retained
+**ISSUE:** On any ssh failure (`returncode != 0` or no `"@"` in stdout), `write_peer` is silently skipped and stderr is discarded — the last-written peer record stays locally "fresh" for up to 180s with no signal other than a rc in a JSON log line.
+**ATTACK VECTOR:** The peer logs out of its account (or `sync_live` briefly returns nothing) while the ssh session also fails; the local machine keeps treating the peer's *old* account as live for up to three minutes and holds out of it. With `ControlPersist=5m` masking connection failures on the first ticks after a network break, this window is reached in exactly the degraded-network scenarios the sync exists for. Also, `out.stderr` is never logged even on failure, so post-mortems can't distinguish auth failure from remote crash.
+**SUGGESTED FIX:** On `returncode != 0`, overwrite the peer file with `{"email": null, "at": time.time()}` (an explicit "unknown" tombstone invalidates the old record immediately) and include `out.stderr[-200:]` in the JSON log line.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/cli.py:1029
+**ID:** cli.py:1029:remove-switch-race-daemon
+**ISSUE:** TOCTOU in `codex remove`: the CLI checks `sync_live`, switches away, then calls `codex.remove` which re-checks liveness — but a concurrently running autoswitch/codex daemon can switch the live login back to `target` between the CLI's switch and the remove, making `codex.remove` raise after the CLI already moved the user off their account.
+**ATTACK VECTOR:** User runs `cswap codex remove a@x.com` while `cswap codex auto` is looping. CLI switches to `order[0]`, daemon's next tick (or another terminal's `cswap codex switch a@x.com`) lands back on `a@x.com`, `codex.remove` raises `CodexError` — user has been switched once, the removal failed, and the printed message "Codex login: a@x.com -> …" now misrepresents state.
+**SUGGESTED FIX:** Acquire `store_lock(backup_root)` (already used inside `codex.remove`) around the whole check-switch-remove sequence in the CLI, or make `remove` accept a pre-verified "was switched away" token so the lock covers the switch too.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/cli.py:1030-1035
+**ID:** cli.py:1035:fallback-rank-business-logic
+**ISSUE:** The `remove` branch embeds business logic (usage fetch, ranking, fallback-candidate selection, hook invocation) inline in the CLI command handler, duplicating logic that lives in the codex module and the existing `switch` action instead of delegating to a module function.
+**ATTACK VECTOR:** The selection policy here (`codex.rank(usages, current, threshold, weekly, None, 0.0)` with hardcoded `None, 0.0`) will drift from whatever the real switch path uses — e.g., it is not peer-aware (ignores `peer_active_file`), so `remove` on the Mac can switch onto the account ryzen is live on, the exact collision this changeset exists to prevent.
+**SUGGESTED FIX:** Move this into a `codex.remove_with_fallback(root, email, settings)` function in codex.py that the CLI calls; inside it, filter candidates through the same peer-aware ranking used by `switch`/auto.
+
+---
+
+**SEVERITY:** INFO
+**CONFIDENCE:** high
+**FILE:** src/claude_swap/settings.py:200
+**ID:** settings.py:200:peer-sync-sh-vs-py
+**ISSUE:** Comment claims the peer file is "refreshed by scripts/peer-sync.sh"; the artifact adds `scripts/peer-sync.py`. The comment's claim does not match the code.
+**ATTACK VECTOR:** An operator greps for `peer-sync.sh`, doesn't find it, concludes sync isn't installed, and disables/misconfigures `peerActiveFile` — or an install script referencing `.sh` fails silently.
+**SUGGESTED FIX:** Change the comment to `scripts/peer-sync.py`.
+
+---
+
+**SEVERITY:** INFO
+**CONFIDENCE:** medium
+**FILE:** scripts/peer-sync.py:18
+**ID:** peer-sync.py:18:interval-docstring-drift
+**ISSUE:** Docstring claims "every INTERVAL seconds one ssh call", but the loop sleeps INTERVAL *after* a cycle whose ssh call can block up to `timeout=60` (+ `ConnectTimeout=10`), so the effective worst-case period is ~90–100s, not 30s.
+**ATTACK VECTOR:** An operator sizing `PEER_MAX_AGE_S=180` against the documented 30s cadence assumes 6 sync attempts per staleness window; on a slow network they get fewer than 2, so transient failures consume a large fraction of the freshness budget and the peer record flaps between fresh and stale.
+**SUGGESTED FIX:** Either note the worst-case cycle time in the docstring, or compute the sleep as `max(0, INTERVAL - elapsed)` against a cycle timestamp.
+
+---
+
+**SEVERITY:** INFO
+**CONFIDENCE:** medium
+**FILE:** scripts/peer-sync.py:64
+**ID:** peer-sync.py:64:at-substring-validation
+**ISSUE:** Remote output is validated by `"@" in theirs` — any banner, motd, or warning line reaching stdout that contains `@` is accepted as the peer's email and written into `peer-active.json`.
+**ATTACK VECTOR:** sshd prints a banner like `Contact admin@corp.example` to stdout during a config change; the Mac writes `Contact admin@corp.example` as the peer email. `resolve_account` then fails and `_peer_slot` returns None, so the practical effect is protection silently disabled for up to 180s per occurrence — but it can also mask a real email on the same line order-dependent.
+**SUGGESTED FIX:** Have the remote script emit a strict one-line JSON payload (e.g., `{"email": ...}`) and validate by parsing it, rather than substring-matching stdout.
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/settings.py:428
+ID: settings.py:428:docs-claim-never-landing-code-sorts-last
+ISSUE: The docs say the peer's account is "never a landing" while fresh. The code only sorts it last, and the tests confirm the peer account is used when nothing else has room.
+ATTACK VECTOR: Three places make the "never" claim:
+- The setting help at `settings.py:428` ("it is never a landing here while fresh").
+- The dataclass comment ("that account is never a landing here").
+- The `peer-sync.py:7` docstring ("never lands on the other's account").
+
+The comment also points at `scripts/peer-sync.sh`, but the file is `peer-sync.py`. `autoswitch.py:3037` only demotes the peer to the end of `qualifying`, and `test_the_other_machines_account_is_used_when_nothing_else_has_room` asserts a switch onto it. An operator who reads the help will treat the setting as a hard guarantee against double-burning an account. The fallback then silently recreates the incident the setting was added to prevent (two fleets on one account), and nothing alerts because the switch is a normal one.
+SUGGESTED FIX: Reword all three places to "sorted after every other candidate; used only when nothing else has room". Fix the `.sh` typo. Consider emitting a distinct event or log line when a peer-held account is chosen as the landing.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/autoswitch.py:3585
+ID: autoswitch.py:3585:peer-record-age-cross-machine-clock-skew
+ISSUE: Freshness compares the ryzen host's `self.clock()` against `at`, which is the Mac's `time.time()`. The remote script writes the record verbatim and never stamps its own time.
+ATTACK VECTOR: Any clock offset of more than 180 s between the Mac and ryzen-dev makes every record look stale. This can happen after a Mac sleep or resume, when NTP lags or a VM drifts. `abs()` also accepts dated-future records, but only within 180 s. `_peer_slot` then returns None, so peer protection is silently off. The sync log still prints healthy `rc: 0` lines, so nothing signals that the feature has stopped working.
+SUGGESTED FIX: In `REMOTE`, parse the JSON and overwrite `at` with the host's `time.time()` before writing. The Mac side already stamps its own pulled record locally, so both files then use their own machine's clock.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/cli.py:1034
+ID: cli.py:1034:codex-remove-live-gated-on-rank-result
+ISSUE: Removing the live Codex account needs `codex.rank(...)` to return a non-empty list, and that also needs a usage fetch for every stored account. `rank` takes the threshold and weekly arguments, so it probably filters out accounts that are over the limit. The user explicitly asked to forget the account, and any other stored account would do as the switch target.
+ATTACK VECTOR: Suppose the live login is revoked or broken, and the other stored accounts are at or over the threshold or have unreadable usage. Then `order` is empty and the command aborts with "no other stored account can take over". Alternatively, `usages_for` raises on the dead live account's usage call before reaching `rank`. The user cannot remove the account without hand-running `cswap codex switch` first.
+SUGGESTED FIX: If `rank` is empty, fall back to any other `stored_accounts` entry. Wrap `usages_for` so a usage error also takes the fallback path.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/codex.py:491
+ID: codex.py:491:remove-live-guard-read-auth-email-case
+ISSUE: The live-login guard calls `email_of(read_auth(live_auth_path())) == email`, with only the argument lowercased. This has two problems:
+- `read_auth` may raise if `~/.codex/auth.json` is missing or corrupt, which blocks removal of any stored account when Codex is logged out.
+- If `email_of` doesn't lowercase, a live `A@x.com` fails the equality check against `a@x.com` and the guard passes.
+
+ATTACK VECTOR: In the second case the stored copy of the live login is deleted while Codex still runs on it. This is the exact bug the test claims to catch.
+SUGGESTED FIX: Compare `(email_of(...) or "").lower()`. Treat a missing or unreadable live file as "no live login" instead of letting it raise.
+
+SEVERITY: WARNING
+CONFIDENCE: low
+FILE: src/claude_swap/autoswitch.py:3037
+ID: autoswitch.py:3037:unconditional-tuple-key-rewrap
+ISSUE: The sort key is rebuilt for every tick and every strategy with `tuple(key)`, even when no peer is configured. This assumes every strategy's key is an iterable. A scalar key (`float` or `int`) raises `TypeError`, and a tuple with an unorderable member would fail too.
+ATTACK VECTOR: Any strategy branch that sorts on a bare number, or any later change that does, makes the whole tick raise. This happens for users who never set `peerActiveFile`, so a feature that is off by default can break every `cswap auto` run.
+SUGGESTED FIX: Skip the rewrap when `peer is None`. Otherwise use `key if isinstance(key, tuple) else (key,)`.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: scripts/peer-sync.py:67
+ID: peer-sync.py:67:ssh-stderr-discarded-silent-failure
+ISSUE: `capture_output=True` collects stderr, but only `returncode` is logged. A failure such as missing `python3`, an unwritable root, a missing `sequence.json` or an auth failure shows up as `rc: 255` or `rc: 1`, with no reason.
+ATTACK VECTOR: The loop keeps running and the peer files go stale within 180 s, which silently turns the feature off. The only trace is a bare return code, and diagnosing it means rerunning ssh by hand.
+SUGGESTED FIX: Add `"err": out.stderr.strip()[-200:]` to the log JSON when `returncode != 0`.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/autoswitch.py:1971
+ID: autoswitch.py:1971:peer-yield-default-off-no-handshake
+ISSUE: Each side decides on a peer record up to 30 s old (the sync interval) with no reservation or handshake. Two machines can still land on the same best account in the same window, which is the original incident. Collision resolution is opt-in (`peer_yield` defaults to False) and only works if exactly one side sets it.
+ATTACK VECTOR: With the default config, or with the flag set on neither side, a collision persists indefinitely and the account burns at double rate. Setting it on both sides makes both leave at once, which the code only documents.
+SUGGESTED FIX: Break the tie deterministically without per-side config. For example, the machine with the lexicographically smaller hostname or id yields. At the least, log a warning when a collision persists across several ticks with `peer_yield` off.
+
+
+###############################################################
+###   PROVIDER: QWEN
+###############################################################
+
+Findings from the artifact only (no tools used).
+
+---
+
+**SEVERITY:** CRITICAL
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/codex.py:~489 (inside the new `remove()`)
+**ID:** codex-remove:live-check-case-sensitive
+**ISSUE:** `remove()` lowercases the *input* email but compares it against the raw `email_of(read_auth(live_auth_path()))`, so the "live login" guard is bypassable by case; the same asymmetry exists in `cli.py` (`current == target`).
+**ATTACK VECTOR:** Codex/GitHub-style accounts frequently carry mixed case (`Alice@X.com`). `cswap codex remove alice@x.com` → `email = "alice@x.com"`, live auth reads `"Alice@X.com"`, equality is False, so the guard passes and `path.unlink()` deletes the **only** stored copy of the account Codex is currently running on — the exact corruption the new test claims to prevent. The test (`_login(_auth("a @x.com"))`) only exercises an already-lowercase address, so it passes while the hole is open. The CLI path has the same comparison (`sync_live()` result vs. `args.email.lower()`), so it can switch away, then still refuse/accept inconsistently. `stored_path(root, email)` with the lowered value can also miss a file stored under original case, raising a misleading "is not stored".
+**SUGGESTED FIX:** Normalize both sides of every comparison with the same helper the store uses (`email_of(...).strip().lower() == email`, same in `cli.py`), and add a mixed-case regression case to `TestRemove`.
+
+---
+
+**SEVERITY:** CRITICAL
+**CONFIDENCE:** high
+**FILE:** scripts/peer-sync.py:44 (live_email) / :57 (`record = ... if mine else "{}"`)
+**ID:** peer-sync:fail-open-wipes-peer-record
+**ISSUE:** A transient local read failure is indistinguishable from "no live account", and the script then *pushes an empty record* that overwrites the other machine's peer file.
+**ATTACK VECTOR:** `live_email()` swallows `OSError`/`ValueError` and returns `None` — that covers a half-written `sequence.json`, a locked file, NFS blip, or a bad backup root. `once()` then sends `"{}"` and the REMOTE block `os.replace`s it over ryzen's `peer-active.json`. Result: ryzen now believes the Mac is on nothing and will happily land on the Mac's live account for the next 3 minutes, i.e. the collision this feature exists to prevent is triggered by a *local read error*, and it is silent (the JSON line just shows `"mac": null`, which is also the legitimate no-account value). The same fail-open ordering applies when the remote half dies: REMOTE writes the Mac's record (lines 31-34) *before* reading `sequence.json` (line 35), so a traceback there means ryzen's copy of the Mac's state landed while the Mac's copy of ryzen's never did — asymmetric protection with no error surfaced.
+**SUGGESTED FIX:** Have `live_email()` distinguish "unreadable" from "no account" (raise / return a sentinel) and skip the push half entirely when unreadable; only push `"{}"` for a verified empty state. On the remote, read `sequence.json` first and emit the email before writing, or write and read in one guarded try/except.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** high
+**FILE:** src/claude_swap/cli.py:1028-1041 (`elif args.action == "remove"`)
+**ID:** cli-remove:successor-ignores-peer
+**ISSUE:** The automatic successor chosen by `cswap codex remove` comes from `codex.rank(...)`, which has no peer/home awareness — the manual path bypasses the protection the engine just gained.
+**ATTACK VECTOR:** Removing the live login makes the CLI pick `order[0]` from usage ranking alone (note the hard-coded `None, 0.0` args, which also drop `codexReserveAccount`/min-life and any reserve/hysteresis logic). Nothing excludes `autoswitch.peerActiveFile`'s account, so the removal switches the Mac directly onto the account ryzen-dev is live on. Both fleets then burn one account at double rate — the regression documented in `settings.py` ("switched onto the same account in the same minute all day") — reintroduced through the CLI, which no autoswitch test covers. `peer_yield` then makes the other side leave on its next tick, so a single `remove` costs two live sessions a forced switch.
+**SUGGESTED FIX:** Filter the peer's email out of `order` before it (unless nothing else remains), or route the removal switch through the same ordering helper the engine uses so reserve/home/peer rules apply in one place.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/autoswitch.py:3037-3043 (`abs(self.clock() - at) > PEER_MAX_AGE_S`)
+**ID:** peer-slot:cross-machine-clock-compare
+**ISSUE:** Freshness is decided by comparing a wall-clock stamp written on one machine against the other machine's clock, with a 180 s window that `abs()` silently absorbs.
+**ATTACK VECTOR:** `at` is `time.time()` on the Mac (peer-sync.py:57, and REMOTE re-emits that same string at line 33); it is judged against the host's `self.clock()`. If the Mac's clock is ahead of ryzen's by more than 180 s, *every* record reads as stale, `json.loads`/`_peer_slot` return `None`, and the feature is permanently off with zero diagnostics (the broad `except (OSError, ValueError)` plus the `abs()` check make this indistinguishable from "sync not running"). If it is behind, a record stays "fresh" for up to 3 extra minutes and pins a slot the peer vacated. A suspended/clamshell Mac (the common case for a laptop pushing over ssh) drifts, and `INTERVAL = 30` gives only six samples of headroom. If `self.clock()` is ever a monotonic source in production rather than the fake `clock.now` used by tests, the comparison is meaningless and the protection is always off.
+**SUGGESTED FIX:** Compare against the file's own mtime as read locally (`os.path.getmtime`) or stamp/verify with a round-trip offset, and surface one emit ("peer record ignored: clock skew") when the difference is negative beyond a tolerance.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** high
+**FILE:** scripts/peer-sync.py:2 (docstring) / :19 (`INTERVAL = 30`)
+**ID:** peer-sync:timer-only-propagation-window
+**ISSUE:** The docstring promises a peer account "never lands", but the state travels at most once per 30 s, so the guarantee is false during exactly the window that caused the original incident.
+**ATTACK VECTOR:** Both engines switch independently and instantly (Mac `--interval 60`, ryzen its own loop), while the only signal is a poll. If ryzen lands on account 2 at t=0, the Mac cannot know until t≈30 s (plus `ConnectTimeout=10`/ssh latency, so 40 s), and its own tick may fire inside that gap. "Switched onto the same account in the same minute" is precisely inside the blind window, and the code's own `peer-collision` path admits collisions happen — the docstring and the `settings.py` comment ("that account is never a landing here while fresh") overstate it, which will mislead the next reader into dropping the yield config entirely.
+**SUGGESTED FIX:** Make it event-driven as well as polled: invoke `peer-sync.py --once` from the existing after-switch hook path (the codebase already has `codex_after_switch` / `run_after_switch`), and reword the docstring/comment to "best effort within one sync interval".
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/autoswitch.py:1972-1974 (`peer_collision` → `pin_active = False`)
+**ID:** peer-yield:no-tiebreak-both-leave
+**ISSUE:** `peerYield` is a symmetric boolean whose only safety note is a comment; if it is set on both machines the new code turns one collision into a per-tick ping-pong.
+**ATTACK VECTOR:** With `peer_yield: true` on both sides (a plausible outcome of rsync'd dotfiles or "fix it on the other machine too"), each tick both machines see `peer == current`, both force `pin_active = False` and `on_reserve = True`, and both leave the shared account in the same direction onto the same next-best slot — then collide again, forever. Every round burns a switch on both fleets and lands them together repeatedly, i.e. worse than the pre-change behavior it was written to fix, with `NoSwitchEvent` never firing to tell anyone. The test `test_the_side_that_does_not_yield_stays` only proves the correct configuration works; nothing detects the wrong one.
+**SUGGESTED FIX:** Add a deterministic tie-break the engine can compute locally (e.g. only yield when the peer record's host id / the machine's own name sorts lower than the peer's), or count consecutive collision ticks and emit an alert after N so the misconfiguration is visible.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/autoswitch.py:3035-3037 (`peer = getattr(self, "_tick_peer", None)`)
+**ID:** autoswitch-tick-peer:stale-instance-state-in-ranker
+**ISSUE:** Per-tick state lives on the instance and the reader defends with `getattr(..., None)`, so any ranking path that did not run the assignment in `_tick` silently uses the *previous* tick's peer.
+**ATTACK VECTOR:** `_tick_peer` is written once near the top of `_tick` (line ~1834) and consumed deep inside the candidate-ranking helper. The defensive `getattr` default is evidence the author knows the attribute may be unset on some call path — which means on that path (dry-run, the instance-level `_drain_mem` style callouts, status/`--once` surfaces, any future caller of the ranker) it is *not* unset but stale: the demotion key `(num == peer,)` then pushes a peer that moved two ticks ago to the bottom while the real current peer is ranked normally. Because the failure is a wrong-but-plausible ordering, it is invisible in logs and untestable from the harness, which always calls `tick_with_usage`. It also makes the engine non-reentrant: two callers of the ranking on one instance corrupt each other.
+**SUGGESTED FIX:** Pass the peer slot as a parameter into the ranking helper (computed from `_peer_slot(settings)` at the call site), or at minimum initialize `self._tick_peer = None` and replace `getattr(..., None)` with a direct read so an unassigned path raises instead of silently misranking.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
