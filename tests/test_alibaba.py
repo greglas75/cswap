@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 import pytest
 
@@ -128,6 +129,60 @@ def test_idle_accounts_refreshed_bl_login_is_kept(env, monkeypatch):
     alibaba.usages_for(env, ["ws-a", "ws-b"], "ws-a")
     stored = json.loads(alibaba.stored_path(env, "ws-b").read_text())
     assert stored["bailian"]["access_token"] == "tok-new"
+
+
+def test_hand_edited_key_of_another_account_is_never_stored(env):
+    """Bug caught: account B's key stored under A's workspace after someone pasted
+    it into ~/.qwen/settings.json by hand."""
+    _two(env)
+    _live({"qwenKey": "sk-ws-b", "bailian": _account("ws-a")["bailian"]})
+    assert alibaba.sync_live(env) is None
+    assert json.loads(alibaba.stored_path(env, "ws-a").read_text())["qwenKey"] == "sk-ws-a"
+    with pytest.raises(alibaba.AlibabaError, match="another workspace"):
+        alibaba.add(env)
+
+
+def _fake_bl_login(monkeypatch, bailian: dict | None, key: str, verdict: str = "ok"):
+    def call(argv, env):
+        if bailian is not None:
+            cfg = Path(env["HOME"]) / ".bailian" / "config.json"
+            cfg.parent.mkdir(parents=True)
+            cfg.write_text(json.dumps(bailian))
+        return 0 if bailian is not None else 1
+
+    monkeypatch.setattr(alibaba, "_bl", lambda: "/bin/bl")
+    monkeypatch.setattr(alibaba.subprocess, "call", call)
+    monkeypatch.setattr(alibaba.getpass, "getpass", lambda _prompt: key)
+    monkeypatch.setattr(alibaba, "key_check", lambda _key: verdict)
+
+
+def test_login_makes_a_complete_new_account_live(env, monkeypatch):
+    """Bug caught: the old account lost, or the new key paired with the old bl login."""
+    _live(_account("ws-a"))
+    _fake_bl_login(monkeypatch, _account("ws-b")["bailian"], "sk-ws-b")
+    assert alibaba.login(env) == "ws-b"
+    assert alibaba.read_live() == _account("ws-b")
+    assert alibaba.stored_accounts(env) == ["ws-a", "ws-b"]
+
+
+@pytest.mark.parametrize(
+    ("bailian", "key", "verdict", "message"),
+    [
+        pytest.param(None, "sk-x", "ok", "no new account", id="bl-login-aborted"),
+        pytest.param({"workspace_id": "ws-b"}, "sk-x", "invalid", "invalid", id="key-refused"),
+        pytest.param({"workspace_id": "ws-b"}, "sk-x", "unreachable", "unreachable", id="no-verdict"),
+        pytest.param({"workspace_id": "ws-b"}, "sk-ws-a", "ok", "already stored for ws-a", id="key-of-another"),
+    ],
+)
+def test_incomplete_login_changes_nothing(env, monkeypatch, bailian, key, verdict, message):
+    """Bug caught: a half-done login leaving Qwen Code or bl on another account."""
+    _live(_account("ws-a"))
+    alibaba.add(env)
+    _fake_bl_login(monkeypatch, bailian, key, verdict)
+    with pytest.raises(alibaba.AlibabaError, match=message):
+        alibaba.login(env)
+    assert alibaba.read_live() == _account("ws-a")
+    assert alibaba.stored_accounts(env) == ["ws-a"]
 
 
 def test_failed_login_restores_a_bl_login_no_account_owns(env, monkeypatch):

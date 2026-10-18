@@ -58,7 +58,8 @@ def store_dir(backup_root: Path) -> Path:
 def workspace_of(account: dict | None) -> str | None:
     if not isinstance(account, dict) or not account.get("qwenKey"):
         return None
-    ws = (account.get("bailian") or {}).get("workspace_id")
+    bailian = account.get("bailian")
+    ws = bailian.get("workspace_id") if isinstance(bailian, dict) else None
     return ws if isinstance(ws, str) and ws else None
 
 
@@ -72,7 +73,10 @@ def read_live() -> dict | None:
 
 def _write_pieces(account: dict) -> None:
     settings = filestore.read_settings(qwen_settings(), AlibabaError)
-    settings.setdefault("env", {})[ENV_KEY] = account["qwenKey"]
+    env = settings.setdefault("env", {})
+    if not isinstance(env, dict):
+        raise AlibabaError(f"{qwen_settings()}: \"env\" is not an object — not editing it")
+    env[ENV_KEY] = account["qwenKey"]
     filestore.write_private(bailian_config(), account["bailian"])
     filestore.write_private(qwen_settings(), settings)
 
@@ -109,9 +113,24 @@ def stored_accounts(backup_root: Path) -> list[str]:
                   and workspace_of(filestore.read_json(p)) == p.name[: -len(".json")])
 
 
+def _key_owner(backup_root: Path, key: str) -> str | None:
+    for ws in stored_accounts(backup_root):
+        if (filestore.read_json(stored_path(backup_root, ws)) or {}).get("qwenKey") == key:
+            return ws
+    return None
+
+
+def _live_workspace(backup_root: Path, live: dict | None) -> str | None:
+    """The live workspace — None when Qwen Code's key is one stored for ANOTHER
+    workspace (a hand-edited key): that pair must never be stored."""
+    ws = workspace_of(live)
+    owner = _key_owner(backup_root, live["qwenKey"]) if ws is not None else None
+    return ws if owner in (None, ws) else None
+
+
 def _sync_live(backup_root: Path) -> str | None:
     live = read_live()
-    ws = workspace_of(live)
+    ws = _live_workspace(backup_root, live)
     if ws is not None and stored_path(backup_root, ws).exists():
         filestore.write_private(stored_path(backup_root, ws), live)
     return ws
@@ -124,11 +143,14 @@ def sync_live(backup_root: Path) -> str | None:
 
 def add(backup_root: Path) -> str:
     live = read_live()
-    ws = workspace_of(live)
-    if ws is None:
+    if workspace_of(live) is None:
         raise AlibabaError(f"no live account: Qwen Code needs {ENV_KEY} in ~/.qwen/settings.json "
                            "and the Bailian CLI a login (bl auth login)")
     with filestore.lock(store_dir(backup_root)):
+        ws = _live_workspace(backup_root, live)
+        if ws is None:
+            raise AlibabaError("Qwen Code's key is stored for another workspace than bl's login — "
+                               "not storing that pair")
         filestore.write_private(stored_path(backup_root, ws), live)
     return ws
 
@@ -149,50 +171,47 @@ def _bl_env(home: Path | None) -> dict:
     return env
 
 
-def key_works(key: str, timeout: float = 20.0) -> bool:
+def key_check(key: str, timeout: float = 20.0) -> str:
+    """ok | invalid (the endpoint refused it) | unreachable (no verdict)."""
     req = urllib.request.Request(TOKEN_PLAN_URL + "/models", headers={"Authorization": f"Bearer {key}"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status == 200
-    except (urllib.error.URLError, OSError):
-        return False
+            return "ok" if resp.status == 200 else "unreachable"
+    except urllib.error.HTTPError as e:
+        return "invalid" if e.code in (401, 403) else "unreachable"
+    except Exception:  # noqa: BLE001
+        return "unreachable"
 
 
 def login(backup_root: Path) -> str:
-    """Store the current account, run `bl auth login` for another one (console
-    login: usage), then ask for that account's Token Plan key (Qwen Code).
-    Without a complete new account the previous one is put back."""
+    """Store the current account; run `bl auth login` under a temporary HOME
+    (the live login is not touched while you log in), then ask for that
+    account's Token Plan key (Qwen Code) and check it on the endpoint. Only a
+    complete new account becomes live."""
     bl = _bl()
     with filestore.lock(store_dir(backup_root)):
         previous = read_live()
-        raw_bailian = filestore.read_json(bailian_config())   # even one no account owns
-        if workspace_of(previous) is not None:
-            filestore.write_private(stored_path(backup_root, workspace_of(previous)), previous)
-    fresh = None
-    try:
-        with filestore.lock(store_dir(backup_root)):
-            filestore.write_private(bailian_config(), {})
-        subprocess.call([bl, "auth", "login"], env=_bl_env(None))
-        bailian = filestore.read_json(bailian_config()) or {}
-        if bailian.get("workspace_id"):
-            key = getpass.getpass("Token Plan API key of this account (for Qwen Code, hidden): ").strip()
-            if key and key_works(key):
-                fresh = {"qwenKey": key, "bailian": bailian}
-            elif key:
-                print("That key does not work on the Token Plan endpoint.")
-    finally:
-        with filestore.lock(store_dir(backup_root)):
-            if workspace_of(fresh) is not None:
-                write_live(fresh)
-            elif previous is not None:
-                _write_pieces(previous)
-            elif raw_bailian is not None:
-                filestore.write_private(bailian_config(), raw_bailian)
-    ws = workspace_of(fresh)
-    if ws is None:
-        raise AlibabaError("no new account — the previous one is back in place" if previous else "no new account")
+        ws_prev = _live_workspace(backup_root, previous)
+        if ws_prev is not None:
+            filestore.write_private(stored_path(backup_root, ws_prev), previous)
+    with tempfile.TemporaryDirectory(prefix="cswap-bl-login-") as tmp:
+        print("Log in with the console (browser) option — its workspace is how usage is read.")
+        rc = subprocess.call([bl, "auth", "login"], env=_bl_env(Path(tmp)))
+        bailian = filestore.read_json(bailian_config(Path(tmp)))
+    ws = workspace_of({"qwenKey": "-", "bailian": bailian})
+    if rc != 0 or ws is None:
+        raise AlibabaError("no new account (bl auth login gave no console workspace) — nothing changed")
+    key = getpass.getpass(f"Token Plan API key of {ws} (for Qwen Code, hidden): ").strip()
+    verdict = key_check(key) if key else "invalid"
+    if verdict != "ok":
+        raise AlibabaError(f"the Token Plan key is {verdict} — nothing changed")
+    fresh = {"qwenKey": key, "bailian": bailian}
     with filestore.lock(store_dir(backup_root)):
+        owner = _key_owner(backup_root, key)
+        if owner not in (None, ws):
+            raise AlibabaError(f"that key is already stored for {owner} — nothing changed")
         filestore.write_private(stored_path(backup_root, ws), fresh)
+        write_live(fresh, previous=read_live())
     return ws
 
 
@@ -211,7 +230,7 @@ def _switch(backup_root: Path, ws: str) -> str | None:
     if workspace_of(target) != ws:
         raise AlibabaError(f"{ws} is not stored — log in with it and run: cswap alibaba add")
     live = read_live()
-    live_ws = workspace_of(live)
+    live_ws = _live_workspace(backup_root, live)
     if live is not None and (live_ws is None or not stored_path(backup_root, live_ws).exists()):
         raise AlibabaError(f"the live account {live_ws or '(no workspace)'} is not stored — "
                            "run `cswap alibaba add` first")
@@ -267,8 +286,8 @@ def fetch_usage(bailian: dict | None, *, live: bool, timeout: float = 60.0) -> t
         after = filestore.read_json(bailian_config(home))
     if out.returncode != 0:
         return Usage(None, None, error=f"bl rc={out.returncode}: {(out.stderr or out.stdout).strip()[:160]}"), after
-    try:
-        payload = json.loads(out.stdout[out.stdout.index("{"):])
+    try:   # the first JSON object; bl may print notices around it
+        payload, _ = json.JSONDecoder().raw_decode(out.stdout[out.stdout.index("{"):])
     except ValueError:
         return Usage(None, None, error="bl printed no JSON"), after
     return parse_usage(payload if isinstance(payload, dict) else {}), after
@@ -281,7 +300,9 @@ def usages_for(backup_root: Path, workspaces: list[str], current: str | None) ->
         usage, after = fetch_usage(account.get("bailian"), live=ws == current)
         if ws != current and after and after != account.get("bailian") and after.get("workspace_id") == ws:
             with filestore.lock(store_dir(backup_root)):
-                filestore.write_private(stored_path(backup_root, ws), {**account, "bailian": after})
+                now_stored = filestore.read_json(stored_path(backup_root, ws)) or {}
+                if now_stored.get("bailian") == account.get("bailian"):   # nobody changed it meanwhile
+                    filestore.write_private(stored_path(backup_root, ws), {**now_stored, "bailian": after})
         out[ws] = usage
     return out
 
@@ -307,7 +328,7 @@ def auto_tick(backup_root: Path, threshold: float, *, dry_run: bool = False, usa
         return {"event": "alibaba-no-switch", "reason": "live-account-not-stored", "live": current}
     usages = usages_fn(backup_root, workspaces, current)   # bl runs outside the lock
     with filestore.lock(store_dir(backup_root)):
-        if workspace_of(read_live()) != current:
+        if _live_workspace(backup_root, read_live()) != current:
             return {"event": "alibaba-no-switch", "reason": "live-account-changed", "account": current}
         live = usages[current]
         if live.error is not None:
