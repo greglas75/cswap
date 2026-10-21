@@ -264,3 +264,44 @@ def test_foreign_files_in_the_store_are_not_accounts(env):
     (cursor.store_dir(env) / "notes.json").write_text("{}")
     (cursor.store_dir(env) / "c@x.com.json").write_text(json.dumps(_login("d@x.com")))
     assert cursor.stored_accounts(env) == ["a@x.com", "b@x.com"]
+
+
+@pytest.mark.parametrize(
+    ("live", "other", "event", "to"),
+    [
+        pytest.param(Usage(40.0, 100.0, cycle_days=30), Usage(10.0, 100.0, cycle_days=7),
+                     "cursor-switch", "b@x.com", id="weekly-reset-takes-the-login-back"),
+        pytest.param(Usage(40.0, 100.0, cycle_days=7), Usage(10.0, 100.0, cycle_days=30),
+                     "cursor-no-switch", None, id="weekly-live-stays"),
+        pytest.param(Usage(40.0, 100.0, cycle_days=30), Usage(100.0, 100.0, cycle_days=7),
+                     "cursor-no-switch", None, id="spent-weekly-waits"),
+        pytest.param(Usage(40.0, 100.0, cycle_days=30), Usage(93.0, 100.0, cycle_days=7),
+                     "cursor-no-switch", None, id="weekly-under-useful-room-waits"),
+    ],
+)
+def test_auto_tick_weekly_pool_first(env, live, other, event, to):
+    """Bug caught: the login stayed on the monthly plan after the weekly pool reset
+    (the owner's rule: weekly first, monthly only while the weekly pool is spent)."""
+    _two(env)
+    out = cursor.auto_tick(env, 95.0, usages_fn=lambda _r, emails, cur: {
+        e: live if e == cur else other for e in emails})
+    assert (out["event"], out.get("to")) == (event, to)
+    assert cursor.email_of(cursor.read_live()) == (to or "a@x.com")
+
+
+def test_rank_puts_a_weekly_pool_before_a_sooner_monthly_cycle():
+    """Bug caught: the spent weekly account handing over to monthly, then monthly
+    ranked first again because its cycle ends sooner."""
+    usages = {"live@x.com": Usage(100.0, 50.0, cycle_days=7),
+              "month@x.com": Usage(10.0, 200.0, cycle_days=30),
+              "week@x.com": Usage(10.0, 900.0, cycle_days=7)}
+    assert cursor.rank(usages, "live@x.com", 95.0) == ["week@x.com", "month@x.com"]
+
+
+def test_parse_usage_reads_the_cycle_length():
+    """Bug caught: a weekly pool read as monthly (the reply names no plan)."""
+    week = cursor.parse_usage({"billingCycleStart": "1792305820486", "billingCycleEnd": "1792910620486",
+                               "planUsage": {"totalPercentUsed": 100}})
+    month = cursor.parse_usage({"billingCycleStart": "1790778023000", "billingCycleEnd": "1793370023000",
+                                "planUsage": {"totalPercentUsed": 100}})
+    assert (week.weekly, month.weekly) == (True, False)

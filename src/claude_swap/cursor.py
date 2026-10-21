@@ -7,9 +7,12 @@ Linux: ``~/.config/cursor/auth.json``) plus ``authInfo`` (email, ids) in
 ``<backup root>/cursor/<email>.json`` (0600) and swaps all three pieces.
 
 Usage comes from the endpoint the dashboard reads (``GetCurrentPeriodUsage``): the
-plan's ``totalPercentUsed`` and the billing cycle end. Cursor's quota is monthly, so
-past the threshold the next account is the one whose cycle ends soonest, among
-accounts with room. Access tokens live ~60 days, so idle accounts are readable too.
+plan's ``totalPercentUsed`` and the billing cycle. Past the threshold the next account
+is a weekly-pool one with room, else the one whose cycle ends soonest. A weekly pool
+also wins back the live login from a monthly plan as soon as it has room again: its
+quota is lost within days, the monthly plan's keeps (the owner's rule, 2026-10-21).
+The reply names no plan, so a cycle of at most WEEKLY_MAX_DAYS is the weekly pool.
+Access tokens live ~60 days, so idle accounts are readable too.
 
 Never copy one account's stored file to a second machine — log in on each.
 """
@@ -39,6 +42,7 @@ KEYCHAIN_ACCOUNT = "cursor-user"
 ACCESS_SERVICE = "cursor-access-token"
 REFRESH_SERVICE = "cursor-refresh-token"
 MIN_USEFUL_LIFE_PCT = 5.0
+WEEKLY_MAX_DAYS = 8.0   # the weekly pool's cycle is 7 days, the monthly plan's ~30
 EXPIRED = "access token expired (cursor-agent refreshes it once the account is live)"
 
 
@@ -329,6 +333,11 @@ class Usage:
     on_demand_used: float | None = None    # dollars
     on_demand_limit: float | None = None
     error: str | None = None
+    cycle_days: float | None = None   # billing cycle length
+
+    @property
+    def weekly(self) -> bool:
+        return self.cycle_days is not None and self.cycle_days <= WEEKLY_MAX_DAYS
 
     def life(self, threshold: float) -> float | None:
         if self.error is not None or self.pct is None:
@@ -339,13 +348,15 @@ class Usage:
 def parse_usage(payload: dict) -> Usage:
     plan = payload.get("planUsage") if isinstance(payload.get("planUsage"), dict) else {}
     pct = plan.get("totalPercentUsed")
-    end = payload.get("billingCycleEnd")
-    try:
-        reset = float(end) if end is not None else None
-    except (TypeError, ValueError):
-        reset = None
-    if reset is not None and reset > 1e11:   # milliseconds (the reply today)
-        reset /= 1000.0
+    def epoch(v) -> float | None:
+        try:
+            t = float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+        return t / 1000.0 if t is not None and t > 1e11 else t   # milliseconds (the reply today)
+
+    reset, start = epoch(payload.get("billingCycleEnd")), epoch(payload.get("billingCycleStart"))
+    cycle = (reset - start) / 86400.0 if reset is not None and start is not None and reset > start else None
     spend = payload.get("spendLimitUsage") if isinstance(payload.get("spendLimitUsage"), dict) else {}
 
     def dollars(v) -> float | None:   # cents; int64 may come as a string
@@ -359,9 +370,9 @@ def parse_usage(payload: dict) -> Usage:
     if pct is None and reset is not None and reset > time.time():
         pct = 0   # proto3 JSON leaves zero-valued fields out (a fresh cycle)
     if not isinstance(pct, (int, float)) or isinstance(pct, bool) or not 0 <= pct <= 1000:
-        return Usage(None, reset, error="no plan usage in the reply")
+        return Usage(None, reset, error="no plan usage in the reply", cycle_days=cycle)
     return Usage(float(pct), reset, dollars(spend.get("individualUsed")),
-                 dollars(spend.get("individualLimit")))
+                 dollars(spend.get("individualLimit")), cycle_days=cycle)
 
 
 def fetch_usage(login: dict, timeout: float = 20.0) -> Usage:
@@ -394,8 +405,8 @@ def usages_for(backup_root: Path, emails: list[str], current: str | None) -> dic
 
 
 def rank(usages: dict[str, Usage], current: str | None, threshold: float) -> list[str]:
-    """Targets: accounts with room, soonest cycle end first (that quota expires
-    first), then most room; under MIN_USEFUL_LIFE_PCT of room after those.
+    """Targets: accounts with room, weekly pools first, then soonest cycle end (that
+    quota expires first), then most room; under MIN_USEFUL_LIFE_PCT of room after those.
     An idle account whose access token expired is unreadable but comes last,
     not never: the stored copy is refreshed every tick while live, so expiry
     (~60 days) means idle for longer than a monthly cycle — its usage has
@@ -406,12 +417,12 @@ def rank(usages: dict[str, Usage], current: str | None, threshold: float) -> lis
         if email == current:
             continue
         if usage.error == EXPIRED:
-            keyed.append(((2, float("inf"), 0.0), email))
+            keyed.append(((2, 1, float("inf"), 0.0), email))
             continue
         life = usage.life(threshold)
         if life is None or life <= 0:
             continue
-        keyed.append(((int(life < MIN_USEFUL_LIFE_PCT),
+        keyed.append(((int(life < MIN_USEFUL_LIFE_PCT), int(not usage.weekly),
                        usage.reset_at if usage.reset_at is not None else float("inf"),
                        -life), email))
     keyed.sort()
@@ -457,10 +468,17 @@ def auto_tick(backup_root: Path, threshold: float, *, dry_run: bool = False,
         live = usages[current]
         if live.error is not None:
             return {"event": "cursor-no-switch", "reason": "active-usage-unknown", "detail": live.error}
-        if live.pct is not None and live.pct < threshold:
-            return {"event": "cursor-no-switch", "reason": "below-threshold", "account": current,
-                    "usedPct": live.pct}
         order = rank(usages, current, threshold)
+        if live.pct is not None and live.pct < threshold:
+            # A monthly plan hands the login back to a weekly pool that has room again.
+            back = [e for e in order if usages[e].weekly and (usages[e].life(threshold) or 0) >= MIN_USEFUL_LIFE_PCT]
+            if live.weekly or not back:
+                return {"event": "cursor-no-switch", "reason": "below-threshold", "account": current,
+                        "usedPct": live.pct}
+            if not dry_run:
+                _switch(backup_root, back[0])
+            return {"event": "cursor-switch", "reason": "weekly-first", "from": current, "to": back[0],
+                    "usedPct": live.pct, "dryRun": dry_run}
         if not order:
             return {"event": "cursor-no-switch", "reason": "no-account-with-room", "account": current,
                     "usedPct": live.pct}
