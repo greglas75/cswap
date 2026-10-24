@@ -1637,7 +1637,7 @@ def _kimi_command(argv: list[str]) -> None:
                 u for u in users if u != current and u not in order]
             if getattr(args, "json", False):
                 print(_json.dumps({"schemaVersion": 1, "threshold": threshold, "accounts": [
-                    {"user": u, "active": u == current, "next": bool(order) and u == order[0],
+                    {"user": u, "email": (kimi.stored_account(root, u) or {}).get("email"), "active": u == current, "next": bool(order) and u == order[0],
                      "usedPct": usages[u].pct, "resetAt": usages[u].reset_at, "error": usages[u].error,
                      "noPlan": usages[u].no_plan, "windows": [{"window": w, "usedPct": p, "resetAt": r} for w, p, r in usages[u].windows]}
                     for u in rows]}))
@@ -1652,7 +1652,8 @@ def _kimi_command(argv: list[str]) -> None:
                 tags = [bold_accent("(active)")] if u == current else (
                     [muted("(next)")] if order and u == order[0] else
                     [muted("(waits for its reset)")] if u not in order else [])
-                print(f"  {u} {' '.join(tags)}".rstrip())
+                email = (kimi.stored_account(root, u) or {}).get("email")
+                print(f"  {u}{' ' + muted(email) if email else ''} {' '.join(tags)}".rstrip())
                 usage = usages[u]
                 if usage.error is not None:
                     print(f"     └ {muted('usage unknown: ' + usage.error)}")

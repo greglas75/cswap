@@ -145,11 +145,24 @@ def test_usage_refreshes_an_expired_token_and_keeps_the_new_pair_everywhere(env,
         kimi.account_user(account), gen=9)})
     seen = []
     usages = kimi.usages_for(env, ["u-a", "u-b"], "u-a",
-                             fetch_fn=lambda a: seen.append(a["token"]["access_token"][-1]) or Usage(1.0, None))
+                             fetch_fn=lambda a: seen.append(a["token"]["access_token"][-1]) or Usage(1.0, None),
+                             email_fn=lambda a: kimi.account_user(a) + "@x.io")
     assert seen == ["9", "9"] and usages["u-a"].pct == 1.0
     assert json.loads(_live_path().read_text())["refresh_token"].endswith("9")
     for user in ("u-a", "u-b"):
         assert json.loads(kimi.stored_path(env, user).read_text())["token"]["refresh_token"].endswith("9")
+
+
+def test_the_account_label_survives_the_live_sync(env):
+    """Bug caught: every sync of the live token (each tick) wiping the email
+    the usage page names the account by."""
+    _two(env)
+    stored = json.loads(kimi.stored_path(env, "u-a").read_text())
+    kimi.filestore.write_private(kimi.stored_path(env, "u-a"), {**stored, "email": "a@x.io"})
+    _live(_token("u-a", gen=3))
+    kimi.sync_live(env)
+    stored = json.loads(kimi.stored_path(env, "u-a").read_text())
+    assert (stored["email"], stored["token"]["refresh_token"][-1]) == ("a@x.io", "3")
 
 
 @pytest.mark.parametrize(

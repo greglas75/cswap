@@ -176,6 +176,10 @@ def stored_path(backup_root: Path, user: str) -> Path:
     return store_dir(backup_root) / f"{filestore.safe_name(user, KimiError)}.json"
 
 
+def stored_account(backup_root: Path, user: str) -> dict | None:
+    return filestore.read_json(stored_path(backup_root, user))
+
+
 def stored_accounts(backup_root: Path) -> list[str]:
     root = store_dir(backup_root)
     if not root.is_dir():
@@ -185,6 +189,13 @@ def stored_accounts(backup_root: Path) -> list[str]:
                   and account_user(filestore.read_json(p)) == p.name[: -len(".json")])
 
 
+def _store(backup_root: Path, user: str, account: dict) -> None:
+    """Store ``account``, keeping the label (email) a previous copy has."""
+    old = filestore.read_json(stored_path(backup_root, user)) or {}
+    label = {"email": old["email"]} if old.get("email") and not account.get("email") else {}
+    filestore.write_private(stored_path(backup_root, user), {**account, **label})
+
+
 def _sync_live(backup_root: Path) -> str | None:
     """Copy the live token over its stored one — kimi rotates the refresh
     token, so only the newest copy can still refresh. A tombstone is never
@@ -192,7 +203,7 @@ def _sync_live(backup_root: Path) -> str | None:
     live = read_live()
     user = account_user(live)
     if user is not None and stored_path(backup_root, user).exists():
-        filestore.write_private(stored_path(backup_root, user), live)
+        _store(backup_root, user, live)
     return user
 
 
@@ -207,7 +218,7 @@ def add(backup_root: Path) -> str:
     if user is None:
         raise KimiError("kimi is not logged in (or its login was revoked) — run kimi, then /login")
     with filestore.lock(store_dir(backup_root)):
-        filestore.write_private(stored_path(backup_root, user), live)
+        _store(backup_root, user, live)
     return user
 
 
@@ -354,6 +365,19 @@ def fetch_usage(account: dict, timeout: float = 20.0) -> Usage:
         return Usage(None, None, error=type(e).__name__)
 
 
+def fetch_email(account: dict, timeout: float = 20.0) -> str | None:
+    """The account's email (or nickname) from the coding API's /me — a label only."""
+    req = urllib.request.Request(account["baseUrl"] + "/me", headers={
+        **_headers(), "Authorization": f"Bearer {account['token']['access_token']}"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            me = json.loads(resp.read())
+    except (OSError, ValueError):
+        return None
+    label = me.get("email") or me.get("nickname") if isinstance(me, dict) else None
+    return label if isinstance(label, str) and label else None
+
+
 def _fresh_live(backup_root: Path, user: str, now: float) -> dict | None:
     """The live account with a usable access token: refreshed the way kimi
     does it (under its lock, re-read first), so a running kimi never spends
@@ -368,7 +392,7 @@ def _fresh_live(backup_root: Path, user: str, now: float) -> dict | None:
             filestore.write_private(live_file(env), live["token"])
     with filestore.lock(store_dir(backup_root)):
         if stored_path(backup_root, user).exists():
-            filestore.write_private(stored_path(backup_root, user), live)
+            _store(backup_root, user, live)
     return live
 
 
@@ -384,8 +408,9 @@ def _fresh_stored(backup_root: Path, user: str, now: float) -> dict | None:
 
 
 def usages_for(backup_root: Path, users: list[str], current: str | None, *, clock=time.time,
-               fetch_fn=None) -> dict[str, Usage]:
+               fetch_fn=None, email_fn=None) -> dict[str, Usage]:
     fetch_fn = fetch_fn or fetch_usage
+    email_fn = email_fn or fetch_email
     out = {}
     for user in users:
         try:
@@ -394,6 +419,13 @@ def usages_for(backup_root: Path, users: list[str], current: str | None, *, cloc
             out[user] = Usage(None, None, error=str(e))
             continue
         out[user] = fetch_fn(account) if account else Usage(None, None, error="login changed meanwhile")
+        if account and not account.get("email"):
+            email = email_fn(account)
+            if email:
+                with filestore.lock(store_dir(backup_root)):
+                    if stored_path(backup_root, user).exists():
+                        _store(backup_root, user, {**filestore.read_json(stored_path(backup_root, user)),
+                                                   "email": email})
     return out
 
 
