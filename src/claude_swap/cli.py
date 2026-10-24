@@ -1562,6 +1562,112 @@ def _alibaba_command(argv: list[str]) -> None:
         sys.exit(1)
 
 
+def _kimi_command(argv: list[str]) -> None:
+    """Handle `cswap kimi {login,add,list,switch,remove,auto}` — Kimi Code CLI
+    account rotation. See :mod:`claude_swap.kimi`."""
+    import json as _json
+    import time
+    from datetime import datetime, timezone
+
+    from claude_swap import kimi
+    from claude_swap.printer import bold_accent
+    from claude_swap.settings import load_settings
+
+    parser = argparse.ArgumentParser(
+        prog="cswap kimi",
+        description="Rotate Kimi Code CLI (kimi) logins. `cswap kimi add` stores the current one, "
+                    "`cswap kimi login` signs in another — per machine.",
+    )
+    sub = parser.add_subparsers(dest="action", metavar="{login,add,list,switch,remove,auto}")
+    sub.add_parser("login", help="Store the current login, then `kimi login` with another account")
+    sub.add_parser("add", help="Store the account kimi is logged in with now")
+    p_list = sub.add_parser("list", help="Stored accounts with their usage")
+    p_list.add_argument("--json", action="store_true", help="Machine-readable output")
+    p_switch = sub.add_parser("switch", help="Make a stored account the live one")
+    p_switch.add_argument("user")
+    p_remove = sub.add_parser("remove", help="Forget a stored account (not the live one)")
+    p_remove.add_argument("user")
+    p_auto = sub.add_parser("auto", help="Switch when the live account's usage reaches the threshold (loop)")
+    p_auto.add_argument("--once", action="store_true", help="One decision, then exit")
+    p_auto.add_argument("--interval", type=float, default=300.0, help="Seconds between checks (min 60)")
+    p_auto.add_argument("--dry-run", action="store_true", help="Decide, never switch")
+    args = parser.parse_args(argv)
+    root = paths.get_backup_root()
+    threshold = load_settings(root).threshold
+
+    def in_time(ts) -> str:
+        if not isinstance(ts, (int, float)):
+            return ""
+        left = max(0, int(ts - time.time()))
+        days, rem = divmod(left, 86400)
+        return f"resets in {days}d {rem // 3600}h" if days else f"resets in {rem // 3600}h {rem % 3600 // 60}m"
+
+    try:
+        if args.action == "login":
+            print(f"Stored kimi account {kimi.login(root)}")
+        elif args.action == "add":
+            print(f"Stored kimi account {kimi.add(root)}")
+        elif args.action == "remove":
+            kimi.remove(root, args.user)
+            print(f"Removed kimi account {args.user}")
+        elif args.action == "switch":
+            previous = kimi.switch(root, args.user)
+            if previous == args.user:
+                print(f"{args.user} is already the live kimi login")
+            else:
+                print(f"kimi login: {previous or 'none'} -> {args.user}")
+                print(dimmed("Running kimi sessions use it from their next request."))
+        elif args.action == "auto":
+            while True:
+                try:
+                    event = kimi.auto_tick(root, threshold, dry_run=args.dry_run)
+                except Exception as e:  # one bad tick never ends the loop
+                    event = {"event": "kimi-error", "message": f"{type(e).__name__}: {e}"}
+                event["ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+                print(_json.dumps(event), flush=True)
+                if args.once:
+                    break
+                time.sleep(max(60.0, args.interval))
+        else:  # list (default)
+            current = kimi.sync_live(root)
+            users = kimi.stored_accounts(root)
+            usages = kimi.usages_for(root, users, current)
+            order = kimi.rank(usages, current, threshold)
+            rows = ([current] if current in users else []) + order + [
+                u for u in users if u != current and u not in order]
+            if getattr(args, "json", False):
+                print(_json.dumps({"schemaVersion": 1, "threshold": threshold, "accounts": [
+                    {"user": u, "active": u == current, "next": bool(order) and u == order[0],
+                     "usedPct": usages[u].pct, "resetAt": usages[u].reset_at, "error": usages[u].error,
+                     "windows": [{"window": w, "usedPct": p, "resetAt": r} for w, p, r in usages[u].windows]}
+                    for u in rows]}))
+                return
+            if not users:
+                print(dimmed("No kimi accounts stored — `cswap kimi add` stores the current login, "
+                             "`cswap kimi login` signs in another."))
+                return
+            print(bolded("kimi accounts:") + " " +
+                  muted(f"(in the order they will be used; switch at {threshold:g}%)"))
+            for u in rows:
+                tags = [bold_accent("(active)")] if u == current else (
+                    [muted("(next)")] if order and u == order[0] else
+                    [muted("(waits for its reset)")] if u not in order else [])
+                print(f"  {u} {' '.join(tags)}".rstrip())
+                usage = usages[u]
+                if usage.error is not None:
+                    print(f"     └ {muted('usage unknown: ' + usage.error)}")
+                    continue
+                for i, (label, pct, reset) in enumerate(usage.windows):
+                    branch = "└" if i == len(usage.windows) - 1 else "├"
+                    print(f"     {branch} {label + ':':<12}{pct:5.0f}%   {in_time(reset)}")
+            if current and current not in users:
+                print()
+                warning(f"The live kimi login {current} is not stored — run `cswap kimi add`.")
+    except kimi.KimiError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def _config_command(argv: list[str]) -> None:
     """Handle `cswap config [list|get KEY|set KEY VALUE|unset KEY|path]`.
 
@@ -1769,6 +1875,9 @@ def main() -> None:
         return
     if argv and argv[0] in ("alibaba", "qwen"):
         _alibaba_command(argv[1:])
+        return
+    if argv and argv[0] == "kimi":
+        _kimi_command(argv[1:])
         return
     if len(sys.argv) > 1 and sys.argv[1] == "config":
         _config_command(sys.argv[2:])
