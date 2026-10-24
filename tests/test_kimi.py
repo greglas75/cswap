@@ -265,6 +265,25 @@ def test_login_keeps_the_token_kimi_rotated_during_the_sign_in(env, monkeypatch)
     assert json.loads(_live_path().read_text()) == _token("u-b")
 
 
+def test_signing_in_again_as_the_live_account_replaces_its_token(env, monkeypatch):
+    """Bug caught: a new sign-in as the live account (its old token revoked)
+    thrown away — the old token copied back over it, so kimi stays broken."""
+    _live(_token("u-a"))
+    kimi.add(env)
+
+    def call(argv, env):
+        creds = Path(env["KIMI_CODE_HOME"]) / "credentials"
+        creds.mkdir()
+        (creds / "kimi-code-env-other.json").write_text(json.dumps(_token("u-a", gen=5)))
+        return 0
+
+    monkeypatch.setattr(kimi, "_binary", lambda: "/bin/kimi")
+    monkeypatch.setattr(kimi.subprocess, "call", call)
+    kimi.login(env)
+    assert json.loads(_live_path().read_text()) == _token("u-a", gen=5)
+    assert json.loads(kimi.stored_path(env, "u-a").read_text())["token"] == _token("u-a", gen=5)
+
+
 def test_aborted_login_changes_nothing(env, monkeypatch):
     """Bug caught: quitting `kimi login` leaving kimi logged out or on another account."""
     _live(_token("u-a"))

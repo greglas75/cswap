@@ -305,7 +305,7 @@ def refresh(account: dict, timeout: float = 30.0) -> dict:
         raise KimiError("token refresh gave no token pair")
     try:
         expires_in = int(payload.get("expires_in") or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         expires_in = 0   # expires_at = now: the next use refreshes again
     return {**account, "token": {
         "access_token": payload["access_token"], "refresh_token": payload["refresh_token"],
@@ -510,7 +510,10 @@ def login(backup_root: Path) -> str:
         raise KimiError("no new login (kimi login gave no token) — nothing changed")
     with filestore.lock(store_dir(backup_root)):
         _store(backup_root, user, fresh)
-        # kimi kept running during the sign-in and may have rotated the live
-        # token since it was stored above: _switch stores it again first.
-        _switch(backup_root, user)
+        if account_user(read_live()) == user:
+            write_live(fresh)   # signed in again as the live account: the new token replaces it
+        else:
+            # kimi kept running during the sign-in and may have rotated the live
+            # token since it was stored above: _switch stores it again first.
+            _switch(backup_root, user)
     return user
