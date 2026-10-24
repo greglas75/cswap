@@ -81,7 +81,24 @@ def test_parse_usage(usages, pct, reset, error):
     account (no plan, every request refused) kept live as "usage unknown"."""
     usage = kimi.parse_usage({"usages": usages})
     assert (usage.pct, usage.reset_at) == (pct, reset)
+    assert (usage.error is None) == (error is None)
     assert (usage.error or "").startswith(error or "")
+
+
+@pytest.mark.parametrize("payload", [
+    pytest.param({}, id="free-account-replies-with-an-empty-object"),
+    pytest.param({"usages": {}}, id="empty-usages"),
+])
+def test_an_empty_reply_means_no_plan(payload):
+    """Bug caught: a Free account (Kimi Code refuses it) not counted as used up."""
+    assert kimi.parse_usage(payload).no_plan
+
+
+def test_an_error_reply_is_not_mistaken_for_no_plan():
+    """Bug caught: any reply without usages (an error body) read as "no plan"
+    and counted 100% used, which switches away from a healthy account."""
+    usage = kimi.parse_usage({"error": "temporarily unavailable"})
+    assert (usage.no_plan, usage.pct, usage.error is not None) == (False, None, True)
 
 
 def test_switch_stores_the_rotated_live_token_and_writes_only_the_login(env):
@@ -153,6 +170,18 @@ def test_usage_refreshes_an_expired_token_and_keeps_the_new_pair_everywhere(env,
         assert json.loads(kimi.stored_path(env, user).read_text())["token"]["refresh_token"].endswith("9")
 
 
+def test_the_live_login_is_never_refreshed_from_its_stored_copy(env, monkeypatch):
+    """Bug caught: cswap spending the refresh token kimi itself holds (the live
+    login read as idle after it changed meanwhile), so kimi's copy is revoked."""
+    _live(_token("u-a", expires_at=0))
+    kimi.add(env)
+    spent = []
+    monkeypatch.setattr(kimi, "refresh", lambda account: spent.append(account) or account)
+    usages = kimi.usages_for(env, ["u-a"], None, fetch_fn=lambda a: Usage(1.0, None),
+                             email_fn=lambda a: None)
+    assert spent == [] and usages["u-a"].error == "login changed meanwhile"
+
+
 def test_the_account_label_survives_the_live_sync(env):
     """Bug caught: every sync of the live token (each tick) wiping the email
     the usage page names the account by."""
@@ -208,6 +237,31 @@ def test_login_stores_both_accounts_and_makes_the_new_one_live(env, monkeypatch)
     assert kimi.login(env) == "u-b"
     assert homes and homes[0] != str(kimi.home())
     assert kimi.stored_accounts(env) == ["u-a", "u-b"]
+    assert json.loads(_live_path().read_text()) == _token("u-b")
+
+
+def test_login_keeps_the_token_kimi_rotated_during_the_sign_in(env, monkeypatch):
+    """Bug caught: the old account stored before the (minutes-long) sign-in,
+    kimi refreshing it meanwhile, and the new login overwriting the rotated
+    token — the stored copy then holds a spent refresh token. Also: the old
+    account's email label dropped by the login."""
+    _live(_token("u-a"))
+    kimi.add(env)
+    stored = json.loads(kimi.stored_path(env, "u-a").read_text())
+    kimi.filestore.write_private(kimi.stored_path(env, "u-a"), {**stored, "email": "a@x.io"})
+
+    def call(argv, env):
+        _live(_token("u-a", gen=2))   # kimi refreshes while the browser sign-in runs
+        creds = Path(env["KIMI_CODE_HOME"]) / "credentials"
+        creds.mkdir()
+        (creds / "kimi-code-env-other.json").write_text(json.dumps(_token("u-b")))
+        return 0
+
+    monkeypatch.setattr(kimi, "_binary", lambda: "/bin/kimi")
+    monkeypatch.setattr(kimi.subprocess, "call", call)
+    kimi.login(env)
+    stored = json.loads(kimi.stored_path(env, "u-a").read_text())
+    assert (stored["token"]["refresh_token"][-1], stored["email"]) == ("2", "a@x.io")
     assert json.loads(_live_path().read_text()) == _token("u-b")
 
 

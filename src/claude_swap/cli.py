@@ -1602,6 +1602,12 @@ def _kimi_command(argv: list[str]) -> None:
         days, rem = divmod(left, 86400)
         return f"resets in {days}d {rem // 3600}h" if days else f"resets in {rem // 3600}h {rem % 3600 // 60}m"
 
+    def auto_event() -> dict:
+        try:   # one bad tick never ends the loop; the threshold is re-read each tick
+            return kimi.auto_tick(root, load_settings(root).threshold, dry_run=args.dry_run)
+        except Exception as e:
+            return {"event": "kimi-error", "message": f"{type(e).__name__}: {e}"}
+
     try:
         if args.action == "login":
             print(f"Stored kimi account {kimi.login(root)}")
@@ -1619,11 +1625,8 @@ def _kimi_command(argv: list[str]) -> None:
                 print(dimmed("Running kimi sessions use it from their next request."))
         elif args.action == "auto":
             while True:
-                try:
-                    event = kimi.auto_tick(root, threshold, dry_run=args.dry_run)
-                except Exception as e:  # one bad tick never ends the loop
-                    event = {"event": "kimi-error", "message": f"{type(e).__name__}: {e}"}
-                event["ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+                event = {**auto_event(),
+                         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")}
                 print(_json.dumps(event), flush=True)
                 if args.once:
                     break

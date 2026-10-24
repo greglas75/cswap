@@ -222,9 +222,7 @@ def add(backup_root: Path) -> str:
     return user
 
 
-def write_live(account: dict) -> None:
-    """Put ``account``'s token in as kimi's login, under kimi's lock."""
-    env = live_env()
+def _check_writable(env: Env, account: dict) -> None:
     user = account_user(account)
     if user is None:
         raise KimiError("refusing to write a token without an account")
@@ -232,6 +230,12 @@ def write_live(account: dict) -> None:
     if account.get("oauthHost") != env.oauth_host:
         raise KimiError(f"{user} was logged in on {account.get('oauthHost')}, kimi is set up for "
                         f"{env.oauth_host} — not mixing regions")
+
+
+def write_live(account: dict) -> None:
+    """Put ``account``'s token in as kimi's login, under kimi's lock."""
+    env = live_env()
+    _check_writable(env, account)
     with kimi_lock(env):
         filestore.write_private(live_file(env), account["token"])
 
@@ -250,13 +254,17 @@ def _switch(backup_root: Path, user: str) -> str | None:
     target = filestore.read_json(stored_path(backup_root, user))
     if account_user(target) != user:
         raise KimiError(f"{user} is not stored — log in with it and run: cswap kimi add")
-    live = read_live()
-    live_user = account_user(live)
-    if live is not None and live_user is not None and not stored_path(backup_root, live_user).exists():
-        raise KimiError(f"the live kimi login {live_user} is not stored — run `cswap kimi add` first")
-    previous = _sync_live(backup_root)
-    if previous != user:
-        write_live(target)
+    env = live_env()
+    _check_writable(env, target)
+    # Saving the live token and replacing it happen under kimi's lock: a kimi
+    # refresh in between would rotate a refresh token cswap never stores.
+    with kimi_lock(env):
+        live_user = account_user(read_live())
+        if live_user is not None and not stored_path(backup_root, live_user).exists():
+            raise KimiError(f"the live kimi login {live_user} is not stored — run `cswap kimi add` first")
+        previous = _sync_live(backup_root)
+        if previous != user:
+            filestore.write_private(live_file(env), target["token"])
     return previous
 
 
@@ -293,9 +301,12 @@ def refresh(account: dict, timeout: float = 30.0) -> dict:
         raise KimiError(f"token refresh refused (HTTP {e.code})") from e
     except (OSError, ValueError) as e:
         raise KimiError(f"token refresh failed ({type(e).__name__})") from e
-    if not payload.get("access_token") or not payload.get("refresh_token"):
+    if not isinstance(payload, dict) or not payload.get("access_token") or not payload.get("refresh_token"):
         raise KimiError("token refresh gave no token pair")
-    expires_in = int(payload.get("expires_in") or 0)
+    try:
+        expires_in = int(payload.get("expires_in") or 0)
+    except (TypeError, ValueError):
+        expires_in = 0   # expires_at = now: the next use refreshes again
     return {**account, "token": {
         "access_token": payload["access_token"], "refresh_token": payload["refresh_token"],
         "expires_at": int(time.time()) + expires_in, "scope": payload.get("scope", ""),
@@ -332,7 +343,7 @@ def _ts(value) -> float | None:
 
 def parse_usage(payload: dict) -> Usage:
     raw = payload.get("usages") if isinstance(payload, dict) else None
-    if isinstance(payload, dict) and not raw:
+    if isinstance(payload, dict) and not raw and set(payload) <= {"usages"}:
         # A Free account gets `{}` here and 403 "does not have access to Kimi
         # Code" on every request (measured 2026-10-24).
         return Usage(100.0, None, no_plan=True)
@@ -399,8 +410,8 @@ def _fresh_live(backup_root: Path, user: str, now: float) -> dict | None:
 def _fresh_stored(backup_root: Path, user: str, now: float) -> dict | None:
     with filestore.lock(store_dir(backup_root)):
         account = filestore.read_json(stored_path(backup_root, user))
-        if account_user(account) != user:
-            return None
+        if account_user(account) != user or account_user(read_live()) == user:
+            return None   # gone, or kimi uses it now: only kimi refreshes the live login
         if needs_refresh(account, now):
             account = refresh(account)
             filestore.write_private(stored_path(backup_root, user), account)
@@ -423,9 +434,9 @@ def usages_for(backup_root: Path, users: list[str], current: str | None, *, cloc
             email = email_fn(account)
             if email:
                 with filestore.lock(store_dir(backup_root)):
-                    if stored_path(backup_root, user).exists():
-                        _store(backup_root, user, {**filestore.read_json(stored_path(backup_root, user)),
-                                                   "email": email})
+                    stored = filestore.read_json(stored_path(backup_root, user))
+                    if account_user(stored) == user:
+                        _store(backup_root, user, {**stored, "email": email})
     return out
 
 
@@ -448,7 +459,7 @@ def auto_tick(backup_root: Path, threshold: float, *, dry_run: bool = False, usa
         users = stored_accounts(backup_root)
     if current is None or current not in users:
         return {"event": "kimi-no-switch", "reason": "live-login-not-stored", "live": current}
-    usages = usages_fn(backup_root, users, current)   # network outside the store lock
+    usages = usages_fn(backup_root, users, current)   # takes the store lock per account only
     with filestore.lock(store_dir(backup_root)):
         if account_user(read_live()) != current:
             return {"event": "kimi-no-switch", "reason": "live-login-changed", "account": current}
@@ -484,7 +495,7 @@ def login(backup_root: Path) -> str:
     with filestore.lock(store_dir(backup_root)):
         previous = read_live()
         if account_user(previous) is not None:
-            filestore.write_private(stored_path(backup_root, account_user(previous)), previous)
+            _store(backup_root, account_user(previous), previous)
     region = "mainland-cn" if env.oauth_host == DEFAULT_OAUTH_HOST else "global"
     with tempfile.TemporaryDirectory(prefix="cswap-kimi-login-") as tmp:
         with contextlib.suppress(OSError):   # the same device as the live login
@@ -498,6 +509,8 @@ def login(backup_root: Path) -> str:
     if rc != 0 or user is None:
         raise KimiError("no new login (kimi login gave no token) — nothing changed")
     with filestore.lock(store_dir(backup_root)):
-        filestore.write_private(stored_path(backup_root, user), fresh)
-        write_live(fresh)
+        _store(backup_root, user, fresh)
+        # kimi kept running during the sign-in and may have rotated the live
+        # token since it was stored above: _switch stores it again first.
+        _switch(backup_root, user)
     return user
