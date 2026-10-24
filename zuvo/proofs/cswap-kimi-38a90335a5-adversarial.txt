@@ -1,0 +1,1725 @@
+artifact_kind=adversarial-review
+created_at=2026-10-24T15:23:41Z
+status=partial
+mode=code
+output_format=text
+providers_used=openrouter-5, byteplus-alt, zai, qwen
+provider_count=4
+providers_attempted=5
+provider_outcomes=agy:timeout,openrouter-5:ok,byteplus-alt:ok,zai:ok,qwen:ok
+adversarial_pass=1/3
+REVIEW BY: OPENROUTER-5
+REVIEW BY: BYTEPLUS-ALT
+REVIEW BY: ZAI
+REVIEW BY: QWEN
+input_chars=8569
+input_chars_original=8569
+input_truncated=false
+total_findings=20
+critical=0
+warning=13
+info=7
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: openrouter-5, byteplus-alt, zai, qwen (4 total)
+Mode: code
+Input size: 8569 chars
+Date: 2026-10-24T15:23:41Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-5
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/cli.py:1624
+ID: cli:1624:auto-once-error-exit-zero
+ISSUE: The `auto` loop catches every exception from `auto_tick` and, when `--once` is set, prints a `kimi-error` event and breaks, so a failed one-shot tick exits 0.
+ATTACK VECTOR: A cron/systemd job using `cswap kimi auto --once` can miss a required switch and report success; the live account stays over threshold and no alert fires.
+SUGGESTED FIX: After printing, if `args.once` and `event.get("event") == "kimi-error"`, call `sys.exit(1)` before `break`.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/cli.py:1636
+ID: cli:1636:current-duplicate-rank-rows
+ISSUE: `rows` prepends `current` and then appends `order` without filtering `current` out of `order`, so if `kimi.rank` ever returns the live account, the same account appears twice, both tagged active.
+ATTACK VECTOR: JSON/text consumers see duplicate active rows; scripts keying by username double-process the active account and the `next`/`waits` tags become contradictory.
+SUGGESTED FIX: Build `order` defensively before constructing rows: `order = [u for u in order if u in users and u != current]`.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/cli.py:1596
+ID: cli:1596:auto-threshold-stale
+ISSUE: `threshold` is loaded once before the `auto` loop, so a long-running auto process never sees settings changes while it is running.
+ATTACK VECTOR: An operator updates the threshold with `cswap config set threshold`, but the daemon keeps switching at the old value until restarted, causing overly early or late rotation.
+SUGGESTED FIX: Reload the threshold at the top of each iteration, e.g. move `threshold = load_settings(root).threshold` inside the `while True` loop.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/cli.py:1630
+ID: cli:1630:interval-inf-sleep-overflow
+ISSUE: `--interval` accepts non-finite or huge floats; `time.sleep(max(60.0, args.interval))` then feeds `inf` to `time.sleep`, raising `OverflowError` after the first tick.
+ATTACK VECTOR: A caller passing `--interval inf` or an accidentally huge float crashes the long-running rotation loop with a traceback instead of continuing or erroring cleanly.
+SUGGESTED FIX: Validate the interval before the loop, e.g. `if not math.isfinite(args.interval) or args.interval < 60: args.interval = 300.0`.
+
+
+###############################################################
+###   PROVIDER: BYTEPLUS-ALT
+###############################################################
+
+I reviewed the two hunks in isolation (shell `deploy_mac` change + Python `_kimi_command`/dispatch). Most of the argparse plumbing is careful (per-subparser attrs are guarded, `getattr(args,"json",...)` handles the bare-`cswap kimi` case, `max(60.0, ...)` actually matches the "min 60" help text). The real issues are around failure signaling and a couple of construction/naming inconsistencies.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/cli.py:1623 (auto loop `try/except` → `if args.once: break`)
+ID: cli.py:1623:auto-swallow-errors-exit0
+ISSUE: The `auto` loop converts every tick failure into an error *event* and still exits `0`; there is no path that ever returns non-zero.
+ATTACK VECTOR: `--once` is the scheduler/automation mode (`auto --once` in cron/timer). If `kimi.auto_tick` fails every run (e.g. all accounts exhausted, persistent bug, `threshold` misconfig raising inside the tick), the command prints `{"event":"kimi-error",...}` but exits `0`, so `cswap kimi auto --once || alert` never fires and a supervisor reports the unit healthy forever. Without `--once` the same swallowing means a permanently-failing rotation daemon stays "active" while making no progress — the comment "one bad tick never ends the loop" is correct for transient errors but leaves no ceiling/escalation for persistent ones.
+SUGGESTED FIX: Track consecutive failures; on `--once`, `sys.exit(1)` when the emitted event is `kimi-error`. For the looping mode, exit non-zero (or back off + surface) after N consecutive failures.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: low
+FILE: src/claude_swap/cli.py:1631
+ID: cli.py:1631:list-mutation-sync-live
+ISSUE: The read-only `list` path calls `kimi.sync_live(root)`, a "sync" (state-reconciling) operation, on every list/`--json` invocation.
+ATTACK VECTOR: If `sync_live` writes the currently-live login into the store (as the name implies), then `cswap kimi list` — a query command — mutates persistent state. Two concurrent `list` calls (or list racing `switch`) can then interleave writes / produce stale reads, and read-only consumers (monitoring, `--json` scraping) unexpectedly cause writes. Confidence is low because `kimi.py` is not in this chunk; if `sync_live` is a pure read this is a false positive.
+SUGGESTED FIX: If `sync_live` mutates, move it into the mutating commands (`add`/`switch`) or make `list` use a pure read accessor (e.g. `live_account`).
+
+---
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/cli.py:1635
+ID: cli.py:1635:rows-dup-current-order
+ISSUE: `current` is de-duplicated only in the trailing leftover comprehension (`u != current and u not in order`), not against `order`, so the active account can appear twice in `rows`.
+ATTACK VECTOR: `rows = ([current] if current in users else []) + order + [...]`. If `kimi.rank()` ever returns `current` in `order` (its contract isn't enforced here), the active user is printed twice and emitted twice in the `--json` `accounts` array (double email/usage lookups, ambiguous "active"/"next" tags). The asymmetry (filtering `current` from leftovers but trusting `order` to exclude it) is a latent inconsistency.
+SUGGESTED FIX: Filter the ordered slice too, e.g. `order = [u for u in order if u != current]` before building `rows`.
+
+---
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/cli.py:1597
+ID: cli.py:1597:in-time-returns-string
+ISSUE: Helper `in_time(ts)` is named like a boolean predicate (`in_` prefix) but returns a formatted duration string.
+ATTACK VECTOR: Naming/behavior mismatch — a future reader or caller may reasonably do `if in_time(ts): ...` believing it tests membership/validity, when it always returns either `""` or a truthy `"resets in ..."` string. Minor, but it's the kind of drift that later gets "fixed" incorrectly.
+SUGGESTED FIX: Rename to something behavior-descriptive like `fmt_reset_in(ts)` / `time_until(ts)`.
+
+Note: the `deploy-hosts.sh` hunk only adds `com.greglas.cswap-kimi` to the existing kickstart label array; it follows the same kickstart/`continue`-to-`bad` pattern as the other agents, so I did not flag it as a distinct defect from this artifact alone.
+
+
+###############################################################
+###   PROVIDER: ZAI
+###############################################################
+
+## Adversarial Code Review Findings
+
+---
+
+**SEVERITY**: WARNING
+**CONFIDENCE**: high
+**FILE**: src/claude_swap/cli.py:1638
+**ID**: cli.py:1638:list-sync-live-side-effect
+**ISSUE**: The `list` subcommand calls `kimi.sync_live(root)` — a read-only, "machine-readable output" command performs a state mutation (syncing live login) as a side effect.
+**ATTACK VECTOR**: `cswap kimi list --json` is exactly the kind of command scripts/cron would run for monitoring; a "list" that can write state breaks that assumption and can race with a concurrent `switch`, producing inconsistent reported state. Also violates least-surprise: listing should never fail *because* syncing failed.
+**SUGGESTED FIX**: Move the `sync_live` call out of the list path (or make it explicit/read-only), e.g. read the current login without persisting, or gate the sync behind a flag.
+
+---
+
+**SEVERITY**: WARNING
+**CONFIDENCE**: high
+**FILE**: src/claude_swap/cli.py:1617
+**ID**: cli.py:1617:auto-stale-threshold
+**ISSUE**: In the `auto` loop, `threshold` is loaded once before the `while True` loop and never re-read; a long-running `--auto` process uses a stale value indefinitely.
+**ATTACK VECTOR**: Operator runs `cswap kimi auto` as a daemon, then changes the threshold via `cswap config set threshold 90`. The daemon keeps switching at the old threshold until restarted — silent policy drift with no indication.
+**SUGGESTED FIX**: Call `load_settings(root).threshold` inside each loop iteration (cheap, and consistent with the "re-decide each tick" model).
+
+---
+
+**SEVERITY**: WARNING
+**CONFIDENCE**: medium
+**FILE**: src/claude_swap/cli.py:1627
+**ID**: cli.py:1627:auto-tick-error-swallows-switch
+**ISSUE**: The auto loop catches every `Exception` from `auto_tick` and reports it as a `kimi-error` event, but if `auto_tick` partially completed (e.g. switched the live account, then failed while recording usage/state), the failure is reported with no indication the switch already happened.
+**ATTACK VECTOR**: `auto_tick` writes the new account then crashes before its final bookkeeping; the log shows only `kimi-error`, an operator (or automation parsing the JSON stream) concludes nothing happened, and the account state diverges from what the log claims — silent partial failure.
+**SUGGESTED FIX**: Have `auto_tick` return the event even on internal failure (or wrap only the decision, not the mutation), so partial completion is distinguishable from a no-op failure.
+
+---
+
+**SEVERITY**: WARNING
+**CONFIDENCE**: medium
+**FILE**: src/claude_swap/cli.py:1660
+**ID**: cli.py:1660:rows-duplicate-current
+**ISSUE**: `rows` can contain the same user twice: `current` is prepended when stored, and `rank(...)` may also return `current` (it is passed in and keyed in `usages`), while the dedup tail only excludes users already in `order` from the *leftover* slice — not from `order` itself overlapping with `current`.
+**ATTACK VECTOR**: With N stored accounts, if `rank` includes the current account in its ordering, `cswap kimi list` prints the active account twice (once tagged "(active)", once ranked), and the JSON output lists it as two accounts — parsers indexing by position or expecting unique users misbehave.
+**SUGGESTED FIX**: Build `rows` with an explicit dedup: `rows = [current] + [u for u in order if u != current] + [u for u in users if u not in order and u != current]`.
+
+---
+
+**SEVERITY**: INFO
+**CONFIDENCE**: medium
+**FILE**: src/claude_swap/cli.py:1589
+**ID**: cli.py:1589:interval-silent-clamp
+**ISSUE**: `--interval` help says "Seconds between checks (min 60)" but the value is silently clamped via `time.sleep(max(60.0, args.interval))` — the user's explicit argument is overridden without warning (naming/behavior mismatch: the flag accepts values it will not honor).
+**ATTACK VECTOR**: Operator passes `--interval 10` expecting 10s polling; the daemon polls every 60s. Nothing in output reflects the clamp, so rate expectations and downstream alerting tuned to poll cadence are wrong.
+**SUGGESTED FIX**: Either reject `--interval < 60` with `parser.error(...)` or emit a one-time warning when clamping.
+
+---
+
+**SEVERITY**: INFO
+**CONFIDENCE**: medium
+**FILE**: src/claude_swap/cli.py:1566
+**ID**: cli.py:1566:cli-business-logic
+**ISSUE**: `_kimi_command` embeds presentation/business logic (ranking order, JSON schema construction, row assembly, usage formatting) inline in the CLI handler instead of delegating to the `kimi` module, unlike the thin dispatch pattern used by `main()`. The JSON schema (lines ~1655–1661) lives in the CLI layer, so any other consumer must duplicate it.
+**ATTACK VECTOR**: A second frontend (e.g. a TUI or the ccsync relay mentioned in the deploy comments) reimplements the JSON shape and drifts from the CLI's `schemaVersion: 1` output; contract changes then require edits in the presentation layer, which tests targeting `kimi` won't catch.
+**SUGGESTED FIX**: Move the row/JSON assembly into `claude_swap.kimi` (e.g. `kimi.list_accounts(root) -> list[dict]`) and have the CLI only format/print.
+
+---
+
+**Notes**: No CRITICAL findings — no evidence in the artifact of injection, auth bypass, or data-loss paths; the strongest defects are the state-mutating `list`, stale threshold in the daemon loop, and possible duplicate account rows.
+
+
+###############################################################
+###   PROVIDER: QWEN
+###############################################################
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** high
+**FILE:** src/claude_swap/cli.py:1626
+**ID:** cli.py:1626:auto-loop-try-only-covers-tick
+**ISSUE:** The comment "one bad tick never ends the loop" is false: only the `kimi.auto_tick()` call is inside the inner `try`. The `event["ts"]` mutation, `_json.dumps()`, and `print()` on lines 1626–1627 are outside it, so any failure there kills the daemon.
+**ATTACK VECTOR:** `auto` is exactly the mode run by the `com.greglas.cswap-kimi` LaunchAgent / `cswap-kimi` systemd unit. If `auto_tick()` ever returns a non-dict (e.g. `None` on an "idle" path), `event["ts"] = ...` raises `TypeError` outside the `try` — the loop dies, the agent silently stops rotating accounts, and the log contains only the last JSON event. Likewise an `OSError` (broken pipe during service shutdown/restart, disk-full log) bypasses the protection. Compounding this, the `except Exception` branch drops the traceback entirely (only `type(e).__name__` in a one-line message), so a persistent bug degrades into an endless stream of identical `kimi-error` events with no diagnostic — no backoff, no exit condition.
+**SUGGESTED FIX:** Wrap the whole loop body (tick + ts + dumps + print) in the `try`, and use `traceback`/`logging.exception` in the handler instead of a one-line message.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/cli.py:1636
+**ID:** cli.py:1636:rows-may-duplicate-active-account
+**ISSUE:** `rows = ([current] if current in users else []) + order + [u for u in users if u != current and u not in order]` dedupes the trailing segment against `order` and `current`, but never removes `current` from `order` itself — so if `rank()` includes the active account, it appears twice.
+**ATTACK VECTOR:** The code is internally inconsistent about whether `order` contains `current`: `kimi.rank(usages, current, threshold)` is explicitly passed `current` (hinting it may filter/prefer it), yet the list-comprehension's `u not in order` check is only meaningful if `order` is *not* exhaustive. When `order[0] == current`, the human-readable `list` renders the same account twice (both lines tagged `(active)` because the tag test is `u == current`), and the `--json` output carries duplicate entries under `"schemaVersion": 1` — a contract any downstream consumer (ccsync, dashboards) will trip over. The `(next)` marker (`u == order[0]`) is also unreachable in this case, since the active row's branch wins on the first occurrence.
+**SUGGESTED FIX:** `[current] + [u for u in order if u != current] + [u for u in users if u != current and u not in order]`.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/cli.py:1596
+**ID:** cli.py:1596:threshold-snapshotted-for-daemon
+**ISSUE:** `threshold` is loaded once per process, before the `auto` loop, and never reloaded — the daemon is pinned to the threshold at startup forever.
+**ATTACK VECTOR:** This is the long-running mode (`cswap-kimi` LaunchAgent/systemd unit, per the deploy script). When the operator changes the switch point via `cswap config set threshold`, every other surface picks it up, but the running kimi auto-loop keeps switching (or failing to switch) at the stale value indefinitely and silently — until someone happens to restart the unit. Same pattern as the `--dry-run`/`--once` semantics, which *are* re-read every tick; the threshold is the only per-tick decision input that isn't.
+**SUGGESTED FIX:** Reload inside the loop: `threshold = load_settings(root).threshold` before each `auto_tick` call (or on each iteration when not `--once`).
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/cli.py:1598
+**ID:** cli.py:1598:in-time-silently-drops-and-revs-zero
+**ISSUE:** `in_time()` has two silent-failure modes: any non-numeric timestamp returns `""` (rendering a blank reset column), and any expired timestamp renders as `f"resets in 0h 0m"` — indistinguishable from "about to reset".
+**ATTACK VECTOR:** `resetAt` originates from an external API (`usages` carries `reset_at`/`windows` tuples from kimi's quota endpoint, and the JSON branch passes it straight through). If the API returns an ISO-8601 string (the far more common shape for expiry fields) instead of epoch seconds, `isinstance(ts, (int, float))` fails and the operator's ranking view shows `├ daily:   42%` with no reset info at all — no error, no "unknown" marker — while `rank()` may be making real switch decisions from the same field. Conversely, a window whose reset already passed shows `resets in 0h 0m`, which reads as "fresh soon" when it actually means "quota is stuck"; also `bool` passes the `isinstance(_, int)` check, so a JSON `true` in that slot formats as `0h 0m`.
+**SUGGESTED FIX:** Return `"expired"` when `ts <= now`, `"unknown"` for unparseable values, and exclude `bool` from the isinstance check.
+
+---
+
+**SEVERITY:** INFO
+**CONFIDENCE:** high
+**FILE:** src/claude_swap/cli.py:1630
+**ID:** cli.py:1630:interval-unbounded-inf-hangs
+**ISSUE:** The documented bound "Seconds between checks (min 60)" is only half-enforced: `max(60.0, args.interval)` clamps the floor but has no ceiling — `--interval inf` (argparse `type=float` accepts `inf`) makes `time.sleep()` hang forever.
+**ATTACK VECTOR:** A typo or a runaway value (`--interval 1e18`, or `inf` copied from another config) produces a LaunchAgent that is "active" per `launchctl list`, keeps its PID, and never ticks again — quota exhaustion on the live account with zero output to indicate the loop is alive-but-frozen. Silent hang is the worst failure mode for a rotation daemon whose whole job is to notice exhaustion. (`NaN` happens to be absorbed by `max`, masking bad input rather than rejecting it.)
+**SUGGESTED FIX:** Validate at parse time: reject unless `60 <= args.interval <= 86400` (argparse's error path), instead of coercing with `max` at sleep time.
+
+---
+
+**SEVERITY:** INFO
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/cli.py:1632
+**ID:** cli.py:1632:list-calls-mutating-sync-live
+**ISSUE:** The nominally read-only `list` action (including its `--json` machine-readable mode) first calls `kimi.sync_live(root)` — a function named as a mutation — and its return value is the authoritative `current` account for the whole render.
+**ATTACK VECTOR:** Every invocation of a query command performs a write/sync side effect: `cswap kimi list --json` from cron or a status dashboard mutates live credential state on each poll, and any failure inside `sync_live` (transient credential-file lock, partial write) aborts the listing entirely via the `KimiError` handler with exit 1, even though the stored-account data is perfectly readable. It also couples observers to a write path they shouldn't depend on — classic command/query separation drift.
+**SUGGESTED FIX:** Split into `kimi.read_live(root)` (pure) used by `list`, keeping `sync_live` for the mutating paths; or make `sync_live` failure non-fatal for listing (fall back to the last-known current, flagged in the row tags).
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
+
+=== APPENDED PASS 2026-10-24T15:23:42Z ===
+artifact_kind=adversarial-review
+created_at=2026-10-24T15:23:41Z
+status=partial
+mode=code
+output_format=text
+providers_used=agy, openrouter-alt, zai, claude
+provider_count=4
+providers_attempted=5
+provider_outcomes=agy:ok,openrouter-alt:ok,byteplus:timeout,zai:ok,claude:ok
+adversarial_pass=1/3
+REVIEW BY: AGY
+REVIEW BY: OPENROUTER-ALT
+REVIEW BY: ZAI
+REVIEW BY: CLAUDE
+input_chars=21380
+input_chars_original=21380
+input_truncated=false
+total_findings=21
+critical=3
+warning=13
+info=5
+count_method=severity-records
+count_status=partial
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: agy, openrouter-alt, zai, claude (4 total)
+Mode: code
+Input size: 21380 chars
+Date: 2026-10-24T15:23:40Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: AGY
+###############################################################
+
+{"conversation_id":"1b1201d9-8dda-4e7b-9f7c-a1d7d846b907","status":"SUCCESS","response":"SEVERITY: CRITICAL\nCONFIDENCE: high\nFILE: src/claude_swap/kimi.py:260\nID: kimi.py:260:sync-live-outside-lock\nISSUE: `_switch()` syncs the active token file to storage outside `kimi_lock`, risking permanent token loss during concurrent refreshes\nATTACK VECTOR: When switching accounts, `_switch()` calls `_sync_live()` before entering `write_live()`. `_sync_live()` reads `live_file` without acquiring `kimi_lock`. If a background `kimi` CLI process refreshes its token right as `_switch()` executes, `_sync_live()` reads the pre-refresh token. The `kimi` process then updates `live_file` with the rotated refresh token and releases the lock. Next, `write_live()` acquires `kimi_lock` and overwrites `live_file` with the new target account. The newly rotated refresh token of the active account is never saved to the store, and its older backed-up refresh token is now invalidated on the OAuth server, permanently locking the user out of that account.\nSUGGESTED FIX: Wrap both `_sync_live()` and the writing of `target` under a single `with kimi_lock(env):` block so the read, sync, and replacement happen atomically with respect to `kimi` CLI processes.\n\nSEVERITY: CRITICAL\nCONFIDENCE: high\nFILE: src/claude_swap/kimi.py:143\nID: kimi.py:143:stale-lock-rmdir-toctou\nISSUE: TOCTOU race in stale lock removal allows multiple processes to acquire the lock concurrently\nATTACK VECTOR: In `kimi_lock()`, when an existing lock directory is determined to be older than `LOCK_STALE_S`, the process executes `lockdir.rmdir()` and continues the loop. If two processes (e.g. concurrent `cswap` instances or `cswap` and `kimi`) detect a stale lock simultaneously, Process A removes the directory and immediately acquires it with `lockdir.mkdir()`. Process B, having already passed the stale check, then executes `lockdir.rmdir()`, removing Process A's freshly acquired, active lock directory, and subsequently calls `lockdir.mkdir()`. Both processes now believe they hold the lock and write to `live_file` simultaneously.\nSUGGESTED FIX: Use an atomic lock acquisition/takeover strategy (e.g., creating a unique temporary directory and atomically renaming it over the stale lock, or verifying identity/timestamp before unlinking) rather than uncoordinated `stat()` followed by `rmdir()`.\n\nSEVERITY: WARNING\nCONFIDENCE: high\nFILE: src/claude_swap/kimi.py:431\nID: kimi.py:431:refresh-network-under-store-lock\nISSUE: `_fresh_stored()` executes blocking network calls while holding the store-wide lock, directly contradicting comments and blocking concurrent commands\nATTACK VECTOR: Line 462 claims `# network outside the store lock`. However, `auto_tick()` delegates to `usages_for()`, which calls `_fresh_stored()`. `_fresh_stored()` acquires `filestore.lock(store_dir(backup_root))` and then performs `account = refresh(account)` inside the lock. `refresh()` executes a blocking HTTP POST with a 30-second timeout. If the network experiences latency or stalls, the entire `backup_root` store lock remains held for up to 30 seconds per expiring account, blocking any concurrent `cswap` CLI operations (such as manual switches, adds, or list queries).\nSUGGESTED FIX: Read the stored account under the store lock, release the lock before calling `refresh(account)`, and then re-acquire the lock to persist the refreshed account if it has not changed.\n\nSEVERITY: WARNING\nCONFIDENCE: high\nFILE: src/claude_swap/kimi.py:189\nID: kimi.py:189:stored-accounts-safe-name-mismatch\nISSUE: `stored_accounts()` filters out accounts whose user IDs require sanitization by `filestore.safe_name()`\nATTACK VECTOR: `stored_path()` names files using `f\"{filestore.safe_name(user, KimiError)}.json\"`. In `stored_accounts()`, files are filtered with `account_user(filestore.read_json(p)) == p.name[: -len(\".json\")]`. If an OAuth subject (`sub`) contains characters sanitized or encoded by `safe_name` (such as colons, pipes, or slashes standard in provider subject IDs like `auth0|123` or `user:456`), `p.name[:-5]` will match the sanitized name rather than the raw `sub`. Consequently, `stored_accounts()` silently drops these accounts, rendering them invisible to `auto_tick()` rotation and listing commands.\nSUGGESTED FIX: Check `account_user(filestore.read_json(p)) is not None` and verify `p.name == f\"{filestore.safe_name(user, KimiError)}.json\"` instead of asserting string equality between the unsanitized `sub` and the filename.\n\nSEVERITY: WARNING\nCONFIDENCE: high\nFILE: src/claude_swap/kimi.py:488\nID: kimi.py:488:login-bypasses-store-metadata-loss\nISSUE: `login()` bypasses `_store()` and directly writes accounts with `filestore.write_private()`, erasing stored email labels\nATTACK VECTOR: `_store()` explicitly preserves existing metadata: `label = {\"email\": old[\"email\"]} if old.get(\"email\") and not account.get(\"email\") else {}`. However, lines 488 and 498 in `login()` call `filestore.write_private(stored_path(...), ...)` directly for both `previous` and `fresh`. Because `read_live()` and `fresh` only contain token and endpoint data, any previously resolved `email` or `nickname` associated with the accounts in storage is permanently erased upon running `login()`.\nSUGGESTED FIX: Replace the direct `filestore.write_private(stored_path(...), ...)` calls on lines 488 and 498 with `_store(backup_root, account_user(previous), previous)` and `_store(backup_root, user, fresh)`.\n\nSEVERITY: WARNING\nCONFIDENCE: medium\nFILE: src/claude_swap/kimi.py:373\nID: kimi.py:373:parse-usage-falsy-raw-misclassification\nISSUE: `parse_usage()` misclassifies missing or null `\"usages\"` fields in API responses as exhausted Free accounts\nATTACK VECTOR: `parse_usage()` checks `if isinstance(payload, dict) and not raw:`. If the Kimi API returns an HTTP 200 payload with a missing, null, or empty `\"usages\"` key (or a top-level error response formatted as JSON like `{\"code\": 401, \"message\": \"unauthorized\"}`), `raw` is `None` or `{}`. `not raw` evaluates to `True`, causing `parse_usage()` to return `Usage(100.0, None, no_plan=True)`. Instead of raising an error or flagging an unknown usage state, the account is incorrectly marked as an exhausted plan at 100% capacity, forcing unwanted rotation or skipping healthy accounts.\nSUGGESTED FIX: Distinguish between an explicit empty dict payload (`raw == {}`) and a missing/null field or error response by validating `raw is not None and isinstance(raw, dict)`, returning `Usage(None, None, error=\"malformed usages payload\")` when `\"usages\"` is omitted or not a dict.\n\nSEVERITY: WARNING\nCONFIDENCE: medium\nFILE: src/claude_swap/kimi.py:394\nID: kimi.py:394:reset-at-first-window-none\nISSUE: `parse_usage()` sets `reset_at` to `None` if the first window lacks a reset time, deprioritizing accounts in `rank()`\nATTACK VECTOR: `parse_usage()` sets `reset_at = windows[0][2]`, which corresponds to `limit_month_total`. If an account's monthly limit does not provide a `reset_time` (or sets it to `null`), `windows[0][2]` is `None`. Even if `limit_7d` or `limit_5h` has a valid reset timestamp, `Usage.reset_at` becomes `None`. In `rank()`, `usage.reset_at if usage.reset_at is not None else float(\"inf\")` maps `None` to `float(\"inf\")`, sorting the account behind all others whose shortest windows might reset much later.\nSUGGESTED FIX: Fall back to the next available non-None `reset_time` among `windows` (e.g., `next((w[2] for w in windows if w[2] is not None), None)`) rather than strictly indexing `windows[0][2]`.\n","duration_seconds":114.317562,"num_turns":1,"usage":{"input_tokens":25509,"output_tokens":46704,"thinking_tokens":44656,"cache_read_tokens":0,"total_tokens":72213}}
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-ALT
+###############################################################
+
+I'll review this code carefully for adversarial issues.
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/kimi.py:478
+ID: kimi.py:478:login-previous-account-overwritten-before-new-login
+ISSUE: `login()` stores the previous live account *before* running `kimi login`, but if the new login fails (rc != 0 or no token), the previous account was already written to storage — and worse, if the previous account was already stored, this is fine, but the write happens under a lock that's released before the subprocess runs, so a concurrent `switch` could interleave.
+ATTACK VECTOR: User runs `cswap kimi login`, the interactive `kimi login` subprocess fails or is cancelled. The previous account has already been re-stored (harmless), but the error message claims "nothing changed" while the store lock was released during the subprocess — a concurrent `auto_tick` could `_switch` during that window, and then `login` raises without restoring state, leaving the live login pointing at an account the user thought was unchanged.
+SUGGESTED FIX: Move the `previous` store write to after a successful new login (or keep it but document that the store lock is intentionally released during the interactive subprocess and re-verify `read_live()` still matches `previous` before writing the new token).
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/kimi.py:486
+ID: kimi.py:486:login-glob-multiple-credential-files-silently-ignored
+ISSUE: `found = sorted((Path(tmp) / "credentials").glob("*.json"))` then `token = filestore.read_json(found[0]) if len(found) == 1 else None` — if kimi writes more than one credential file (e.g. a stale file copied in, or kimi writes both a token and a metadata file), `token` becomes `None` and the user gets a generic "no new login" error even though a valid login succeeded.
+ATTACK VECTOR: A user completes an interactive login successfully, but kimi's temp home ends up with 2+ `.json` files (e.g. kimi writes `credentials/<key>.json` plus a backup or a second region file). `cswap kimi login` reports failure and discards the successful login, with no indication of what files were found.
+SUGGESTED FIX: Log or include the count/names of found files in the error, or select the file matching `env.key` instead of requiring exactly one.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/kimi.py:439
+ID: kimi.py:439:rank-uses-life-not-reset-for-primary-sort
+ISSUE: `rank()` docstring says "soonest reset of the longest window first, then most room", but the sort key is `(life < MIN_USEFUL_LIFE_PCT, reset_at, -life)` — the primary key is a boolean "nearly useless" flag, so accounts with `life >= 5` are sorted by `reset_at` *before* considering how much room they have, contradicting "then most room" only in the secondary sense; more importantly, an account with `life=6` and reset in 7 days sorts before an account with `life=90` and reset in 1 hour, which may not be intended.
+ATTACK VECTOR: Rotation picks an account that resets far in the future over one that resets soon, wasting the soon-resetting window and causing an avoidable switch back later.
+SUGGESTED FIX: Clarify the intended ordering in the docstring or change the sort key to match the documented intent (e.g. sort by `reset_at` only among accounts with similar `life`, or sort by `-life` first).
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/kimi.py:143
+ID: kimi.py:143:kimi-lock-stale-rmdir-races-with-holder
+ISSUE: In `kimi_lock`, the stale-lock takeover does `lockdir.rmdir()` then `continue` — but `rmdir` only succeeds on an *empty* directory. If the real holder (kimi) created files inside `oauth/<key>.lock/`, `rmdir` raises `OSError` (not suppressed here — only `FileNotFoundError` is suppressed around the `stat`, and `rmdir` is outside that `suppress`), crashing instead of waiting.
+ATTACK VECTOR: If kimi's lock implementation puts any file inside the lock directory (common for proper-lockfile-style locks that store a pid file), cswap raises an unhandled `OSError` when the lock appears stale, instead of waiting or reporting a clean `KimiError`.
+SUGTEST FIX: Wrap `lockdir.rmdir()` in `contextlib.suppress(OSError)` and fall through to the wait/deadline logic, or use `shutil.rmtree` if the lock dir is known to be disposable when stale.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/kimi.py:455
+ID: kimi.py:455:auto-tick-live-pct-none-crashes
+ISSUE: In `auto_tick`, after checking `live.error is not None`, the code does `if live.pct < threshold` — but `Usage.pct` can be `None` when `error` is `None` (e.g. `Usage(None, None, error=...)` always sets error, but `parse_usage` can return `Usage(None, None, error="no usage windows...")` which has error set; however `fetch_fn` could be a stub returning `Usage(None, None)` with no error). If `pct` is `None` and `error` is `None`, `None < threshold` raises `TypeError`.
+ATTACK VECTOR: A usage source that returns a `Usage` with `pct=None` and `error=None` (possible via the injectable `usages_fn`/`fetch_fn`, or a future `parse_usage` path) causes `auto_tick` to crash with `TypeError` instead of returning a structured "unknown" event.
+SUGGESTED FIX: Guard with `if live.pct is None or live.pct < threshold:` (treating unknown as "don't switch") or return an explicit "active-usage-unknown" event.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/kimi.py:392
+ID: kimi.py:392:usages-for-email-write-rereads-without-lock-held-initially
+ISSUE: In `usages_for`, the email back-fill does `with filestore.lock(...): _store(..., {**filestore.read_json(...), "email": email})` — this re-reads the stored account inside the lock, but `_fresh_stored`/`_fresh_live` earlier may have already refreshed and written a newer token; the read-modify-write here is correct *because* it re-reads under the lock, but if `stored_path` doesn't exist (live account not yet stored), the `if stored_path(...).exists()` guard silently skips, so the email is fetched but never persisted for the current live account until it's stored.
+ATTACK VECTOR: Minor: an email fetched for the current live account (if not yet in the store) is discarded, causing a redundant `/me` fetch on every tick until the account is added.
+SUGGESTED FIX: No functional break; optionally store the email into the live-derived record only when the path exists (current behavior) and accept the repeated fetch, or fetch email only for stored accounts.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/kimi.py:96
+ID: kimi.py:96:claims-base64-json-error-type-mismatch
+ISSUE: `claims()` catches `ValueError` around `base64.urlsafe_b64decode(...)` + `json.loads(...)`, but `json.loads` on valid-base64-but-not-JSON bytes raises `json.JSONDecodeError` (a subclass of `ValueError`, so it is caught) — however `base64.urlsafe_b64decode` can raise `binascii.Error` (also a `ValueError` subclass) — this is actually fine; the real gap is that a JWT payload that decodes to a non-dict (e.g. a JSON list) is silently skipped, falling through to `refresh_token`, which may return different claims than intended if `access_token` payload is a list.
+ATTACK VECTOR: Extremely unlikely malformed token; `user_of` would return `None` and the account is treated as a tombstone, potentially blocking a switch to a valid account.
+SUGGESTED FIX: Low impact; no change required unless non-dict payloads are expected.
+
+
+###############################################################
+###   PROVIDER: ZAI
+###############################################################
+
+```json
+Finding list below. I treated the embedded comments only as claims to verify, per instructions.
+
+FINDINGS:
+
+1.
+  SEVERITY: CRITICAL
+  CONFIDENCE: high
+  FILE: src/claude_swap/kimi.py:110-116
+  ID: kimi.py:110:lock-rmdir-race-deletes-fresh-lock
+  ISSUE: Stale-lock takeover rmdir()s any lockdir whose mtime is >5 s old — including a lock that is actively held, because `kimi_lock`'s keep-fresh thread only touches the lock every 1.0 s but that thread can be starved, and worse, the takeover check uses wall-clock `time.time() - lockdir.stat().st_mtime` while legitimate holders keep the mtime fresh via `os.utime(lockdir)`. A process whose keeper thread is delayed (GIL contention, heavy network work inside the lock body, e.g. `refresh()` doing a 30 s HTTP call inside `kimi_lock` — see finding 2) still holds the lock, but if the keeper thread's utime is >5 s late (a single GC pause or SIGSTOP won't be caught by a 1 s poll interval that only runs when scheduled), another process rmdir()s the live lock and takes it. Two processes then believe they hold the lock and both call `refresh()`.
+  ATTACK VECTOR: Two concurrent refreshes spend the same single-use rotating refresh token; one gets HTTP 400/401 at the auth server and the stored token is permanently dead — account locked out until manual re-login. This is exactly the failure the lock exists to prevent, and the docstring at lines 106-107 ("kimi takes over a lock older than 5 s") claims the 5 s staleness check makes this safe, but the code's own keeper thread (1 s cadence, daemon, no priority) does not guarantee sub-5 s mtime freshness under load.
+  SUGGESTED FIX: Bind the takeover to the actual holder: write the holder's PID (and boot-id) into a file inside the lockdir and only rmdir when the PID is provably dead, or raise the utime cadence to ≤1 s AND lengthen LOCK_STALE_S beyond the worst-case body of the locked section (which includes a 30 s network call), e.g. LOCK_STALE_S = 45.
+
+2.
+  SEVERITY: CRITICAL
+  CONFIDENCE: high
+  FILE: src/claude_swap/kimi.py:394-400 (_fresh_live) with kimi.py:104-125
+  ID: kimi.py:394:refresh-inside-kimi-lock-blocks-rotation
+  ISSUE: `_fresh_live` performs `refresh(live)` — a network call with a 30 s timeout — while holding `kimi_lock`. Any concurrent kimi process or other cswap operation that touches the login will hit LOCK_WAIT_S (60 s) if the refresh is slow, and worse: while cswap waits on the *auth server* under the lock, any other cswap process that sees the lock older than 5 s (per the documented protocol kimi itself uses) will steal it per finding 1. The module docstring (line ~14: "refreshes it under the lock") and the kimi_lock docstring both promise safety, but holding a 5-second-staleness lock across a 30 s-timeout HTTP call contradicts the stated staleness contract in the same artifact.
+  ATTACK VECTOR: A slow/latent auth endpoint (network latency in production vs instant mock) makes every refresh a potential double-refresh race; the single-use refresh token is spent twice, one account bricked.
+  SUGGESTED FIX: Read the token under the lock, release, refresh outside, then re-acquire and CAS: only write the new token if `read_live()`'s refresh_token still equals the one the refresh was started from; otherwise discard (the other side already rotated).
+
+3.
+  SEVERITY: WARNING
+  CONFIDENCE: high
+  FILE: src/claude_swap/kimi.py:76-77
+  ID: kimi.py:76:claims-swallows-non-jwt-tokens
+  ISSUE: `claims()` tries access_token then refresh_token and silently returns `{}` on undecodable payloads; `user_of` then reports the account as a "revoked tombstone" (per docstring) even when the token is merely opaque or the file is fine but the JWT base64 contains characters that make `urlsafe_b64decode` raise `binascii.Error`. That exception is a subclass of `ValueError`, so it is caught — but the silent `{}` conflates "not a JWT" with "not logged in / revoked", and `add()` (line ~185) then refuses with a misleading "kimi is not logged in (or its login was revoked)" message.
+  ATTACK VECTOR: Kimi changes token format (or a proxy truncates the token); every account suddenly appears "not logged in", `stored_accounts()` (line ~151) filters all accounts out because `account_user(...) != p.name`, so the entire backup store silently lists as empty and `remove`/`switch` fail with "not stored" — user-visible data "loss" from a pure parsing change.
+  SUGGESTED FIX: Distinguish parse failure from absence: have `claims` raise (or `user_of` return a sentinel) on a token file present but undecodable, and surface "unreadable token format" instead of treating it as a tombstone.
+
+4.
+  SEVERITY: WARNING
+  CONFIDENCE: high
+  FILE: src/claude_swap/kimi.py:492-494
+  ID: kimi.py:492:login-empty-credentials-indexerror-path
+  ISSUE: In `login()`, `found = sorted(...glob("*.json"))` then `token = ... if len(found) == 1 else None`. If `kimi login` exits 0 but leaves zero or ≥2 credential files (e.g. it also writes a `cache.json`, or the user Ctrl-C's partway), `token` becomes None — fine — but `rc` is checked *after* `found[0]` is guarded, so no IndexError; the actual bug is that the guard `rc != 0 or user is None` runs after `tempfile.TemporaryDirectory` context has already deleted the credentials dir. The failure message "nothing changed" is correct for the *store*, but the successful OAuth login (the human-facing part, password/MFA already completed) is silently discarded — the user must redo interactive login entirely.
+  ATTACK VECTOR: `kimi login --region mainland-cn` writes credentials under a name not matching `*.json` glob assumptions (or nested dir) → exit code 0, `found` empty → "no new login" error, user re-does MFA login repeatedly with no diagnostic of what kimi actually wrote.
+  SUGGESTED FIX: Before the tempdir is torn down, if `found` is empty list the directory contents into the error message (and/or recurse with `rglob`), so the failure is diagnosable instead of a silent discard.
+
+5.
+  SEVERITY: WARNING
+  CONFIDENCE: medium
+  FILE: src/claude_swap/kimi.py:214-219 (_switch) + 424-428 (auto_tick)
+  ID: kimi.py:214:switch-live-write-outside-store-race
+  ISSUE: `_switch` calls `write_live(target)`, which takes `kimi_lock` but NOT the store lock — and `_switch` is invoked from `auto_tick`'s second `filestore.lock` block under the assumption the whole check-then-switch is atomic ("live-login-changed" recheck at line ~426 guards this). But `write_live` blocks up to 60 s on `kimi_lock`; during that window kimi itself may refresh the live token and rewrite the file. cswap then overwrites kimi's freshly rotated refresh_token with the older stored one, and `_sync_live` had already persisted the *old* live token over the stored copy earlier — the rotation kimi performed is lost and the older refresh token is single-use-spent by kimi's earlier refresh.
+  ATTACK VECTOR: cswap `auto_tick` runs in a cron while the user's kimi session refreshes concurrently: the switch clobbers the just-rotated refresh token with a spent one; next request 401s and the account is unrecoverable without re-login.
+  SUGGESTED FIX: Inside `write_live` (or `_switch`), after acquiring `kimi_lock`, re-read the live file and `_sync_live` its (possibly newer) token into the store before overwriting with the target.
+
+6.
+  SEVERITY: WARNING
+  CONFIDENCE: medium
+  FILE: src/claude_swap/kimi.py:286-291 (parse_usage)
+  ID: kimi.py:286:usage-ratio-range-0-10-silent-drop
+  ISSUE: The validation `not 0 <= ratio <= 10` silently drops windows whose `used_ratio` is a percentage (1-100) instead of a fraction (0-1), and if *all* windows are dropped the function returns `Usage(None, None, error=...)`. `rank()` then treats the account as having no capacity (`life is None` → skipped). Comment at line ~289 documents nothing about the ×10 headroom; the `<= 10` bound looks like defensive tolerance for ratios slightly over 1.0 but silently misclassifies a schema change (ratio already in percent) as "no usage windows in the reply".
+  ATTACK VECTOR: Kimi changes `used_ratio` semantics; every account reports an error/no room, `auto_tick` returns "no-account-with-room" and rotation silently stops burning down accounts in the intended order — users hit hard limits with no signal beyond an event log field.
+  SUGGESTED FIX: Accept ratio ≤ 100 with an explicit normalization branch (or reject >1.0 with a distinct error string naming the offending value) so a semantics change is loud, not silent.
+
+7.
+  SEVERITY: INFO
+  CONFIDENCE: medium
+  FILE: src/claude_swap/kimi.py:335-338 (usages_for email backfill)
+  ID: kimi.py:335:email-backfill-read-modify-write-race
+  ISSUE: The email backfill does read-modify-write of the stored account under the store lock, but the read happens inside the lock while the account may have been refreshed concurrently by `_fresh_live`/kimi between `fetch_fn(account)` and the lock acquisition. `_store` merges `old["email"]` only when the new account lacks it, but here the code explicitly re-reads and merges email into whatever is on disk — if the on-disk token was rotated meanwhile, this write is fine (email merge), but if the on-disk file was replaced by a *different* generation of the same user between lock acquisition and read inside the lock, the code can resurrect nothing harmful — however the write uses `{**filestore.read_json(...), "email": email}` where `read_json` may return None mid-rotation (partial/tombstoned), yielding `TypeError: 'NoneType' object is not a mapping` if the file was just unlinked by `remove()`.
+  ATTACK VECTOR: `cswap kimi remove <user>` runs concurrently with `usages_for` for that user; `stored_path(...).exists()` passes, `read_json` then sees the file vanish → `read_json` returns None → `{**None}` raises TypeError, uncaught, crashing the whole usage pass instead of degrading gracefully like every other failure in this function.
+  SUGGESTED FIX: `prev = filestore.read_json(stored_path(backup_root, user)) or {}` before the merge, matching `_store`'s tolerant style.
+```
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/kimi.py:391
+ID: kimi.py:391:refresh-token-spent-before-persisted
+ISSUE: `refresh()` spends the rotating refresh token, and the result is written afterwards with no protection. If the write fails, the only valid refresh token is lost.
+ATTACK VECTOR: `_fresh_live` (391-392) and `_fresh_stored` (405-406) call `refresh(...)`, and the server invalidates the old refresh token. Then `filestore.write_private(...)` runs. If that write raises `OSError` (disk full, permissions, EIO), the new pair exists only in memory. The old refresh token is dead, so the account is permanently logged out and needs a manual `kimi login`. The same `OSError` is not a `KimiError`, so `usages_for` (415-419) does not catch it. It aborts the whole usage sweep and the `auto_tick` daemon tick.
+SUGGESTED FIX: Wrap the post-refresh write in try/except. On failure, retry the write and log the new tokens to a fallback location. Make `usages_for` also catch `OSError` per account so one account's failure doesn't kill the tick.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/kimi.py:142
+ID: kimi.py:142:stale-lock-takeover-race
+ISSUE: The stale-lock takeover is a check-then-act race. A waiter can `rmdir` a lock that another waiter has just re-acquired.
+ATTACK VECTOR: Waiters A and B both `stat()` a stale lockdir and see an old mtime. A does `rmdir()` and loops to `mkdir()`, so it now holds a fresh lock. B then calls `lockdir.rmdir()` on the stale decision it made earlier. That succeeds because the directory is empty. B's next `mkdir()` also succeeds, so both hold "the lock". Two writers then run the refresh/write sequence on the same rotating refresh token, and the second refresh is refused. A's `finally` later removes B's lock as well. Any non-`FileNotFoundError` `OSError` from `rmdir` or `stat` in that branch also propagates as a raw exception.
+SUGGESTED FIX: Take over a stale lock by atomically renaming it to a unique name and then removing that. Don't `rmdir` a path you only inspected earlier. Alternatively, re-`stat` immediately before the `rmdir`.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/kimi.py:452
+ID: kimi.py:452:network-under-store-lock-comment
+ISSUE: The comment "network outside the store lock" is false. `usages_fn` does its network I/O while holding the store lock.
+ATTACK VECTOR: `usages_for` calls `_fresh_stored`, which holds `filestore.lock(store_dir)` across `refresh()`, a 30 s blocking HTTP call (399-407). With N idle accounts and a slow auth host, the store lock is held for up to N×30 s in total. `cswap kimi switch`, `add`, `remove` and the other daemon's `sync_live` all block on that lock. `_fresh_live` likewise holds the kimi login lock across the refresh, so a running kimi that needs to refresh waits too.
+SUGGESTED FIX: In `_fresh_stored`, read the account under the lock and release it. Do the refresh outside the lock. Then re-take the lock and write back only if the stored refresh token is unchanged. Alternatively, correct the comment and accept the blocking.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/kimi.py:338
+ID: kimi.py:338:empty-usages-treated-as-exhausted
+ISSUE: Any dict reply with a missing or empty `usages` key is treated as `no_plan` with `pct=100`, with no error flag.
+ATTACK VECTOR: The only evidence is one Free-account measurement of `{}`. A 200 reply with a different shape counts too, for example `{"error": …}`, `{"code": …}` or a partially degraded reply. The account is then scored as 100% used. If it is the current account, `auto_tick` sees `pct >= threshold` and switches away from a healthy account. If it is another account, it silently drops out of `rank`. `Usage.error` stays `None`, so the "active-usage-unknown" guard doesn't fire.
+SUGGESTED FIX: Treat it as `no_plan` only for exactly `{}` (or `{"usages": {}}`). Return `error="unexpected usage reply"` for other dicts that lack `usages`.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/kimi.py:496
+ID: kimi.py:496:login-drops-email-label
+ISSUE: `login()` writes stored copies with `write_private` directly instead of `_store`. It discards the email label that `_store` exists to preserve.
+ATTACK VECTOR: The previous account's stored copy is overwritten with `previous` (about 477) and the new one with `fresh` (about 496). Neither carries `email`, so an already-labelled account loses its label on every `cswap kimi login`. `_store` carries the label forward for add, sync and switch. The label is rewritten only if a later `usages_for` run re-fetches it.
+SUGGESTED FIX: Call `_store(backup_root, user, …)` in both places in `login`.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/kimi.py:298
+ID: kimi.py:298:refresh-unvalidated-payload-types
+ISSUE: `refresh()` converts `expires_in` with `int(...)` and calls `payload.get(...)` outside the try block. Malformed replies raise `ValueError` or `AttributeError`, not `KimiError`.
+ATTACK VECTOR: A reply with `"expires_in": "abc"` or `null`, or a JSON array instead of an object, raises a non-`KimiError`. `usages_for` only catches `KimiError`, so the exception escapes and crashes the whole `auto_tick`. By then the old refresh token has already been spent, as in the first finding.
+SUGGESTED FIX: Check `isinstance(payload, dict)`, and wrap the `int()` conversion so failures become `KimiError`.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/kimi.py:426
+ID: kimi.py:426:email-merge-none-unpack
+ISSUE: `{**filestore.read_json(...), "email": email}` raises `TypeError` if the stored file is unreadable or corrupt, because `read_json` returns `None`.
+ATTACK VECTOR: This runs after the `exists()` check, and `read_json` returns `None` for a corrupt, truncated or just-removed file. `**None` raises `TypeError`, which is not caught per account. It aborts the usage sweep for all remaining accounts, and the daemon tick with it.
+SUGGESTED FIX: Use `(filestore.read_json(...) or {})`, or skip the write when the stored copy is unreadable.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
+
+=== APPENDED PASS 2026-10-24T15:23:42Z ===
+artifact_kind=adversarial-review
+created_at=2026-10-24T15:23:41Z
+status=partial
+mode=code
+output_format=text
+providers_used=agy, openrouter-5, byteplus-3, zai
+provider_count=4
+providers_attempted=5
+provider_outcomes=agy:ok,openrouter-5:ok,byteplus:timeout,byteplus-3:ok,zai:ok
+adversarial_pass=1/3
+REVIEW BY: AGY
+REVIEW BY: OPENROUTER-5
+REVIEW BY: BYTEPLUS-3
+REVIEW BY: ZAI
+input_chars=9802
+input_chars_original=9802
+input_truncated=false
+total_findings=13
+critical=1
+warning=7
+info=5
+count_method=severity-records
+count_status=partial
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: agy, openrouter-5, byteplus-3, zai (4 total)
+Mode: code
+Input size: 9802 chars
+Date: 2026-10-24T15:23:41Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: AGY
+###############################################################
+
+{"conversation_id":"94366f04-a583-41c8-a4e1-78245749e2e0","status":"SUCCESS","response":"SEVERITY: CRITICAL\nCONFIDENCE: high\nFILE: tests/test_kimi.py:153\nID: test_kimi.py:153:live-token-identity-not-verified\nISSUE: `test_usage_refreshes_an_expired_token_and_keeps_the_new_pair_everywhere` fails to assert the identity of the token written to `_live_path()`, masking session hijacking if refreshing inactive accounts overwrites live credentials.\nATTACK VECTOR: Both `u-a` and `u-b` are mocked with `gen=9`, so both refresh tokens end with `\"9\"`. If `usages_for` contains a defect where refreshing each account unconditionally syncs to `_live_path()` instead of restricting live file updates to `current=\"u-a\"`, `_live_path()` will be overwritten by `u-b`. Because line 153 only asserts `[\"refresh_token\"].endswith(\"9\")` rather than verifying account identity, this critical bug (where checking usage silently swaps the user's active CLI login to another account) passes the test suite unnoticed.\nSUGGESTED FIX: Assert `assert kimi.user_of(json.loads(_live_path().read_text())) == \"u-a\"` to ensure non-current accounts cannot overwrite the live credentials file.\n\nSEVERITY: CRITICAL\nCONFIDENCE: high\nFILE: tests/test_kimi.py:136\nID: test_kimi.py:136:stale-lock-takeover-race-condition\nISSUE: Arbitrary 30-second stale lock takeover based solely on directory `mtime` breaks synchronization during slow network calls and creates TOCTOU races.\nATTACK VECTOR: In production, Kimi CLI creates `oauth/{KEY}.lock` during network-bound OAuth operations. If an upstream token refresh or auth request takes \u003e 30 seconds due to latency or connection retries, `cswap` forcibly deletes the lock and switches credentials. When Kimi CLI's refresh subsequently resolves, it writes its refreshed token for `u-a` directly over `u-b`'s credentials, re-introducing the exact race condition and token desynchronization the lock was designed to prevent.\nSUGGESTED FIX: Validate process liveness (e.g., verifying PID recorded in the lock via `os.kill(pid, 0)`) rather than assuming a lock is abandoned based solely on elapsed `mtime`.\n\nSEVERITY: WARNING\nCONFIDENCE: high\nFILE: tests/test_kimi.py:173\nID: test_kimi.py:173:auto-tick-ignores-auth-failures\nISSUE: `auto_tick` treats HTTP 401 authentication errors on the active account as unreadable telemetry and refuses to switch, permanently stranding the user on a dead session.\nATTACK VECTOR: In `test_auto_tick` case `(None, 10.0, \"kimi-no-switch\", None)`, when the active account fails with `HTTP 401` (`usage.pct is None`), `auto_tick` returns `\"kimi-no-switch\"`. In production, when an account's token is revoked or session invalidated, Kimi CLI fails every request with HTTP 401. Because `auto_tick` treats 401 identically to transient telemetry dropouts and only switches when `live \u003e= 95.0`, it refuses to rotate to an available healthy account (`u-b` at 10%), wedging the client on the dead account indefinitely.\nSUGGESTED FIX: Treat explicit HTTP 401/403 authorization failures on the active account as an immediate switch trigger when an alternative healthy account exists.\n\nSEVERITY: WARNING\nCONFIDENCE: medium\nFILE: tests/test_kimi.py:192\nID: test_kimi.py:192:login-temp-home-resource-leak\nISSUE: Tests for `kimi.login` do not verify cleanup of the isolated temporary CLI home directory, allowing credential leakage on error paths.\nATTACK VECTOR: `kimi.login` creates a temporary isolated home directory (`KIMI_CODE_HOME`) to run `kimi login`. Neither `test_login_stores_both_accounts_and_makes_the_new_one_live` nor `test_aborted_login_changes_nothing` asserts that `KIMI_CODE_HOME` is removed upon completion or failure. If `kimi.login` fails to clean up via `shutil.rmtree` inside a `finally` block (especially on aborted logins where `subprocess.call` returns non-zero), temporary directories containing sensitive tokens persist indefinitely in `/tmp`.\nSUGGESTED FIX: Assert `assert not Path(homes[0]).exists()` in both `test_login_stores_both_accounts_and_makes_the_new_one_live` and `test_aborted_login_changes_nothing`.\n\nSEVERITY: WARNING\nCONFIDENCE: medium\nFILE: tests/test_kimi.py:76\nID: test_kimi.py:76:empty-usage-defaults-fully-depleted\nISSUE: Empty `usages` payload is parsed as 100% utilized with `reset_at=None`, permanently locking out unprovisioned or newly initialized accounts.\nATTACK VECTOR: In `test_parse_usage`, `pytest.param({}, 100.0, None, None)` enforces that an empty dictionary results in `pct=100.0` with `reset_at=None`. If the Kimi API returns an empty `usages` map for a newly registered account or during schema variations, `parse_usage` permanently flags it as fully depleted without a reset timestamp. In `auto_tick`, this account can never be switched to, or if currently active, causes immediate eviction even though no quota was consumed.\nSUGGESTED FIX: Distinguish between verified plan-less accounts and uninitialized or empty usage responses rather than synthesizing an artificial 100% quota depletion with no reset.\n\nSEVERITY: WARNING\nCONFIDENCE: medium\nFILE: tests/test_kimi.py:181\nID: test_kimi.py:181:candidate-usage-none-type-error\nISSUE: `test_auto_tick` mocks candidates with numeric usage only, missing unhandled `TypeError` comparisons when candidate accounts have unreadable usage.\nATTACK VECTOR: Non-current candidate accounts in `test_auto_tick` are mocked with `Usage(other, 100.0)`. If a candidate stored account returns `Usage(None, None, error=\"...\")` (e.g. rate-limited, network failure), expressions comparing `candidate.pct \u003c threshold` will raise `TypeError: '\u003c' not supported between instances of 'NoneType' and 'float'` in Python 3. The test suite lacks coverage for `pct=None` on candidate accounts, risking uncaught crashes during candidate selection.\nSUGGESTED FIX: Add a test case to `test_auto_tick` where candidate accounts return `Usage(None, None)` to verify they are safely filtered out without raising exceptions.\n\nSEVERITY: WARNING\nCONFIDENCE: medium\nFILE: tests/test_kimi.py:158\nID: test_kimi.py:158:sync-live-revoked-tombstone-untested\nISSUE: `sync_live` periodic execution is never tested against revoked live tokens, risking destruction of stored accounts on background sync ticks.\nATTACK VECTOR: `test_a_revoked_live_login_never_overwrites_the_stored_copy` only tests `kimi.switch(env, \"u-b\")`. However, `test_the_account_label_survives_the_live_sync` specifies that `sync_live` runs on \"every tick\". If Kimi revokes the live login (writing empty string tokens) and `sync_live` lacks the tombstone check implemented in `switch`, the periodic background sync will write the empty token tombstone directly to the stored account file, permanently destroying the user's stored account credentials.\nSUGGESTED FIX: Add a unit test verifying that `kimi.sync_live(env)` aborts cleanly without mutating stored accounts when the live credentials file contains revoked empty tokens.\n","duration_seconds":102.273464,"num_turns":1,"usage":{"input_tokens":22295,"output_tokens":43936,"thinking_tokens":42115,"cache_read_tokens":0,"total_tokens":66231}}
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-5
+###############################################################
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: tests/test_kimi.py:85  
+ID: test-kimi:85:parse-usage-error-assert-vacuous  
+ISSUE: The assertion `(usage.error or "").startswith(error or "")` is vacuously true when the expected `error` is `None`, so a regression that sets an error on what should be a successful parse is never caught.  
+ATTACK VECTOR: `parse_usage` could return correct `pct`/`reset_at` while also setting `usage.error`; the test still passes, masking a state where production treats a healthy account as errored or vice versa.  
+SUGGESTED FIX: Split the assertion: when `error is None`, assert `usage.error is None`; otherwise assert `(usage.error or "").startswith(error)`.
+
+SEVERITY: WARNING  
+CONFIDENCE: low  
+FILE: tests/test_kimi.py:41  
+ID: test-kimi:41:fixture-home-isolation-incomplete  
+ISSUE: The `env` fixture sets only `CSWAP_KIMI_HOME` and does not isolate `HOME`, `KIMI_CODE_HOME`, or other kimi home variables; if `kimi.home()` prefers or falls back to any of those, the suite operates on real credentials.  
+ATTACK VECTOR: On a developer/CI machine with a live kimi login, `_live()` and `kimi.add()` can overwrite authentic tokens, log out the user, or rotate real accounts without any guard that `kimi.home()` actually points at `tmp_path`.  
+SUGGESTED FIX: In `env`, also monkeypatch `KIMI_CODE_HOME` and `HOME` to isolated temp directories, or monkeypatch `kimi.home` to return the fixture path explicitly.
+
+SEVERITY: INFO  
+CONFIDENCE: high  
+FILE: tests/test_kimi.py:88  
+ID: test-kimi:88:test-name-claim-exceeds-assertions  
+ISSUE: Tests named `writes_only_the_login` and `never_overwrites_the_stored_copy` assert only a subset of the state they claim to protect (config/live and one stored account), so writes to the backup area or to the other stored account are not checked.  
+ATTACK VECTOR: A switch implementation that writes an extra backup file, touches `oauth/`, or corrupts the destination account's saved token can land unnoticed, causing delayed failures in production rotation.  
+SUGGESTED FIX: Snapshot the full `kimi.home()` tree (or at least both stored account files, the live file, and `config.toml`) before the call and compare after.
+
+SEVERITY: INFO  
+CONFIDENCE: medium  
+FILE: tests/test_kimi.py:131  
+ID: test-kimi:131:stale-lock-age-hardcoded-30  
+ISSUE: The stale-lock test hardcodes a 30-second age and patches only `LOCK_WAIT_S`; it never references the actual stale-age constant, so the test is fragile and does not verify the production threshold.  
+ATTACK VECTOR: If the production stale threshold drifts (e.g., to 60 seconds), the test will either flake or silently stop exercising the stale-removal path, allowing a crashed kimi lock to block cswap indefinitely.  
+SUGGESTED FIX: Read the stale-age constant from the module (e.g., `kimi.STALE_LOCK_S`) and set `old = time.time() - kimi.STALE_LOCK_S - 1`.
+
+
+###############################################################
+###   PROVIDER: BYTEPLUS-3
+###############################################################
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: tests/test_kimi.py:84
+ID: test_kimi.py:84:missing-zero-ratio-test
+ISSUE: Test parametrization for `test_parse_usage` does not cover integer `used_ratio=0`, a common edge case where truthiness checks may incorrectly treat valid 0% usage as invalid.
+ATTACK VECTOR: If the code under test uses `if used_ratio:` (truthiness) to validate the ratio, an account with 0% usage (plenty of quota) would be treated as having no valid usage windows, leading to incorrect switching decisions (e.g., not switching away from a used-up account because the alternative is considered "unknown").
+SUGGESTED FIX: Add pytest.params to `test_parse_usage` covering `used_ratio=0` (expect `pct=0.0`) and `used_ratio=1` (expect `pct=100.0`).
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: tests/test_kimi.py:83
+ID: test_kimi.py:83:missing-nonconvertible-ratio-test
+ISSUE: Test parametrization covers `used_ratio` as a convertible string ("0.5") but not non-convertible strings, leaving a gap in error handling validation.
+ATTACK VECTOR: If the code under test does not handle non-convertible string `used_ratio` correctly, it may raise an unhandled exception or incorrectly treat it as 0%/100% used, leading to wrong switching decisions.
+SUGGESTED FIX: Add a pytest.param to `test_parse_usage` with `used_ratio="invalid"` expecting an appropriate error (e.g., "no usage windows").
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: tests/test_kimi.py:135
+ID: test_kimi.py:135:missing-live-region-validation
+ISSUE: Test `test_account_from_another_region_is_never_written` validates stored accounts' `oauthHost` but does not test that the live account's `oauthHost` matches the expected region.
+ATTACK VECTOR: If an attacker can modify the live token's `oauthHost` to point to a malicious server, the code may use it without validation, leading to token exfiltration or API requests to untrusted endpoints.
+SUGGESTED FIX: Add a test that sets the live account's `oauthHost` to a different region (e.g., `https://auth.kimi.com`) and verifies operations reject it with "not mixing regions".
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: tests/test_kimi.py:26
+ID: test_kimi.py:26:jwt-missing-exp-claim
+ISSUE: The `_jwt` helper creates JWT-like tokens without an `exp` (expiration) claim. If the code under test validates the JWT's `exp` claim (instead of the `expires_at` field), tests will pass incorrectly.
+ATTACK VECTOR: Production code may reject valid tokens with `exp` claims or accept expired tokens without `exp` claims, but tests would not catch this due to missing `exp` in test JWTs.
+SUGGESTED FIX: Update `_jwt` to include an `exp` claim in the JWT body matching the `expires_at` field in the token dict.
+
+SEVERITY: INFO
+CONFIDENCE: high
+FILE: tests/test_kimi.py:152
+ID: test_kimi.py:152:lock-staleness-hardcoded-delta
+ISSUE: Test `test_switch_waits_for_kimis_lock_and_takes_over_a_stale_one` uses a hardcoded 30s delta for stale locks, not tied to the mocked `LOCK_WAIT_S` (0.5s).
+ATTACK VECTOR: If the actual code's staleness threshold is `LOCK_WAIT_S` plus a small buffer, the test's 30s delta may not catch off-by-one errors in the staleness check.
+SUGGESTED FIX: Calculate stale time as `time.time() - (kimi.LOCK_WAIT_S + 1)` instead of hardcoded 30s to validate the actual threshold relative to `LOCK_WAIT_S`.
+
+
+###############################################################
+###   PROVIDER: ZAI
+###############################################################
+
+Findings from an adversarial pass over the test file:
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** medium
+**FILE:** tests/test_kimi.py:161-167
+**ID:** test_kimi.py:161:fake-usages-fn-signature-drift
+**ISSUE:** The `usages_fn` stub passed to `auto_tick` accepts 3 positional args `(root, users, current)`, but the real usage-collection signature visible in `test_usage_refreshes...` (`usages_for(..., fetch_fn=..., email_fn=...)`) carries extra keyword parameters. Duck-typed monkeypatching will silently hide any mismatch.
+**ATTACK VECTOR:** If `auto_tick` later passes `fetch_fn`/`email_fn` (or a new kwarg) to the usage fn, the stub still binds and passes, so a real break in the wiring between `auto_tick` and the usage fetcher is never caught by this suite.
+**SUGGESTED FIX:** Add `**_kw` tolerance plus an assertion, or better: call the stub signature asserted in the test (`def usages(_root, users, current, **kw)`) and assert `kw` contains the expected keys the real implementation passes.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** medium
+**FILE:** tests/test_kimi.py:128-146
+**ID:** test_kimi.py:128:docstring-claims-untested-interleaving
+**ISSUE:** Comment-code mismatch: the docstring claims the test catches "writing while kimi refreshes (its refresh lands after the switch and undoes it)", but no interleaving of a concurrent refresh is simulated — only a held lock and a stale lock. The claimed race (refresh completing after the switch and clobbering the live file) is never exercised.
+**ATTACK VECTOR:** The exact production incident the docstring promises to guard against — kimi's async refresh writing the old token back after `switch` — can regress while the suite stays green.
+**SUGGESTED FIX:** Add a case where a refresh lambda runs after `switch` acquires the lock (e.g. make `refresh` a hook that writes the live file), and assert the post-refresh live token is still the rotated one — or delete the claim from the docstring.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** medium
+**FILE:** tests/test_kimi.py:214-221
+**ID:** test_kimi.py:214:returncode-only-abort-atomicity
+**ISSUE:** `test_aborted_login_changes_nothing` equates "aborted" with a nonzero `subprocess.call` return code. The fake exits 1 without ever touching the credential directory, so the case where kimi writes credentials and *then* fails (user aborts after auth completes, crash mid-teardown) is untested; the test silently assumes the subprocess exit code is a reliable transactionality signal.
+**ATTACK VECTOR:** kimi writes `credentials/kimi-code-env-other.json` and then exits nonzero; if `kimi.login` only rolls back on certain codes (or trusts the code alone), a partial/unknown login is left in the temp home and is silently adopted by the next rotation — contradicting the "nothing changed" guarantee.
+**SUGGESTED FIX:** Parametrize the fake: (a) exit 1 with no writes, (b) write credentials then exit 1, and assert both leave the live login untouched and no orphan stored account.
+
+---
+
+**SEVERITY:** INFO
+**CONFIDENCE:** high
+**FILE:** tests/test_kimi.py:39-41
+**ID:** test_kimi.py:40:far-future-token-expiry-masked
+**ISSUE:** The default `expires_at = 4_000_000_000` (year 2096) means every fixture token is permanently valid except in the one test that explicitly passes `expires_at=0`. Any code path that mishandles *recently expired* or *about-to-expire* tokens (boundary comparisons, `expires_in` vs `expires_at` mixing, clock skew) is invisible to the suite.
+**ATTACK VECTOR:** A regression like comparing against `expires_in` (900 s) instead of `expires_at`, or an off-by-one on the expiry boundary, causes spurious refresh loops or premature rotation in production with no test failure.
+**SUGGESTED FIX:** Add a boundary parametrization: tokens expiring a few seconds in the past and a few seconds in the future relative to `time.time()`, and assert the expired/valid classification.
+
+---
+
+Not reported: the unsigned fake JWTs and hardcoded lock-path expectations are test-only constructs, not production bugs; cross-file concerns (the `kimi` module itself) are outside this chunk.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
+
+=== APPENDED PASS 2026-10-24T15:37:22Z ===
+artifact_kind=adversarial-review
+created_at=2026-10-24T15:37:21Z
+status=partial
+mode=code
+output_format=text
+providers_used=byteplus-3, zai, claude
+provider_count=3
+providers_attempted=5
+provider_outcomes=agy:timeout,openrouter-5:empty,byteplus-3:ok,zai:ok,claude:ok
+adversarial_pass=2/3
+REVIEW BY: BYTEPLUS-3
+REVIEW BY: ZAI
+REVIEW BY: CLAUDE
+reviewed_blob=f10e5fcb67837ea550775a313e699eb8789d3ee4
+input_chars=13163
+input_chars_original=13163
+input_truncated=false
+total_findings=14
+critical=3
+warning=6
+info=5
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: byteplus-3, zai, claude (3 total)
+Mode: code
+Input size: 13163 chars
+Date: 2026-10-24T15:37:21Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: BYTEPLUS-3
+###############################################################
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/kimi.py:345
+ID: kimi.py:345:parse-usage-strict-keys
+ISSUE: parse_usage no_plan check rejects free accounts with harmless extra API response fields
+ATTACK VECTOR: If the Kimi API adds standard response fields (e.g., `request_id`, `timestamp`) to free account usage replies, those accounts are incorrectly marked as error states. This triggers unnecessary account switches, or even total account exhaustion if all free accounts are misclassified.
+SUGGESTED FIX: Replace the strict key subset check with a check for explicit error indicators, e.g., change `set(payload) <= {"usages"}` to `"error" not in payload and "errors" not in payload` to allow harmless extra keys while excluding error bodies.
+
+---
+
+SEVERITY: CRITICAL
+CONFIDENCE: medium
+FILE: src/claude_swap/kimi.py:235
+ID: kimi.py:235:write-live-non-reentrant-lock
+ISSUE: write_live uses non-reentrant kimi_lock, creating deadlock risk if called while holding the lock
+ATTACK VECTOR: The `kimi_lock` is a non-reentrant mkdir lock. While `_switch` avoids calling `write_live` (to prevent reentrancy), `write_live` remains as an exported function. Any future code path or unforeseen caller that invokes `write_live` while already holding `kimi_lock` will block indefinitely, causing a complete deadlock.
+SUGGESTED FIX: Remove `write_live` entirely (since its logic is inlined in `_switch`), or add a reentrancy guard, or rename it to `_write_live` to signal it is internal and should not be called with the lock held.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/kimi.py:437
+ID: kimi.py:437:usages-for-no-exists-check
+ISSUE: usages_for reads stored account files without checking existence first
+ATTACK VECTOR: If a stored account is deleted between being listed (via `stored_accounts`) and read (e.g., by a concurrent `cswap` command), `filestore.read_json` may raise an unhandled exception. This crashes the auto loop or other callers, leading to service disruption.
+SUGGESTED FIX: Restore the existence check before reading, or handle missing files explicitly:
+```python
+stored = filestore.read_json(stored_path(backup_root, user))
+if stored is not None and account_user(stored) == user:
+    _store(...)
+```
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/kimi.py:413
+ID: kimi.py:413:fresh-stored-live-race
+ISSUE: _fresh_stored reads the live login without holding kimi_lock, risking corruption or TOCTOU races
+ATTACK VECTOR: `read_live()` is called without `kimi_lock` protection. If the Kimi client or another `cswap` process writes the live token mid-read, `read_live()` may return corrupted JSON or a partial token, causing `account_user()` to fail. Additionally, the live user may change between the read and the decision not to refresh, leaving the stored token stale.
+SUGGESTED FIX: Acquire `kimi_lock` (in correct order after the store lock) around the `read_live()` call, or move the live user check to a critical section that holds both locks in the required store→kimi order.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/kimi.py:515
+ID: kimi.py:515:login-live-non-stored-failure
+ISSUE: login fails after successful sign-in if live user changed to a non-stored account
+ATTACK VECTOR: During the minutes-long browser sign-in flow, if the user runs another `cswap` command that switches to a non-stored account, `login()` will raise an error in `_switch()` (due to the non-stored live user check) even though the sign-in succeeded. This leaves the system in an inconsistent state.
+SUGGESTED FIX: In `login()`, before calling `_switch()`, handle the case where the live user is non-stored by either storing it first, or adjusting `_switch()` to skip the sync for non-stored live users when switching to a new known account.
+
+
+###############################################################
+###   PROVIDER: ZAI
+###############################################################
+
+# Adversarial Review — kimi.py / cli.py delta
+
+Prior findings were mostly fixed correctly (`_check_writable` hoisted out of the lock, `parse_usage` error-body guard, `_fresh_stored` live-check, `_store` label preservation in `login`, `auto_event` guard). The fixes introduced new problems:
+
+---
+
+**SEVERITY:** CRITICAL
+**CONFIDENCE:** high
+**FILE:** src/claude_swap/kimi.py:262
+**ID:** kimi.py:262:kimi-lock-store-order-inversion
+**ISSUE:** `_switch` acquires the kimi lock, then calls `_sync_live(backup_root)` inside it — but `_sync_live` must write the live token into the store, i.e. it needs the store lock. This inverts the codebase's documented lock order (store lock → kimi lock), which `login` follows: it holds the store lock across `_switch` (kimi.py:512).
+**ATTACK VECTOR:** Process A (`cswap kimi login`) holds the store lock and blocks on the kimi lock inside `_switch`; process B (any other `_switch` caller) holds the kimi lock and blocks on the store lock inside `_sync_live` → ABBA deadlock. If `_sync_live` instead deliberately does *not* take the store lock, then for any `_switch` caller that doesn't already hold the store lock, the "sync-live-outside-lock" bug you just fixed is reintroduced. Either branch is broken; the tests pass only because the in-process fake lock doesn't reproduce cross-process ordering.
+**SUGGESTED FIX:** Do the store-side sync *before* acquiring the kimi lock in `_switch` (store → kimi order), and accept the narrow race, or have `login` call `_sync_live` under its existing store lock and drop it from `_switch`; `_switch` should only take the kimi lock for the `write_private(live_file(...))` swap.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/kimi.py:413
+**ID:** kimi.py:413:fresh-stored-live-check-toctou
+**ISSUE:** `_fresh_stored`'s new guard `account_user(read_live()) == user` is a check-then-act race: `read_live()` runs under the store lock only, while kimi rotates/writes live under the kimi lock without taking the store lock.
+**ATTACK VECTOR:** cswap reads live (≠ user), kimi then makes `user` live, cswap refreshes the stored copy — spending the very refresh token kimi now holds, revoking kimi's session. This is exactly the bug the fix's docstring claims to close ("only kimi refreshes the live login"), but the fix narrows the window rather than closing it.
+**SUGGESTED FIX:** Take the kimi lock around the `read_live()` check plus the refresh/write (mind finding 1: acquire store lock first, then kimi lock), or re-check live after refresh and roll back the stored write if the account became live meanwhile.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** low
+**FILE:** src/claude_swap/kimi.py:438
+**ID:** kimi.py:438:email-merge-unconditional-read
+**ISSUE:** The email-merge block replaced `if stored_path(...).exists()` with an unconditional `filestore.read_json(stored_path(...))`. If `read_json` raises `FileNotFoundError` (or a JSON error) on a missing/corrupt file instead of returning `None`, the whole `usages_for` call fails.
+**ATTACK VECTOR:** A concurrent account removal (or a torn/partial stored file) between the account fetch earlier in the loop and this read makes `cswap kimi auto` emit an error event every tick instead of usage data, and no email is ever merged.
+**SUGGESTED FIX:** Keep a missing-file guard (or wrap in try/except FileNotFoundError) before the merge; `account_user(stored) == user` alone doesn't cover absence.
+
+---
+
+**SEVERITY:** INFO
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/kimi.py:344
+**ID:** kimi.py:344:no-plan-exact-keys-check
+**ISSUE:** The no-plan detection now requires `set(payload) <= {"usages"}` — the provider returning *any* extra top-level key (e.g. `{"usages": {}, "plan": "free"}`) silently disables no-plan detection for Free accounts.
+**ATTACK VECTOR:** Kimi adds one field to the free-account reply; Free accounts stop being classified as no_plan, fall into the generic path, and auto mode makes decisions ("usage unknown") on accounts it previously handled correctly. The comment's claim ("A Free account gets `{}` here") is a measured snapshot, not a contract — the code treats it as one.
+**SUGGESTED FIX:** Key the no-plan branch on the shape of `raw` (`raw == {}` or `raw is falsy-but-present`) rather than the exact top-level key set.
+
+---
+
+**SEVERITY:** INFO
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/kimi.py:309
+**ID:** kimi.py:309:expires-in-fallback-zero
+**ISSUE:** `expires_in` that doesn't parse via `int()` (e.g. `"3600.0"`, `True`, nested dict) is silently coerced to 0, setting `expires_at = now`, so the account is refresh-eligible on every single use.
+**ATTACK VECTOR:** A server change to `expires_in` formatting turns every request into a token refresh: per-request network latency, constant refresh-token rotation, and greatly widened exposure to the `_fresh_stored`/kimi spend race in finding 2. The `except` also swallows the distinction between "server said 0" and "server said garbage".
+**SUGGESTED FIX:** Log (or surface in the account) that `expires_in` was unparseable, and only fall back to 0 for values that are genuinely absent (`None`), not malformed ones.
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/kimi.py:515
+ID: kimi.py:515:login-same-account-discards-fresh-token
+ISSUE: Re-logging into the account that is already live throws the new token away. `login` calls `_store(user, fresh)` and then `_switch(user)`. Inside `_switch`, `_sync_live` copies the old live token over the stored copy, so the fresh token is overwritten. `previous == user` then skips the live write, so the fresh token reaches neither the live file nor the store.
+ATTACK VECTOR: The live login's refresh token has expired or been revoked, but its JWT still parses, so `account_user` is not None and it is not a tombstone. The user runs `cswap kimi login` and signs in as the same account. `kimi login` succeeds and cswap prints "Stored kimi account X". Both the live file and the stored copy keep the dead token, and every later usage and refresh call fails. The old code wrote `fresh` to both places unconditionally. No test covers same-account login; the new test only uses `u-a` then `u-b`.
+SUGGESTED FIX: In `login`, don't route through `_switch` when `user` equals the live user. Write `fresh` to the live file under `kimi_lock`, after storing the previous live token only if its user differs from `user`. Alternatively give `_switch` a `force=True` that skips `_sync_live` for the target account. Add a same-account regression test.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/kimi.py:307
+ID: kimi.py:307:expires-in-overflow-uncaught
+ISSUE: The new `expires_in` hardening catches `TypeError` and `ValueError` but not `OverflowError`. `json.loads` returns `inf` for `1e999` or `Infinity`, and `int(inf)` raises `OverflowError`. A bool or very large float is also not clamped.
+ATTACK VECTOR: A malformed refresh reply raises a raw `OverflowError`. `usages_for` and `_fresh_live` catch only `KimiError`, so one bad account aborts the whole `usages_for` call instead of becoming that account's `Usage(error=…)`. The loop survives only because the CLI's `auto_event` catches everything. `cswap kimi` (list) crashes with a traceback.
+SUGGESTED FIX: Catch `(TypeError, ValueError, OverflowError)`, or validate with `isinstance(v, (int, float)) and 0 < v < 1e9` and use 0 otherwise.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/kimi.py:462
+ID: kimi.py:462:store-lock-held-across-refresh-network
+ISSUE: The new comment says `usages_fn` "takes the store lock per account only". That undersells it. `_fresh_stored` holds the store lock, which is a blocking `flock` with no timeout, across `refresh()`, a network call of up to 30 s.
+ATTACK VECTOR: Several stored accounts have expired tokens, and the refresh endpoint is slow or hanging. Each tick holds the store lock for about 30 s per account. Concurrent `cswap kimi switch`, `add`, `remove` and `sync_live` calls from the CLI or menubar block with no feedback. The old comment "network outside the store lock" was already inaccurate for this path, and the new one still hides the stall.
+SUGGESTED FIX: In `_fresh_stored`, read the account under the lock, release it, refresh, then re-take the lock and write only if the stored refresh token is unchanged. At minimum, fix the comment to say the lock is held during token refresh.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/kimi.py:346
+ID: kimi.py:346:empty-reply-no-plan-any-200
+ISSUE: `parse_usage` still treats any bare `{}` reply (or `{"usages": null}`) as "no plan", meaning 100% used. The only evidence is one measured Free-account reply. The new `set(payload) <= {"usages"}` check excludes error bodies that carry extra keys, but an empty 200 from a proxy, CDN or partial outage still passes.
+ATTACK VECTOR: A transient empty-object 200 for the live account gives `Usage(100, no_plan=True)`. `auto_tick` sees `live.pct >= threshold` and switches away from a healthy account. The same reply for a stored account removes it from `rank` until the next tick.
+SUGGESTED FIX: Treat no-plan as a confirmed state only when it comes with the documented 403 "does not have access to Kimi Code" signal. Otherwise return `Usage(None, None, error="empty usage reply")`.
+
+I checked the lock ordering you flagged and found no deadlock. The only nesting is the store lock then `kimi_lock` (`_switch` called from `switch`, `auto_tick` and `login`). `_fresh_live` takes the two locks one after the other. `kimi_lock` is never re-entered, because `_switch` no longer calls `write_live`.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
+
+=== APPENDED PASS 2026-10-24T15:37:22Z ===
+artifact_kind=adversarial-review
+created_at=2026-10-24T15:34:29Z
+status=ok
+mode=code
+output_format=text
+providers_used=agy, openrouter-alt, byteplus-alt, byteplus-3, zai
+provider_count=5
+providers_attempted=5
+provider_outcomes=agy:ok,openrouter-alt:ok,byteplus-alt:ok,byteplus-3:ok,zai:ok
+adversarial_pass=2/3
+REVIEW BY: AGY
+REVIEW BY: OPENROUTER-ALT
+REVIEW BY: BYTEPLUS-ALT
+REVIEW BY: BYTEPLUS-3
+REVIEW BY: ZAI
+reviewed_blob=f10e5fcb67837ea550775a313e699eb8789d3ee4
+input_chars=22125
+input_chars_original=22125
+input_truncated=false
+total_findings=20
+critical=1
+warning=15
+info=4
+count_method=severity-records
+count_status=partial
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: agy, openrouter-alt, byteplus-alt, byteplus-3, zai (5 total)
+Mode: code
+Input size: 22125 chars
+Date: 2026-10-24T15:34:29Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: AGY
+###############################################################
+
+{"conversation_id":"49c6f7a5-567b-43b6-8eb5-5f9f25f0833a","status":"SUCCESS","response":"NO ISSUES FOUND.\n","duration_seconds":26.126794,"num_turns":1,"usage":{"input_tokens":46420,"output_tokens":6726,"thinking_tokens":6622,"cache_read_tokens":44904,"total_tokens":53146}}
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-ALT
+###############################################################
+
+NO ISSUES FOUND
+
+The provided artifact is a review-report text file (adversarial review output), not executable Python code. There are no code paths, edge cases, security boundaries, or design structures to evaluate under the BUGS/DESIGN criteria — only prose findings authored by other reviewers, which are out of scope for this review.
+
+
+###############################################################
+###   PROVIDER: BYTEPLUS-ALT
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:19
+ID: cswap-kimi-38a90335a5-adversarial.txt:19:critical-count-cross-pass
+ISSUE: First metadata block reports `critical=0` and `count_status=complete`, but appended pass reports `critical=3`; no top-level aggregate or reconciliation exists.
+ATTACK VECTOR: A consumer that parses the first header (or the first pass's "No CRITICAL findings" note) will miss the three critical findings in the appended pass, so release gates or dashboards can incorrectly report a clean review.
+SUGGESTED FIX: Add a top-level summary after all passes with aggregate `total_findings`, `critical`, `warning`, and `info`, and mark per-pass counts as subordinate.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:51
+ID: cswap-kimi-38a90335a5-adversarial.txt:51:duplicate-root-cause-ids
+ISSUE: The same root causes are recorded under multiple inconsistent IDs and line numbers and counted as separate findings (e.g. duplicate `current` rows at lines 51, 104, 163, 206; stale threshold at 59, 143, 214; list sync at 94, 133, 238).
+ATTACK VECTOR: `known_findings_supplied`/dedup logic will treat one defect as several, inflating counts, causing duplicate remediation, and making fingerprints unstable across reviews.
+SUGGESTED FIX: Canonicalize each unique root cause to one ID and one line reference, merge duplicate records, and recompute severity totals.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:257
+ID: cswap-kimi-38a90335a5-adversarial.txt:257:appended-pass-number-stale
+ISSUE: The "APPENDED PASS" metadata still sets `adversarial_pass=1/3`, so if this is a second pass it will be conflated with the first pass.
+ATTACK VECTOR: Pass orchestration or dedup may believe pass 1 is still being assembled, merge the appended results incorrectly, or fail to mark pass 1 complete.
+SUGGESTED FIX: Increment to `adversarial_pass=2/3` if this is a new pass, or rename the field to `provider_batch` if it is the same pass.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:265
+ID: cswap-kimi-38a90335a5-adversarial.txt:265:partial-total-findings
+ISSUE: Appended pass sets `total_findings=21` and severity counts summing to 21 while also setting `count_status=partial`.
+ATTACK VECTOR: Downstream aggregation treats 21 as final even though the pass is marked partial, so missing findings from timed-out providers are lost or metrics change later when the pass completes.
+SUGGESTED FIX: Either set `count_status=complete` if 21 is final for the included providers, or rename `total_findings` to `findings_so_far` and avoid final severity totals while partial.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:230
+ID: cswap-kimi-38a90335a5-adversarial.txt:230:interval-inf-contradictory-claim
+ISSUE: The artifact contains contradictory claims for `--interval inf`: OpenRouter says `time.sleep(inf)` raises `OverflowError`, while QWEN says it "hangs forever"; Python raises `OverflowError`, so the QWEN finding is wrong.
+ATTACK VECTOR: An operator may chase a phantom hang instead of the real crash, or dismiss both findings as unreliable, leaving the daemon's interval validation unfixed.
+SUGGESTED FIX: Correct QWEN's finding to `OverflowError` or remove it, and reconcile the two entries into one canonical finding.
+
+SEVERITY: INFO
+CONFIDENCE: high
+FILE: zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:256
+ID: cswap-kimi-38a90335a5-adversarial.txt:256:provider-name-inconsistent
+ISSUE: Provider names are not normalized: first pass uses `byteplus-alt`, appended pass uses `byteplus` in `provider_outcomes`.
+ATTACK VECTOR: Provider health/timeout metrics keyed by provider name will split `byteplus` and `byteplus-alt`, skewing timeout rates and causing duplicate provider entries.
+SUGGESTED FIX: Normalize to one name (e.g. `byteplus-alt`) or add an explicit alias map.
+
+
+###############################################################
+###   PROVIDER: BYTEPLUS-3
+###############################################################
+
+### Prioritized Unique Adversarial Findings (Max 7, Sorted by Severity/Confidence)
+All findings are derived directly from the provided cross-provider review artifact, with unique root causes, no duplicates, and aligned to the review rules.
+
+---
+
+#### 1. Narrow Try/Except in Auto Loop Kills Daemon, Drops Tracebacks
+**SEVERITY**: WARNING  
+**CONFIDENCE**: high  
+**FILE**: src/claude_swap/cli.py:1626  
+**ID**: cli.py:1626:auto-loop-try-only-covers-tick  
+**ISSUE**: The `auto` loop's `try/except` only wraps `kimi.auto_tick()`, violating the comment "one bad tick never ends the loop". Subsequent event processing (timestamp mutation, JSON serialization, print) is unprotected, and exception handling discards full tracebacks.  
+**ATTACK VECTOR**: Long-running `auto` daemons (LaunchAgent/systemd) crash silently if `auto_tick()` returns a non-dict (e.g., `None` on idle) causing `event["ts"]` to raise `TypeError`, or if `print()` hits `OSError` (broken pipe, disk full). Persistent errors emit identical `kimi-error` events with no diagnostic context, making debugging impossible.  
+**SUGGESTED FIX**: Wrap the *entire* loop body (tick + timestamp + JSON + print) in `try/except`. Use `traceback.format_exc()` to include full error details in `kimi-error` events.
+
+---
+
+#### 2. `auto --once` Exits 0 on Failed Ticks (Breaks Automation Alerting)
+**SEVERITY**: WARNING  
+**CONFIDENCE**: high  
+**FILE**: src/claude_swap/cli.py:1624  
+**ID**: cli:1624:auto-once-error-exit-zero  
+**ISSUE**: The `auto --once` mode catches all `auto_tick()` exceptions, prints a `kimi-error` event, then exits with code 0 (no failure signaling).  
+**ATTACK VECTOR**: Cron/systemd jobs using `cswap kimi auto --once` will report success even if all accounts are exhausted, `threshold` is misconfigured, or a bug prevents switching. Downstream alerts (e.g., `cswap kimi auto --once || alert`) will never trigger, leaving the live account over quota.  
+**SUGGESTED FIX**: On `args.once` and `kimi-error` events, call `sys.exit(1)` before breaking. For non-`--once` mode, track consecutive failures and exit non-zero after a threshold (e.g., 10) to enable supervisor alerting.
+
+---
+
+#### 3. Stale Threshold in Long-Running `auto` Daemon (Silent Policy Drift)
+**SEVERITY**: WARNING  
+**CONFIDENCE**: high  
+**FILE**: src/claude_swap/cli.py:1617  
+**ID**: cli.py:1617:auto-stale-threshold  
+**ISSUE**: The rotation `threshold` is loaded *once* before the `while True` loop, never reloaded for subsequent ticks.  
+**ATTACK VECTOR**: Operators updating the threshold via `cswap config set threshold` will have no effect on running `auto` daemons until restart. This causes silent policy drift: rotations happen too early (old threshold too low) or too late (old threshold too high), leading to quota exhaustion or unnecessary switches.  
+**SUGGESTED FIX**: Move `threshold = load_settings(root).threshold` *inside* the `while True` loop, immediately before `auto_tick()`.
+
+---
+
+#### 4. Read-Only `list` Command Calls Mutating `sync_live()` (CQS Violation)
+**SEVERITY**: WARNING  
+**CONFIDENCE**: high  
+**FILE**: src/claude_swap/cli.py:1638  
+**ID**: cli.py:1638:list-sync-live-side-effect  
+**ISSUE**: The nominally read-only `list` (including `--json` machine-readable mode) calls `kimi.sync_live(root)` — a function named for state mutation — and uses its return as the authoritative `current` account.  
+**ATTACK VECTOR**: Monitoring scripts/cron jobs using `cswap kimi list --json` will mutate persistent state on every poll, violating Command-Query Separation. Concurrent `list` calls or `list` racing with `switch` can cause stale reads, partial writes, or lock contention. Failures in `sync_live()` (e.g., transient credential lock) abort the entire listing, even if stored data is readable.  
+**SUGGESTED FIX**: Split `kimi.sync_live()` into two functions:
+1. `kimi.read_live(root)`: Pure read-only (used by `list`).
+2. `kimi.sync_live(root)`: Mutation-only (used only by `switch`/`add`).
+For backward compatibility, make `sync_live()` failures non-fatal for `list` by falling back to the last-known `current` account and adding a warning tag.
+
+---
+
+#### 5. Duplicate Active Account in `list` Output (Breaks Downstream Consumers)
+**SEVERITY**: WARNING  
+**CONFIDENCE**: medium  
+**FILE**: src/claude_swap/cli.py:1636  
+**ID**: cli.py:1636:rows-may-duplicate-active-account  
+**ISSUE**: The `rows` list (used for human/JSON output) prepends `current` (active account) to `order` (ranked accounts), but *never filters `current` out of `order`*. The trailing "leftover" segment only filters `current` from users not in `order`.  
+**ATTACK VECTOR**: If `kimi.rank()` (passed `current` as an argument) returns the active account in its ordered list, the same account appears twice in `list` output: once tagged `(active)` (prepended `current`), and once in `order` (also tagged `(active)`). JSON output has duplicate entries, breaking dashboards/scripts that expect unique usernames. The `(next)` marker (assigned to `order[0]`) is unreachable if `order[0] == current`.  
+**SUGGESTED FIX**: Explicitly filter `current` out of `order` when building `rows`:
+```python
+rows = (
+    ([current] if current in users else [])
+    + [u for u in order if u != current]
+    + [u for u in users if u != current and u not in order]
+)
+```
+
+---
+
+#### 6. Partial `auto_tick()` Failures Are Indistinguishable from No-Ops (State Divergence)
+**SEVERITY**: WARNING  
+**CONFIDENCE**: medium  
+**FILE**: src/claude_swap/cli.py:1627  
+**ID**: cli.py:1627:auto-tick-error-swallows-switch  
+**ISSUE**: The `auto` loop's exception handler catches *all* `auto_tick()` exceptions and emits a generic `kimi-error` event, with no indication of partial completion (e.g., switched account but crashed before recording state).  
+**ATTACK VECTOR**: If `auto_tick()` successfully switches the active account but crashes before updating metrics/state, the log only shows a generic error. Operators/automation conclude no switch occurred, leading to a mismatch between actual live state and log claims: duplicate switches, missed quota resets, or incorrect alerting.  
+**SUGGESTED FIX**: Refactor `auto_tick()` to return a structured event *even on partial failure* (e.g., `switched: bool`, `new_account: str | None`, `error: str`). Modify the exception handler to capture partial state instead of emitting a generic error.
+
+---
+
+#### 7. Incomplete `--interval` Validation (Accepts `inf`, Silent Clamping)
+**SEVERITY**: INFO  
+**CONFIDENCE**: high  
+**FILE**: src/claude_swap/cli.py:1630  
+**ID**: cli.py:1630:interval-unbounded-inf-hangs  
+**ISSUE**: The `--interval` flag is partially validated:
+1. "Min 60" help text is enforced via *silent clamping* (`max(60.0, args.interval)`) with no user warning.
+2. No upper bound: `--interval inf` (accepted by `argparse`'s `type=float`) causes `time.sleep()` to hang forever.
+3. `NaN` is silently absorbed by `max(60.0, NaN)` → `60.0`, masking invalid input.
+**ATTACK VECTOR**:
+- Operators passing `--interval 10` get 60-second polling with no warning, breaking alerting tuned to poll cadence.
+- Typos (e.g., `--interval 1e18`, `--interval inf`) cause the `auto` daemon to hang indefinitely, appearing "active" per supervisor but never performing rotations.
+**SUGGESTED FIX**: Validate `--interval` *at parse time* with `argparse`'s error mechanism:
+```python
+def valid_interval(s):
+    import math
+    val = float(s)
+    if not math.isfinite(val) or not (60 <= val <= 86400):
+        raise argparse.ArgumentTypeError(f"Interval must be 60-86400s (got {s})")
+    return val
+```
+Replace `max(60.0, args.interval)` with direct use of `args.interval`.
+
+---
+
+### No Additional Valid Findings
+All higher-severity or higher-confidence issues from the artifact are included; no CRITICAL issues were confirmed in the complete review pass (the second pass's `critical=3` claim is unsubstantiated, as it cuts off mid-review).
+
+
+###############################################################
+###   PROVIDER: ZAI
+###############################################################
+
+## Adversarial Review of `zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt`
+
+This artifact is a machine-generated review-proof file whose metadata is a **contract** consumed downstream (counts, IDs, pass tracking, truncation flags). The reviews inside it are prose; the reviewable defects are the integrity claims the metadata makes about the content — and several are provably false.
+
+---
+
+**SEVERITY:** CRITICAL
+**CONFIDENCE:** high
+**FILE:** zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:229
+**ID:** cswap-kimi-38a90335a5-adversarial.txt:229:counts-without-records-truncated-pass
+**ISSUE:** The appended pass declares `total_findings=21, critical=3, warning=13, info=5` but the pass body is truncated immediately after the `### PROVIDER: AGY` header — zero finding records are actually present for the pass, and `AGY`, `OPENROUTER-ALT`, and `CLAUDE` sections are entirely missing.
+**ATTACK VECTOR:** Any aggregator that trusts the header counters (e.g. "3 critical findings exist in pass 2") will report critical findings that no consumer can ever read or deduplicate. The counter asserts data that does not exist in the file — metadata/content divergence, not just truncation.
+**SUGGESTED FIX:** When a pass is cut short, emit per-provider record counts (e.g. `records_present=0`) or zero out/omit the finding totals until the body is fully written; write the body before the summary block, not after.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** high
+**FILE:** zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:223
+**ID:** cswap-kimi-38a90335a5-adversarial.txt:223:input-truncated-flag-false
+**ISSUE:** `input_truncated=false` is asserted in the appended pass while the pass output itself is visibly truncated (`### PROVIDER: AGY` with no content, `END OF CROSS-PROVIDER REVIEW` never emitted for pass 2).
+**ATTACK VECTOR:** The flag is named as if it describes output integrity; a pipeline filtering on `input_truncated=false` to accept artifacts whole will ingest a half-written pass believing nothing was lost. Only `status=partial` hints at it, and the two flags contradict each other's implication.
+**SUGGESTED FIX:** Add an explicit `output_truncated=true` (or set `status=truncated`) whenever a pass body is incomplete, and fail ingestion if `status != complete`.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** high
+**FILE:** zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:230
+**ID:** cswap-kimi-38a90335a5-adversarial.txt:230:pass-1of3-never-completed
+**ISSUE:** Both passes record `adversarial_pass=1/3`, and a second appended pass also claims `1/3`; no pass 2/3 or 3/3 record exists anywhere in the artifact, yet the earlier block declares `count_status=complete`.
+**ATTACK VECTOR:** A workflow monitor keying on `count_status=complete` (pass 1) concludes the 3-pass adversarial protocol finished, when it provably did not — 2/3 of the mandated passes silently never ran. Classic claim/state mismatch.
+**SUGGESTED FIX:** Derive `count_status` from pass progress, not per-pass content: `count_status=complete` only when `adversarial_pass == 3/3`; otherwise `incomplete`.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** high
+**FILE:** zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:35
+**ID:** cswap-kimi-38a90335a5-adversarial.txt:35:finding-id-format-unstable
+**ISSUE:** The ID fingerprinting contract ("derive ONLY from file, line, defect") is violated across providers: the same defect gets IDs in three formats and four different line numbers — `cli:1636:current-duplicate-rank-rows` (openrouter-5), `cli.py:1631:...` (byteplus), `cli.py:1636:...` (zai/qwen), `cli.py:1660:...` (zai) — and stale-threshold appears as both `cli:1596:...` and `cli.py:1617:...`.
+**ATTACK VECTOR:** Downstream dedup by ID treats identical findings as distinct, inflating counts (`total_findings=20`) and preventing cross-provider corroboration scoring — the entire purpose of the multi-provider design is defeated.
+**SUGGESTED FIX:** Normalize provider IDs before aggregation: canonical `path:line:defect-keywords` format and one agreed line anchor per hunk; reject or remap non-conforming IDs at append time.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** medium
+**FILE:** zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:6
+**ID:** cswap-kimi-38a90335a5-adversarial.txt:6:no-content-integrity-binding
+**ISSUE:** The header records `input_chars` but no hash of the reviewed input or of the output body; `total_findings` is likewise unverified against the body (and provably wrong in pass 2 — see finding 1).
+**ATTACK VECTOR:** Post-generation edits, partial appends, or a different input silently reviewed under the same header cannot be detected; the `created_at` timestamp (2026) with no content hash makes the "proof" non-auditable.
+**SUGGESTED FIX:** Append `input_sha256` and `body_sha256` computed after the final `END OF CROSS-PROVIDER REVIEW` marker; verify on read.
+
+---
+
+**SEVERITY:** INFO
+**CONFIDENCE:** medium
+**FILE:** zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:229
+**ID:** cswap-kimi-38a90335a5-adversarial.txt:229:timestamp-internally-inconsistent
+**ISSUE:** The appended block's header says `created_at=2026-10-24T15:23:41Z` while its inner `Date:` line says `15:23:40` and the `=== APPENDED PASS ===` marker says `15:23:42` — three different timestamps for one pass, and identical `created_at` for both passes despite different content.
+**ATTACK VECTOR:** Ordering/latency analysis of provider runs (timeouts vs ok) becomes unreliable; equal `created_at` on two distinct bodies suggests copied-pasted header templates with fields never actually refreshed.
+**SUGGESTED FIX:** Stamp each block once, after the body is written, and assert `created_at > inner Date`; fail generation if the template timestamp is reused.
+
+---
+
+**SEVERITY:** INFO
+**CONFIDENCE:** low
+**FILE:** zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:74
+**ID:** cswap-kimi-38a90335a5-adversarial.txt:74:embedded-review-low-confidence-claims
+**ISSUE:** Embedded findings marked `CONFIDENCE: low` (byteplus `list-mutation-sync-live`, byteplus `rows-dup-current-order`) are admitted by their own authors to be possibly false positives ("if this is a false positive"), yet they are counted in `total_findings` identically to high-confidence ones.
+**ATTACK VECTOR:** Aggregate counts overweight speculative findings; a triage queue sorted by severity treats a self-admitted guess (`sync_live` may be pure — `kimi.py` not in chunk) the same as a provable exit-code bug.
+**SUGGESTED FIX:** Exclude `confidence: low` findings from `total_findings`, or add `findings_low=N` breakdown to the header so consumers can weight accordingly.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
+
+=== APPENDED PASS 2026-10-24T15:37:22Z ===
+artifact_kind=adversarial-review
+created_at=2026-10-24T15:33:15Z
+status=ok
+mode=code
+output_format=text
+providers_used=agy, codex-5.3, openrouter-5, zai, claude
+provider_count=5
+providers_attempted=5
+provider_outcomes=agy:ok,codex-5.3:ok,openrouter-5:ok,zai:ok,claude:ok
+adversarial_pass=2/3
+REVIEW BY: AGY
+REVIEW BY: CODEX-5.3
+REVIEW BY: OPENROUTER-5
+REVIEW BY: ZAI
+REVIEW BY: CLAUDE
+reviewed_blob=f10e5fcb67837ea550775a313e699eb8789d3ee4
+input_chars=29230
+input_chars_original=29230
+input_truncated=false
+total_findings=9
+critical=0
+warning=7
+info=2
+count_method=severity-records
+count_status=partial
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: agy, codex-5.3, openrouter-5, zai, claude (5 total)
+Mode: code
+Input size: 29230 chars
+Date: 2026-10-24T15:33:15Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: AGY
+###############################################################
+
+{"conversation_id":"5027a104-e002-44b4-8f31-ab01ca9a7def","status":"SUCCESS","response":"SEVERITY: CRITICAL\nCONFIDENCE: high\nFILE: src/claude_swap/kimi.py:260\nID: kimi.py:260:sync-live-outside-lock\nISSUE: `_switch()` syncs the active token file to storage outside `kimi_lock`, risking permanent token loss during concurrent refreshes\nATTACK VECTOR: When switching accounts, `_switch()` calls `_sync_live()` before calling `write_live()`. `_sync_live()` reads `live_file` without acquiring `kimi_lock`. If a concurrent `kimi` CLI process refreshes its token right as `_switch()` executes, `_sync_live()` reads the pre-refresh token. The `kimi` process then updates `live_file` with the rotated refresh token and releases the lock. Next, `write_live()` acquires `kimi_lock` and overwrites `live_file` with the new target account. The newly rotated refresh token of the active account is never saved to the store, and its older backed-up refresh token is already invalidated on the OAuth server, permanently locking the user out of that account.\nSUGGESTED FIX: Wrap both `_sync_live()` and the writing of `target` under a single `with kimi_lock(env):` block so the read, sync, and replacement happen atomically with respect to `kimi` CLI processes.\n\nSEVERITY: CRITICAL\nCONFIDENCE: high\nFILE: src/claude_swap/kimi.py:143\nID: kimi.py:143:stale-lock-rmdir-toctou\nISSUE: TOCTOU race in stale lock removal allows multiple processes to acquire the lock concurrently\nATTACK VECTOR: In `kimi_lock()`, when an existing lock directory is determined to be older than `LOCK_STALE_S`, the process executes `lockdir.rmdir()` and continues the loop. If two processes detect a stale lock simultaneously, Process A removes the directory and immediately acquires it with `lockdir.mkdir()`. Process B, having already passed the stale check, then executes `lockdir.rmdir()`, removing Process A's freshly acquired, active lock directory, and subsequently calls `lockdir.mkdir()`. Both processes now believe they hold the lock and write to `live_file` simultaneously.\nSUGGESTED FIX: Use an atomic lock acquisition or takeover strategy (e.g. creating a unique temporary directory and atomically renaming it over the stale lock, or verifying identity/timestamp before unlinking) rather than uncoordinated `stat()` followed by `rmdir()`.\n\nSEVERITY: WARNING\nCONFIDENCE: high\nFILE: src/claude_swap/kimi.py:431\nID: kimi.py:431:refresh-network-under-store-lock\nISSUE: `_fresh_stored()` executes blocking network calls while holding the store-wide lock, directly contradicting comments and blocking concurrent commands\nATTACK VECTOR: Code comments claim network calls happen outside the store lock. However, `auto_tick()` delegates to `usages_for()`, which calls `_fresh_stored()`. `_fresh_stored()` acquires `filestore.lock(store_dir(backup_root))` and performs `account = refresh(account)` inside the lock. `refresh()` executes a blocking HTTP POST with a 30-second timeout. If the network experiences latency or stalls, the entire `backup_root` store lock remains held for up to 30 seconds per expiring account, blocking any concurrent `cswap` CLI operations (such as manual switches, adds, or list queries).\nSUGGESTED FIX: Read the stored account under the store lock, release the lock before calling `refresh(account)`, and then re-acquire the lock to persist the refreshed account if it has not changed.\n\nSEVERITY: WARNING\nCONFIDENCE: high\nFILE: src/claude_swap/kimi.py:189\nID: kimi.py:189:stored-accounts-safe-name-mismatch\nISSUE: `stored_accounts()` filters out accounts whose user IDs require sanitization by `filestore.safe_name()`\nATTACK VECTOR: `stored_path()` names files using `f\"{filestore.safe_name(user, KimiError)}.json\"`. In `stored_accounts()`, files are filtered with `account_user(filestore.read_json(p)) == p.name[: -len(\".json\")]`. If an OAuth subject (`sub`) contains characters sanitized or encoded by `safe_name` (such as colons, pipes, or slashes standard in provider subject IDs like `auth0|123` or `user:456`), `p.name[:-5]` will match the sanitized name rather than the raw `sub`. Consequently, `stored_accounts()` silently drops these accounts, rendering them invisible to `auto_tick()` rotation and listing commands.\nSUGGESTED FIX: Check `account_user(filestore.read_json(p)) is not None` and verify `p.name == f\"{filestore.safe_name(user, KimiError)}.json\"` instead of asserting string equality between the unsanitized `sub` and the filename.\n\nSEVERITY: WARNING\nCONFIDENCE: high\nFILE: src/claude_swap/kimi.py:488\nID: kimi.py:488:login-bypasses-store-metadata-loss\nISSUE: `login()` bypasses `_store()` and directly writes accounts with `filestore.write_private()`, erasing stored email labels\nATTACK VECTOR: `_store()` explicitly preserves existing metadata: `label = {\"email\": old[\"email\"]} if old.get(\"email\") and not account.get(\"email\") else {}`. However, lines 488 and 498 in `login()` call `filestore.write_private(stored_path(...), ...)` directly for both `previous` and `fresh`. Because `read_live()` and `fresh` only contain token and endpoint data, any previously resolved `email` or `nickname` associated with the accounts in storage is permanently erased upon running `login()`.\nSUGGESTED FIX: Replace the direct `filestore.write_private(stored_path(...), ...)` calls on lines 488 and 498 with `_store(backup_root, account_user(previous), previous)` and `_store(backup_root, user, fresh)`.\n\nSEVERITY: WARNING\nCONFIDENCE: medium\nFILE: src/claude_swap/kimi.py:373\nID: kimi.py:373:parse-usage-falsy-raw-misclassification\nISSUE: `parse_usage()` misclassifies missing or null `\"usages\"` fields in API responses as exhausted Free accounts\nATTACK VECTOR: `parse_usage()` checks `if isinstance(payload, dict) and not raw:`. If the Kimi API returns an HTTP 200 payload with a missing, null, or empty `\"usages\"` key (or a top-level error response formatted as JSON like `{\"code\": 401, \"message\": \"unauthorized\"}`), `raw` is `None` or `{}`. `not raw` evaluates to `True`, causing `parse_usage()` to return `Usage(100.0, None, no_plan=True)`. Instead of raising an error or flagging an unknown usage state, the account is incorrectly marked as an exhausted plan at 100% capacity, forcing unwanted rotation or skipping healthy accounts.\nSUGGESTED FIX: Distinguish between an explicit empty dict payload (`raw == {}`) and a missing/null field or error response by validating `raw is not None and isinstance(raw, dict)`, returning `Usage(None, None, error=\"malformed usages payload\")` when `\"usages\"` is omitted or not a dict.\n\nSEVERITY: WARNING\nCONFIDENCE: medium\nFILE: src/claude_swap/kimi.py:394\nID: kimi.py:394:reset-at-first-window-none\nISSUE: `parse_usage()` sets `reset_at` to `None` if the first window lacks a reset time, deprioritizing accounts in `rank()`\nATTACK VECTOR: `parse_usage()` sets `reset_at = windows[0][2]`, which corresponds to `limit_month_total`. If an account's monthly limit does not provide a `reset_time` (or sets it to `null`), `windows[0][2]` is `None`. Even if `limit_7d` or `limit_5h` has a valid reset timestamp, `Usage.reset_at` becomes `None`. In `rank()`, `usage.reset_at if usage.reset_at is not None else float(\"inf\")` maps `None` to `float(\"inf\")`, sorting the account behind all others whose shortest windows might reset much later.\nSUGGESTED FIX: Fall back to the next available non-None `reset_time` among `windows` (e.g., `next((w[2] for w in windows if w[2] is not None), None)`) rather than strictly indexing `windows[0][2]`.\n","duration_seconds":7.033601,"num_turns":1,"usage":{"input_tokens":27063,"output_tokens":2024,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":29087}}
+
+
+###############################################################
+###   PROVIDER: CODEX-5.3
+###############################################################
+
+NO ISSUES FOUND.
+
+The provided artifact is a text file containing other reviewers’ findings, not the Python implementation those findings describe. Without the referenced code, I can’t verify them or base a new finding on this artifact alone.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-5
+###############################################################
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:404  
+ID: cswap-kimi-38a90335a5-adversarial.txt:404:indexerror-id-contradicts-body  
+ISSUE: The finding ID `kimi.py:492:login-empty-credentials-indexerror-path` names an IndexError defect while its own body says “so no IndexError” and instead identifies a silent-discard failure; likewise `kimi.py:96:claims-base64-json-error-type-mismatch` names a type-mismatch that the body explicitly declares “actually fine” (the real gap is a non-dict JWT payload).  
+ATTACK VECTOR: Downstream triage and engineer searches index by ID keywords, so a fix driven by `indexerror` inspects the wrong branch and leaves the actual silent discard of a successful interactive login unpatched. Conversely, a reader searching for the real issue may skip the finding because its title refutes its own rationale.  
+SUGGESTED FIX: Rename the IDs to match the stated root causes, e.g. `login-credentials-empty-list-silent-discard` and `jwt-non-dict-payload-skipped`.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:378  
+ID: cswap-kimi-38a90335a5-adversarial.txt:378:duplicate-root-cause-conflicting-fixes  
+ISSUE: The same root cause (TOCTOU on stale-lock takeover) is reported up to four times with contradictory severity and mutually exclusive fixes: `stale-lock-rmdir-toctou` (CRITICAL; atomic rename), `kimi-lock-stale-rmdir-races-with-holder` (WARNING; `suppress(OSError)`/`rmtree`), `lock-rmdir-race-deletes-fresh-lock` (CRITICAL; PID-based takeover or `LOCK_STALE_S=45`), and `stale-lock-takeover-race` (WARNING; atomic rename or re-stat). The network-refresh-under-lock defect is also duplicated.  
+ATTACK VECTOR: A consumer applying the first recommended fix gets conflicting remediation; implementing one variant (e.g. suppressing `OSError`) can re-introduce the exact race another variant prevents. With 25+ findings aggregated, the deliverable also violates its own one-finding-per-root-cause cap.  
+SUGGESTED FIX: Collapse duplicate root causes into a single finding each, reconcile severity, and present alternative fixes as options within one entry.
+
+SEVERITY: WARNING  
+CONFIDENCE: high  
+FILE: zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:369  
+ID: cswap-kimi-38a90335a5-adversarial.txt:369:json-fence-not-json  
+ISSUE: The ZAI block opens with a ```json fence whose contents are prose and a numbered finding list (“Finding list below.”, “1.”, “SEVERITY: CRITICAL”), not JSON; the fence asserts a language contract the payload does not satisfy.  
+ATTACK VECTOR: Any tooling that extracts fenced code blocks by language tag (syntax highlighters, linters, fix-generation agents) fails to parse the block and silently drops the entire ZAI review from automation.  
+SUGGESTED FIX: Remove the JSON fence, or serialize the block as valid JSON with surrounding prose placed outside the payload.
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:312  
+ID: cswap-kimi-38a90335a5-adversarial.txt:312:critical-claims-hedged-unsupported  
+ISSUE: CRITICAL/high findings are built on assumptions the same text weakens: `login-previous-account-overwritten-before-new-login` concedes “if the previous account was already stored, this is fine” and requires a concurrent `auto_tick` switch during an interactive login; `lock-rmdir-race-deletes-fresh-lock` assumes a keeper thread starved by GC/SIGSTOP. The artifact’s own rubric says to lower confidence when evidence is weak, not escalate severity.  
+ATTACK VECTOR: Consumers prioritize CRITICAL/high items that are probabilistic at best while deterministically demonstrable loss paths (write-after-rotation failure, stored-account invisibility) are downgraded, skewing the patch queue.  
+SUGGESTED FIX: Demote speculative concurrency findings to WARNING/medium (or supply reproducing evidence), and reserve CRITICAL/high for failures provable from the artifact.
+
+SEVERITY: INFO  
+CONFIDENCE: low  
+FILE: zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:299  
+ID: cswap-kimi-38a90335a5-adversarial.txt:299:json-envelope-lacks-target-metadata  
+ISSUE: The machine-readable JSON envelope records `conversation_id`/`status`/`response` but not the target file or revision it reviews, while the remainder of the file is unstructured provider text whose `FILE` lines sometimes contain multiple ranges and parentheticals (e.g. `kimi.py:394-400 (_fresh_live) with kimi.py:104-125`).  
+ATTACK VECTOR: If the JSON record is ingested out of context (the normal case for a JSON log), the identity of the reviewed artifact is lost, and downstream reproduction or fix attribution fails.  
+SUGGESTED FIX: Add `"file"`/`"revision"` fields to the envelope and normalize each finding’s FILE to a single `path:line`.
+
+
+###############################################################
+###   PROVIDER: ZAI
+###############################################################
+
+This artifact is not executable Python — it is a proof/record file (`zuvo/proofs/cswap-kimi-....txt`) whose content is the output of multiple adversarial-review providers about `src/claude_swap/kimi.py`, which is **not included in the artifact**. Per the review rules ("Base findings ONLY on the provided artifact"), I cannot verify any of the embedded findings' line numbers, code claims, or fixes. Findings below target the artifact itself.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:6-172
+ID: cswap-kimi-38a90335a5-adversarial.txt:6:unverified-findings-no-source
+ISSUE: The proof file records detailed findings (line numbers, code citations, "CRITICAL" severities) about `src/claude_swap/kimi.py`, but the reviewed source is absent from the artifact, so none of the claims are verifiable and several are mutually contradictory (e.g. the stale-lock `rmdir` race is reported three times — KIMI section `kimi.py:143`, ZAI section `kimi.py:110`, CLAUDE section `kimi.py:142` — with conflicting severity CRITICAL vs WARNING vs medium confidence, and no adjudication).
+ATTACK VECTOR: Downstream tooling or humans treating this file as an authoritative proof will act on unauditable, contradictory severity ratings; the same root cause carries three different IDs and lines, defeating deduplication and traceability.
+SUGGESTED FIX: Store the reviewed source hash/snapshot (or at least a commit SHA) alongside the proof, and deduplicate cross-provider findings into one adjudicated record per root cause.
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:39
+ID: cswap-kimi-38a90335a5-adversarial.txt:39:json-fence-not-json
+ISSUE: The ZAI provider block is wrapped in a ` ```json ` fence but contains Markdown prose ("Finding list below…"), not valid JSON. The file's first record is a single-line JSON object with a schema (`conversation_id`, `status`, `duration_seconds`, `usage`), so consumers plausibly parse provider sections as JSON.
+ATTACK VECTOR: Any automated ingestion of proof files that trusts the `json` fence will throw a parse error or silently skip the ZAI section, losing its findings.
+SUGGESTED FIX: Either emit the ZAI section as actual JSON or remove the `json` language tag from the fence.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:2
+ID: cswap-kimi-38a90335a5-adversarial.txt:2:embedded-imperative-text
+ISSUE: The artifact embeds free-form LLM output containing imperative first-person text ("I'll review this code carefully for adversarial issues.") and directive-shaped content. The first provider section additionally has no `PROVIDER:` header while later ones do, so provenance of the leading JSON record's findings is unattributed.
+ATTACK VECTOR: Proof files consumed by pipelines that render or re-feed file contents into other models present a stored prompt-injection surface; the missing header makes it impossible to attribute or quality-gate the first (and largest) findings block.
+SUGGESTED FIX: Normalize the format: every findings block gets a `PROVIDER:` header, and strip or quote-mark first-person/imperative prose before committing proof artifacts.
+
+SEVERITY: INFO
+CONFIDENCE: high
+FILE: zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:1
+ID: cswap-kimi-38a90335a5-adversarial.txt:1:schema-inconsistency-records
+ISSUE: The file mixes two incompatible record formats: line 1 is a structured JSON envelope (status/usage/duration), while subsequent content is raw Markdown with no envelope, delimiter, or trailing metadata — the later provider outputs have no `status` or `usage` fields at all, so failures by those providers would be indistinguishable from success.
+ATTACK VECTOR: A partial or failed provider run appended to this file would look identical to a complete run; consumers cannot detect truncated output (the CLAUDE section even ends mid-finding at the last visible ID line, though this may be chunking).
+SUGGESTED FIX: Wrap every provider output in the same JSON envelope used on line 1 (with `status` and a content hash), rather than concatenating raw text.
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+NO ISSUES FOUND.
+
+This chunk is a text proof file of other reviewers' output (the OPENROUTER-ALT, ZAI and CLAUDE sections), not executable Python. It has no code paths, inputs or state to attack. The claims it makes about `src/claude_swap/kimi.py` aren't backed by that code in this artifact, so I can't confirm or reject them here.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
+
+=== APPENDED PASS 2026-10-24T15:37:22Z ===
+artifact_kind=adversarial-review
+created_at=2026-10-24T15:35:25Z
+status=ok
+mode=code
+output_format=text
+providers_used=agy, codex-5.3, openrouter-3, openrouter-mini, claude
+provider_count=5
+providers_attempted=5
+provider_outcomes=agy:ok,codex-5.3:ok,openrouter-3:ok,openrouter-mini:ok,claude:ok
+adversarial_pass=2/3
+REVIEW BY: AGY
+REVIEW BY: CODEX-5.3
+REVIEW BY: OPENROUTER-3
+REVIEW BY: OPENROUTER-MINI
+REVIEW BY: CLAUDE
+reviewed_blob=f10e5fcb67837ea550775a313e699eb8789d3ee4
+input_chars=22619
+input_chars_original=22619
+input_truncated=false
+total_findings=15
+critical=1
+warning=10
+info=4
+count_method=severity-records
+count_status=partial
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: agy, codex-5.3, openrouter-3, openrouter-mini, claude (5 total)
+Mode: code
+Input size: 22619 chars
+Date: 2026-10-24T15:35:25Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: AGY
+###############################################################
+
+{"conversation_id":"9cbbf255-afce-4db1-ad7d-691f01707404","status":"SUCCESS","response":"NO ISSUES FOUND.\n","duration_seconds":18.09166,"num_turns":1,"usage":{"input_tokens":20276,"output_tokens":3742,"thinking_tokens":3701,"cache_read_tokens":32642,"total_tokens":24018}}
+
+
+###############################################################
+###   PROVIDER: CODEX-5.3
+###############################################################
+
+NO ISSUES FOUND.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-3
+###############################################################
+
+Reviewing the artifact as a standalone deliverable: a machine-readable adversarial-review proof file whose header metadata, diff framing, and record schema are the code under review.
+
+---
+
+**SEVERITY: CRITICAL**
+**CONFIDENCE: high**
+**FILE:** zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt (header block, `total_findings=13`)
+**ID:** cswap-kimi-38a90335a5-adversarial.txt:unknown:summary-counts-contradict-body
+**ISSUE:** The header claims `total_findings=13`, `critical=1`, `warning=7`, `info=5`, but the body contains 24 findings: 3 CRITICAL (AGY live-token-identity, AGY stale-lock-takeover, BYTEBUS missing-zero-ratio), 13 WARNING, 7 INFO, plus 1 record with no severity at all.
+**ATTACK VECTOR:** Anything consuming the provenance header (`count_method=severity-records`, `count_status=partial` reads like automation) believes coverage is 13 findings with exactly 1 critical. Two CRITICAL findings and 11 others are invisible to severity-sorted triage, and a gate checking "critical=1" never notices the discrepancy. The undercount is silent — nothing in the file flags it.
+**SUGGESTED FIX:** Compute the header counts by parsing the appended provider sections (fail the append if parsed records ≠ declared counts), and reconcile `status=partial` with the actual record set.
+
+---
+
+**SEVERITY: WARNING**
+**CONFIDENCE: high**
+**FILE:** diff hunk header for zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt
+**ID:** cswap-kimi-38a90335a5-adversarial.txt:unknown:new-file-hunk-start-line
+**ISSUE:** The hunk header is `@@ -0,0 +471,210 @@` for a `new file mode 100644` with `--- /dev/null`. A new file's content must begin at line 1 (`@@ -0,0 +1,210 @@`); starting at 471 implies 470 pre-existing lines that the diff says do not exist.
+**ATTACK VECTOR:** `git apply` and other patch consumers reject or misplace the hunk for a file with no source lines, so the proof artifact cannot be applied or verified reproducibly; CI that re-applies review proofs as patches fails or silently corrupts the file.
+**SUGGESTED FIX:** Regenerate the diff (or hand-correct to `+1,210`) and verify 210 matches the actual added-line count.
+
+---
+
+**SEVERITY: WARNING**
+**CONFIDENCE: high**
+**FILE:** zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt (first record, before the `END OF CROSS-PROVIDER REVIEW` separator)
+**ID:** cswap-kimi-38a90335a5-adversarial.txt:unknown:first-finding-missing-schema-fields
+**ISSUE:** The opening finding ("Any dict reply with a missing or empty `usages` key…") has no SEVERITY, CONFIDENCE, FILE, or ID record, and the four pre-separator findings are unaccounted for by the header's `known_findings_supplied=0`.
+**ATTACK VECTOR:** The finding cannot be triaged, tracked, or deduplicated — severity-based filters drop it entirely, and its production-code claim (`kimi.py` behavior) has no locatable file. Meanwhile `known_findings_supplied=0` contradicts the block's existence, so the provenance of every pre-separator record is ambiguous (prior pass? supplied known findings?).
+**SUGGESTED FIX:** Enforce the full SEVERITY/CONFIDENCE/FILE/ID schema on every record, and either count the pre-separator block in `known_findings_supplied` or label it with its pass/provenance.
+
+---
+
+**SEVERITY: WARNING**
+**CONFIDENCE: high**
+**FILE:** zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt (OPENROUTER-5 `test-kimi:131` vs BYTEBUS-3 `test_kimi.py:152`; pre-separator record 1 vs AGY `test_kimi.py:76`)
+**ID:** cswap-kimi-38a90335a5-adversarial.txt:unknown:duplicate-root-causes-no-dedup
+**ISSUE:** The aggregated output contains duplicate root causes: the hardcoded 30s stale-lock age (OPENROUTER-5 `stale-lock-age-hardcoded-30` and BYTEBUS-3 `lock-staleness-hardcoded-delta`) and empty-`usages`→`pct=100` (the unclassified pre-separator record and AGY's `empty-usage-defaults-fully-depleted`).
+**ATTACK VECTOR:** Consumers counting findings per root cause overstate coverage (24 records ≈ 21 distinct issues), fixes may be tracked twice or diverge across providers, and the artifact violates the one-finding-per-root-cause rule its own format assumes — inflating the already-wrong header counts.
+**SUGGESTED FIX:** Deduplicate across providers by normalized (file, defect) before appending, or cross-link merged IDs explicitly.
+
+---
+
+**SEVERITY: WARNING**
+**CONFIDENCE: medium**
+**FILE:** zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt (AGY section `test_kimi.py:136`; BYTEBUS-3 section `test_kimi.py:84`)
+**ID:** cswap-kimi-38a90335a5-adversarial.txt:unknown:critical-severity-on-speculative-inference
+**ISSUE:** Two of the three body CRITICALs rest on speculation beyond the reviewed input: the stale-lock takeover finding infers production `kimi.py` lock-deletion behavior from a test file, and `missing-zero-ratio-test` hedges on "If the code under test uses `if used_ratio:`" — a conditional about code not in the artifact.
+**ATTACK VECTOR:** Severity-sorted triage spends effort on unproven production bugs while the 9802-char input contains no production code to confirm them; if this calibration repeats across passes (`adversarial_pass=1/3`), the accumulated proof file trains reviewers to ignore its CRITICAL labels.
+**SUGGESTED FIX:** Cap findings whose evidence is conditional ("if the code…") or inferred from outside the input chunk at WARNING, and require the cited line to exist in the reviewed input.
+
+---
+
+**SEVERITY: INFO**
+**CONFIDENCE: medium**
+**FILE:** zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt (AGY `test_kimi.py:76`, OPENROUTER-5 `test_kimi.py:85`, BYTEBUS-3 `test_kimi.py:83`/`:84`)
+**ID:** cswap-kimi-38a90335a5-adversarial.txt:unknown:line-number-drift-unstable-ids
+**ISSUE:** The same test (`test_parse_usage`) is cited at lines 76, 83, 84, and 85 by four different providers, so `file:line`-keyed IDs are not stable fingerprints across passes.
+**ATTACK VECTOR:** ID-based tracking and cross-pass dedup (the stated purpose of the ID field) breaks whenever line numbers drift between providers or after any edit — the same defect gets a new ID each pass and "known findings" matching silently fails.
+**SUGGESTED FIX:** Key IDs on (file, function/test name, defect slug) instead of line number, or re-anchor all line references against a pinned input revision hash.
+
+---
+
+**SEVERITY: INFO**
+**CONFIDENCE: medium**
+**FILE:** zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt (ZAI section; AGY JSON blob)
+**ID:** cswap-kimi-38a90335a5-adversarial.txt:unknown:record-format-convention-drift
+**ISSUE:** The file mixes three record schemas: plain `KEY: value` (pre-separator, AGY, OPENROUTER-5, BYTEBUS-3), markdown bold (`**SEVERITY:**`) for ZAI, and a raw escaped JSON blob for AGY's response — with no schema declaration in the header.
+**ATTACK VECTOR:** A parser written against the dominant `KEY: value` schema silently drops all four ZAI findings (or crashes on the JSON line), so the already-inconsistent counts get worse downstream; `output_format=text` gives no hint that three encodings are present.
+**SUGGESTED FIX:** Normalize all provider outputs to one record schema at ingestion (or declare the accepted schemas in the header) before appending to the proof file.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-MINI
+###############################################################
+
+## Review: `zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt`
+
+This artifact is a machine-generated cross-provider adversarial review *proof* file (a text report, not Python). The defects below are therefore data-integrity, format, and provenance defects in the artifact itself — the class of bug a standard reviewer would skip because "it's just a report file", but which silently corrupts any downstream aggregation, dedup, or triage that consumes these proofs.
+
+---
+
+**SEVERITY: WARNING**
+**CONFIDENCE: high**
+**FILE: zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:51**
+**ID: cswap-kimi-38a90335a5-adversarial.txt:51:metadata-counts-contradict-body**
+**ISSUE: The header counters (`total_findings=13`, `critical=1`, `warning=7`, `info=5`) do not match the body, which contains 20 findings in the appended pass (3 CRITICAL, 12 WARNING, 5 INFO) plus 4 more in the leading section.**
+**ATTACK VECTOR:** `count_method=severity-records` claims the numbers are derived from the records, but they are not. Any dashboard, gate, or severity-budget check that reads `critical=1` will under-report that the pass produced **three** CRITICALs (AGY ×2, BYTEPLUS-3 ×1) — i.e. the artifact under-reports its own most severe findings by 3×, and a "no criticals" gate would pass on a pass that contains two CRITICALs. The leading section's 4 findings (lines 1–27) are also entirely uncounted, so the file's true total is 24, not 13.
+**SUGGESTED FIX:** Recompute the counters from the records at write time (or drop the counters and let consumers count `SEVERITY:` lines); include the leading section in the count or mark it explicitly as a prior pass.
+
+---
+
+**SEVERITY: WARNING**
+**CONFIDENCE: high**
+**FILE: zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:72**
+**ID: cswap-kimi-38a90335a5-adversarial.txt:72:agy-json-escapes-hide-criticals**
+**ISSUE: AGY's entire output is embedded as one raw JSON line with `\n`-escaped newlines, while the other three providers use plain-text `SEVERITY:`/`ID:` blocks.**
+**ATTACK VECTOR:** Any line-oriented consumer (`grep '^SEVERITY:'`, `awk` per-record parsing, the `count_method=severity-records` counter itself) sees **zero** AGY findings — silently dropping both CRITICALs (`test_kimi.py:153` live-token identity, `test_kimi.py:136` stale-lock takeover) and 5 WARNINGs. The JSON blob also leaks provider telemetry (`conversation_id`, `duration_seconds`, `num_turns`, `usage` token counts) into a proof artifact, and its nested `response` field is double-encoded, so any naive JSON parse yields a string, not findings.
+**SUGGESTED FIX:** Unwrap AGY's `response` field and re-emit it in the same plain-text record format as the other providers; strip the telemetry keys before writing.
+
+---
+
+**SEVERITY: WARNING**
+**CONFIDENCE: high**
+**FILE: zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:1**
+**ID: cswap-kimi-38a90335a5-adversarial.txt:1:first-record-missing-header-fields**
+**ISSUE: The file's first record begins directly with `ISSUE:` — it has no `SEVERITY`, `CONFIDENCE`, `FILE`, or `ID` line, unlike every other record in the file.**
+**ATTACK VECTOR:** This record (the `{}` → `no_plan`/`pct=100` finding) is unparseable by the file's own schema: it has no severity to triage on and no stable ID to dedup on, so it can never be matched against the same root cause reported later in the file (AGY's `test_kimi.py:76` finding) and will be dropped by any schema-validating parser. It is also the only finding in the file that describes a *production* defect in `src/claude_swap/kimi.py` for the `usages` parsing path, so it is the highest-value record in the artifact and the least machine-readable.
+**SUGGESTED FIX:** Restore the missing `SEVERITY`/`CONFIDENCE`/`FILE`/`ID` header for the first record (or regenerate the file so every record starts with the header).
+
+---
+
+**SEVERITY: WARNING**
+**CONFIDENCE: medium**
+**FILE: zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:102**
+**ID: cswap-kimi-38a90335a5-adversarial.txt:102:duplicate-root-causes-no-dedup**
+**ISSUE: The same root causes are reported by multiple providers under different IDs and different severities, with no cross-provider dedup.**
+**ATTACK VECTOR:** (a) The `{}` → 100%-depleted root cause appears at line 1 (no ID) and again as AGY `test_kimi.py:76`; (b) the hardcoded 30-second stale-lock age appears as OPENROUTER-5 `test_kimi.py:131` (INFO) and BYTEPLUS-3 `test_kimi.py:152` (INFO) — two IDs for one defect; (c) the stale-lock takeover subject is CRITICAL in AGY `:136` but INFO in the other two. Because dedup is by ID fingerprint, the duplicates survive into the aggregate, inflating the finding count (which the header already miscounts) and making severity budgets and "unique issues" metrics wrong. A reviewer reading only the WARNING/INFO duplicates may also miss that the same subject was rated CRITICAL elsewhere.
+**SUGGESTED FIX:** Deduplicate on a normalized root-cause key (file + subject) before writing the aggregate, and reconcile severity by taking the max across providers.
+
+---
+
+**SEVERITY: WARNING**
+**CONFIDENCE: medium**
+**FILE: zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:82**
+**ID: cswap-kimi-38a90335a5-adversarial.txt:82:id-fingerprint-format-drift**
+**ISSUE: OPENROUTER-5 emits IDs as `test-kimi:85:parse-usage-error-assert-vacuous` while AGY, BYTEPLUS-3 and ZAI emit `test_kimi.py:85:...`.**
+**ATTACK VECTOR:** The ID is the stated dedup fingerprint ("Two reviewers finding the same bug must produce the same ID"), but the two formats cannot match: OPENROUTER-5's `test-kimi:85` will never equal AGY's `test_kimi.py:85`, so identical findings from different providers are counted as distinct and the "same bug, same ID" invariant is broken at the source. The same drift appears in ZAI's `test_kimi.py:161-167` (line-range in the file field) vs. single-line fields elsewhere.
+**SUGGESTED FIX:** Normalize the ID to `<basename>:<line>:<keywords>` in the emitter (basename with extension, single anchor line) and validate the format before writing.
+
+---
+
+**SEVERITY: WARNING**
+**CONFIDENCE: medium**
+**FILE: zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:72**
+**ID: cswap-kimi-38a90335a5-adversarial.txt:72:findings-misattributed-to-test-file**
+**ISSUE: AGY files three findings that describe production defects in `src/claude_swap/kimi.py` against `tests/test_kimi.py` lines (`:136` stale-lock takeover, `:173` auto_tick 401 handling, `:158` sync_live tombstone).**
+**ATTACK VECTOR:** The `FILE:` field is the only pointer a triager has to the code to fix. Pointing a production defect (arbitrary 30 s lock takeover during slow OAuth; `auto_tick` refusing to rotate away from a 401'd account; `sync_live` writing an empty-token tombstone over a stored account) at a test file sends the fix to the wrong artifact — the test file may be "fixed" by adding an assertion while the production bug ships. The same block also rates a *missing test assertion* as CRITICAL (`:153`), inflating the critical count that the header already under-reports.
+**SUGGESTED FIX:** File production defects against `src/claude_swap/kimi.py` with the real line, and reserve test-file locations for genuine test-coverage findings; cap test-coverage findings at WARNING.
+
+---
+
+**SEVERITY: INFO**
+**CONFIDENCE: medium**
+**FILE: zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:60**
+**ID: cswap-kimi-38a90335a5-adversarial.txt:60:reviewed-target-not-recorded**
+**ISSUE: The appended pass records mode, input size and providers but never names the file it reviewed, and the artifact mixes two review generations (leading section → `src/claude_swap/kimi.py`; appended pass → `tests/test_kimi.py`) under one filename.**
+**ATTACK VECTOR:** A consumer cannot tell which target the 20 appended findings apply to, so the two generations' findings get merged into one report and attributed to the wrong file — the same misattribution problem as above, but at the artifact level. `status=partial` / `count_status=partial` also give no indication of *what* is missing (the timed-out `byteplus` provider's output is absent with no marker), so a reader may treat the pass as complete.
+**SUGGESTED FIX:** Add `target_file=` and `reviewed_files=` to the pass header, and mark the timed-out provider's section as absent/partial explicitly.
+
+---
+
+**Not reported (deliberately):** the substantive technical claims about `kimi.py`/`test_kimi.py` (401 handling, `pct=None` comparisons, JWT `exp` claims) are unverifiable from this artifact alone — the reviewed source is not in this chunk — so they are not re-litigated here; the findings above concern only what the artifact itself proves about itself.
+
+
+###############################################################
+###   PROVIDER: CLAUDE
+###############################################################
+
+SEVERITY: INFO
+CONFIDENCE: high
+FILE: zuvo/proofs/cswap-kimi-38a90335a5-adversarial.txt:521
+ID: cswap-kimi-38a90335a5-adversarial.txt:521:header-counts-contradict-findings
+ISSUE: The "APPENDED PASS 2026-10-24T15:23:42Z" header says `total_findings=13`, `critical=1`, `warning=7`, `info=5`. The provider sections below it contain 20 findings: 3 critical, 12 warning and 5 info.
+ATTACK VECTOR: The provider sections give these counts:
+- AGY: 2 critical, 5 warning.
+- OPENROUTER-5: 2 warning, 2 info.
+- BYTEPLUS-3: 1 critical, 2 warning, 2 info.
+- ZAI: 3 warning, 1 info.
+
+The header understates critical findings by two (1 vs 3) and warnings by five (7 vs 12). Anything that gates on the header, such as the push-gate artifact check or a "critical=0" policy, reads the wrong severity profile. `count_status=partial` hides the mismatch instead of flagging it. The file's other consumers get no signal that two critical findings were uncounted.
+SUGGESTED FIX: Recompute the header from the `SEVERITY:` records in the appended pass, using `count_method=severity-records`. If the provider output can't be parsed reliably, set `count_status=unverified` so downstream tooling doesn't trust the numbers.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
+
+=== APPENDED PASS 2026-10-24T15:46:12Z ===
+artifact_kind=adversarial-review
+created_at=2026-10-24T15:46:11Z
+status=ok
+mode=code
+output_format=text
+providers_used=agy, codex-5.3, openrouter-5, zai, qwen
+provider_count=5
+providers_attempted=5
+provider_outcomes=agy:ok,codex-5.3:ok,openrouter-5:ok,zai:ok,qwen:ok
+adversarial_pass=3/3
+REVIEW BY: AGY
+REVIEW BY: CODEX-5.3
+REVIEW BY: OPENROUTER-5
+REVIEW BY: ZAI
+REVIEW BY: QWEN
+reviewed_blob=2282cf3f011854c174410e25eb0bd436488dd318
+reviewed_blob=6cd8258caa36c8be5f1ecc22dc521ac10984affe
+input_chars=2871
+input_chars_original=2871
+input_truncated=false
+total_findings=9
+critical=0
+warning=7
+info=2
+count_method=severity-records
+count_status=partial
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: agy, codex-5.3, openrouter-5, zai, qwen (5 total)
+Mode: code
+Input size: 2871 chars
+Date: 2026-10-24T15:46:11Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: AGY
+###############################################################
+
+{"conversation_id":"90069d10-0e82-4bf0-85fa-c77acb884567","status":"SUCCESS","response":"NO ISSUES FOUND.\n","duration_seconds":114.483343,"num_turns":1,"usage":{"input_tokens":117911,"output_tokens":26290,"thinking_tokens":25339,"cache_read_tokens":578681,"total_tokens":144201}}
+
+
+###############################################################
+###   PROVIDER: CODEX-5.3
+###############################################################
+
+NO ISSUES FOUND. The changed branch writes the fresh token when the live account matches the signed-in user. The provided diff does not show a supported defect in that fix.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-5
+###############################################################
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: src/claude_swap/kimi.py:515  
+ID: kimi.py:515:same-account-overwrites-newer-token  
+ISSUE: The same-account fast path unconditionally writes `fresh` over the live token, without checking whether kimi has already rotated the live token to a newer value after `_store`.  
+ATTACK VECTOR: If kimi’s background refresh rotates the live token for the same account between `fresh` being captured and this branch running, `write_live(fresh)` overwrites the newer token. Live and backup both now hold the older token, so the next refresh/authentication uses a stale/revoked credential.  
+SUGGESTED FIX: Compare the generation or issued-at time of `fresh` with `read_live()`; if the live token belongs to the same user and is newer, store the live token into backup and leave live unchanged. Only write `fresh` when it is genuinely newer.
+
+SEVERITY: WARNING  
+CONFIDENCE: medium  
+FILE: src/claude_swap/kimi.py:514  
+ID: kimi.py:514:unhandled-live-read-failure  
+ISSUE: The new `account_user(read_live())` guard has no error handling; a missing, empty, or corrupt live file raises after `_store` has already updated the backup, preventing the `_switch` fallback from running.  
+ATTACK VECTOR: On a first login with no live credential file, or after a partially written/corrupt live file, login stores the fresh token in backup and then raises. The live account is never activated, and every retry fails the same way until the live file is manually repaired.  
+SUGGESTED FIX: Wrap the live read/account extraction in a try/except and treat any read/parse failure as “not the same live account” before falling back to `_switch`.
+
+
+###############################################################
+###   PROVIDER: ZAI
+###############################################################
+
+REVIEW OF DELTA ONLY (fix for login-same-account-discards-fresh-token)
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/kimi.py:513
+ID: kimi.py:513:live-race-fresh-clobbers-rotation
+ISSUE: The same-account branch narrows the original race window but doesn't eliminate it: `read_live()` → `write_live(fresh)` is a non-atomic check-then-act against a live file that kimi mutates outside `filestore.lock`.
+ATTACK VECTOR: kimi rotates the live token after `account_user(read_live())` succeeds but before `write_live(fresh)`. The rotated token (and its backup) is silently overwritten by `fresh`. If `fresh`'s credentials are older than the rotation, the older refresh token is dead and kimi breaks — the exact failure mode the fix was meant to remove, now with a smaller window. Note the fix trades one race (restore stale over rotated) for its mirror image (write stale over rotated).
+SUGGESTED FIX: Read live again inside the same-account branch immediately before writing and bail to `_switch` if the user/token changed; or have `write_live` compare-and-swap on the file's current content.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/kimi.py:513
+ID: kimi.py:513:read-live-missing-account-crash
+ISSUE: `account_user(read_live())` has no guard for a missing/empty live token file (e.g. kimi logged out while the sign-in was in progress).
+ATTACK VECTOR: User starts `kimi login` while logged in, but kimi's session lapses and the live file is removed during the sign-in. `read_live()` raises (or `account_user` throws on a truncated/partial JSON file, since a concurrent writer can leave a partial file), and `login` aborts *after* `_store` already persisted the new token — the caller sees an exception and "nothing changed" semantics are violated, contradicting the neighboring `test_aborted_login_changes_nothing` contract.
+SUGGESTED FIX: Wrap the read: `try: live_user = account_user(read_live()) except Exception: live_user = None` and treat `None` as "not same account" (fall through to `_switch`).
+
+---
+
+SEVERITY: INFO
+CONFIDENCE: high
+FILE: tests/test_kimi.py:280
+ID: test_kimi.py:280:test-name-other-file-mismatch
+ISSUE: The regression test writes its fake login output to `kimi-code-env-other.json`, a filename implying a different account, while the test's purpose is the *same*-account path.
+ATTACK VECTOR: None at runtime; but the fixture name misleads future readers about which code path is exercised, and if production `login` ever keys off the env-file name to infer account identity, the test would silently stop covering the branch it claims to.
+SUGGESTED FIX: Rename the fixture to `kimi-code-env.json` (or whatever the real `kimi login` output path is) so the test mirrors production reality.
+
+---
+
+Summary: the fix correctly handles the deterministic scenario the regression test covers, and the `OverflowError` addition is sound. Remaining exposure is the residual race in the same-account branch and an unguarded read of the live file — both plausible in production, neither covered by the added test.
+
+
+###############################################################
+###   PROVIDER: QWEN
+###############################################################
+
+**FINDING 1**
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/kimi.py:513
+ID: kimi.py:513:identity-resolved-from-live-token-after-store-overwrite
+ISSUE: The same-account test compares `account_user(read_live())` — an identity derived from the *old* live token — but line 512 has already overwritten the stored copy of that account with `fresh`; if `account_user` resolves identity by matching the live token against the store, it can no longer find `user` and the branch silently falls through to `_switch`, re-introducing the exact bug this delta fixes.
+ATTACK VECTOR: The scenario the fix targets is "old token revoked / kimi rotated the live token during sign-in." In that state the live token is deliberately *not* the token that identifies the account any more (the store now holds `fresh`). `account_user(read_live())` returns `None`/another user, the `else` path runs, `_switch` copies the revoked token back over `fresh`, kimi is left broken — and the new test cannot detect it because it seeds the store with the still-matching gen-1 token via `kimi.add(env)` *before* `_store` clobbers it. The fix only holds on the one path the test exercises.
+SUGGESTED FIX: Decide the branch from data that is stable across rotation — capture `was_live = account_user(read_live())` **before** `_store(...)` (line 512), or compare against the account record's user id rather than a token-equality lookup. Additionally treat `None` (unresolvable live token) as "re-login of the account we just stored" only when the store's previous entry for `user` owned that live token.
+
+**FINDING 2**
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/kimi.py:514
+ID: kimi.py:514:lock-covers-store-not-live-credentials
+ISSUE: `filestore.lock(store_dir(backup_root))` guards only the backup store; `read_live()`/`write_live()` touch kimi's own credentials path, which the running `kimi` process writes without taking that lock — so the new check-then-act is not atomic.
+ATTACK VECTOR: `read_live()` on 513 says "same account", then kimi (still running, actively refreshing) writes a rotated token to the live file before `write_live(fresh)` on 514 lands; the fresh token clobbers a *newer*, still-valid token, and the store's copy is the older one — a deterministic lockout that only occurs under real usage timing and never in tests. The comment on the `else` branch admits kimi "kept running during the sign-in and may have rotated the live token" but the guard it motivates is applied outside any protection against that writer.
+SUGGESTED FIX: Re-read the live token immediately before `write_live` and only replace it if it is still the value that produced the `== user` match (compare-before-write), or take a lock over the live credentials path itself; otherwise state the residual race in the comment.
+
+**FINDING 3**
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/kimi.py:513
+ID: kimi.py:513:read-live-raises-when-no-live-credentials
+ISSUE: `login()` now unconditionally dereferences `read_live()` even when no live credential exists (first-ever sign-in, or kimi logged out), so a missing live file turns into an exception *after* `_store` has already mutated the store.
+ATTACK VECTOR: A user whose kimi is fully logged out (a state the other test, `test_aborted_login_changes_nothing`, proves is reachable) runs `login()`; the account is written to the store but the function raises instead of returning `user`, leaving store and live divergent with no rollback and the login appearing to have failed. Previously the only live-file access was inside `_switch`, whose contract may already have handled absence.
+SUGGESTED FIX: Guard the read: `live_user = account_user(read_live()) if live_exists() else None` (or have `read_live()` return `None` on absence), and treat "no live token" as the `write_live(fresh)` case.
+
+**FINDING 4**
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/kimi.py:307
+ID: kimi.py:307:overflow-caught-on-int-not-on-expires-at-math
+ISSUE: Catching `OverflowError` on `int(payload.get("expires_in"))` handles `Infinity` in JSON, but the resulting `expires_in` is still an unvalidated integer: negative values and enormous magnitudes flow straight into the `expires_at` computation, which can raise `OverflowError`/`OSError`/`ValueError` downstream — outside any handler.
+ATTACK VECTOR: A hostile or buggy token endpoint returning `expires_in: 34337921284` (or `-1`) crashes `refresh()` at the timestamp conversion, or — for negatives — silently schedules a refresh storm on every use because `expires_at` is always in the past. The comment "expires_at = now: the next use refreshes again" documents only the `0` case and is not enforced for the negative case that passes through uncaught.
+SUGGESTED FIX: Clamp after conversion, e.g. `expires_in = max(0, min(expires_in, 86400 * 365 * 10))`, so both the huge and negative paths land in the documented "expired" behaviour.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
