@@ -1639,7 +1639,7 @@ def _kimi_command(argv: list[str]) -> None:
                 print(_json.dumps({"schemaVersion": 1, "threshold": threshold, "accounts": [
                     {"user": u, "active": u == current, "next": bool(order) and u == order[0],
                      "usedPct": usages[u].pct, "resetAt": usages[u].reset_at, "error": usages[u].error,
-                     "windows": [{"window": w, "usedPct": p, "resetAt": r} for w, p, r in usages[u].windows]}
+                     "noPlan": usages[u].no_plan, "windows": [{"window": w, "usedPct": p, "resetAt": r} for w, p, r in usages[u].windows]}
                     for u in rows]}))
                 return
             if not users:
@@ -1657,6 +1657,8 @@ def _kimi_command(argv: list[str]) -> None:
                 if usage.error is not None:
                     print(f"     └ {muted('usage unknown: ' + usage.error)}")
                     continue
+                if usage.no_plan:
+                    print(f"     └ {muted('no Kimi Code plan — kimi refuses this account')}")
                 for i, (label, pct, reset) in enumerate(usage.windows):
                     branch = "└" if i == len(usage.windows) - 1 else "├"
                     print(f"     {branch} {label + ':':<12}{pct:5.0f}%   {in_time(reset)}")

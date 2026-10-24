@@ -29,7 +29,7 @@ def _jwt(sub: str, kind: str) -> str:
 
 def _token(user: str, gen: int = 1, expires_at: float | None = None) -> dict:
     return {"access_token": _jwt(user, "access") + str(gen), "refresh_token": _jwt(user, "refresh") + str(gen),
-            "expires_at": int(expires_at if expires_at is not None else time.time() + 900),
+            "expires_at": int(expires_at if expires_at is not None else 4_000_000_000),
             "scope": "kimi-code", "token_type": "Bearer", "expires_in": 900}
 
 
@@ -71,12 +71,14 @@ def _two(env) -> None:
                      100.0, 1793090347.0, None, id="month-used-up-binds-and-its-reset-ranks"),
         pytest.param({"limit_5h": {"used_ratio": "0.5"}}, 50.0, None, None, id="ratio-as-string"),
         pytest.param({"limit_5h": {"used_ratio": True}}, None, None, "no usage windows", id="bool-is-not-a-ratio"),
-        pytest.param({}, None, None, "no usage windows", id="nothing-readable"),
+        pytest.param({"limit_5h": {}}, None, None, "no usage windows", id="nothing-readable"),
+        pytest.param({}, 100.0, None, None, id="free-account-has-no-plan"),
     ],
 )
 def test_parse_usage(usages, pct, reset, error):
     """Bug caught: a used-up month hidden behind an empty 5h window, the ratio
-    read as a percent, or an unreadable reply counted as 0% used."""
+    read as a percent, an unreadable reply counted as 0% used, or a Free
+    account (no plan, every request refused) kept live as "usage unknown"."""
     usage = kimi.parse_usage({"usages": usages})
     assert (usage.pct, usage.reset_at) == (pct, reset)
     assert (usage.error or "").startswith(error or "")

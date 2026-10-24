@@ -302,6 +302,7 @@ class Usage:
     reset_at: float | None            # reset of the longest window
     windows: tuple = ()               # ((label, pct, reset_at), …)
     error: str | None = None
+    no_plan: bool = False             # counted as used up: Kimi Code refuses the account
 
     def life(self, threshold: float) -> float | None:
         if self.error is not None or self.pct is None:
@@ -320,6 +321,10 @@ def _ts(value) -> float | None:
 
 def parse_usage(payload: dict) -> Usage:
     raw = payload.get("usages") if isinstance(payload, dict) else None
+    if isinstance(payload, dict) and not raw:
+        # A Free account gets `{}` here and 403 "does not have access to Kimi
+        # Code" on every request (measured 2026-10-24).
+        return Usage(100.0, None, no_plan=True)
     windows = []
     for key, label in WINDOWS:
         entry = raw.get(key) if isinstance(raw, dict) else None
