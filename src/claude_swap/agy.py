@@ -128,6 +128,10 @@ def read_live(strict: bool = False) -> dict | None:
 
 
 def email_of(data: dict | None) -> str | None:
+    # agy since 2026-10-25 stores the plain address instead of the id_token.
+    plain = (data or {}).get("id_token_email")
+    if isinstance(plain, str) and "@" in plain:
+        return plain.strip().lower()
     token = (data or {}).get("id_token")
     if not isinstance(token, str) or token.count(".") < 2:
         return None

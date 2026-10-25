@@ -46,6 +46,18 @@ def _two(env) -> None:
     agy.add(env)
 
 
+def test_a_login_with_only_the_plain_email_is_recognised(env):
+    """Bug caught: agy's newer login file carries ``id_token_email`` and no
+    id_token, and cswap read it as "not logged in" (2026-10-25)."""
+    data = _login("B@x.com")
+    del data["id_token"]
+    data["id_token_email"] = "B@x.com"
+    _live(data)
+    agy.add(env)
+    assert agy.email_of(agy.read_live()) == "b@x.com"
+    assert (agy.store_dir(env) / "b@x.com.json").exists()
+
+
 @pytest.mark.parametrize(
     ("models", "payload", "life", "model"),
     [
