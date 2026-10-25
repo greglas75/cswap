@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from claude_swap.autoswitch import NoSwitchEvent, SwitchEvent, TickOutcome
-from claude_swap.settings import load_settings
+from claude_swap.settings import edit_reserves, load_settings
 from tests.test_home_account import settings_path
 from tests.test_autoswitch import _R_LATER, _R_LATEST, _R_SOON, _usage, _usage7
 from tests.test_home_account import _harness
@@ -310,3 +310,19 @@ class TestPoolReserve:
             "1": _usage(100), "2": _usage(70), "3": {"five_hour": {"pct": 0.0}},
         }) is TickOutcome.SWITCHED
         assert h.active_number() == 2
+
+
+@pytest.mark.parametrize(
+    ("value", "entry", "expected"),
+    [
+        pytest.param("a@x.com:15, b@x.com", "b@x.com:30", "a@x.com:15, b@x.com:30", id="replaced-in-place"),
+        pytest.param("b@x.com:15, a@x.com:40", "b@x.com:20", "b@x.com:20, a@x.com:40", id="order-kept"),
+        pytest.param("a@x.com:15", "b@x.com:10", "a@x.com:15, b@x.com:10", id="added-last"),
+        pytest.param("a@x.com:15, b@x.com:5", None, "a@x.com:15", id="off-drops-only-it"),
+        pytest.param(None, "b@x.com:10", "b@x.com:10", id="first-limit"),
+    ],
+)
+def test_edit_reserves(value, entry, expected):
+    """Bug caught: `cswap limit` reordering the reserves, touching another
+    account's floor, or leaving the account limited after `off`."""
+    assert edit_reserves(value, lambda ident: ident == "b@x.com", entry) == expected

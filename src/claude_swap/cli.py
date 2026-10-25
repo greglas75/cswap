@@ -338,6 +338,78 @@ def _unmap_command(argv: list[str]) -> None:
         sys.exit(130)
 
 
+def _limit_command(argv: list[str]) -> None:
+    """Handle `cswap limit [NUM|EMAIL PCT|off]` — an account's weekly floor.
+
+    A friendlier face for one entry of `autoswitch.reserveAccount` (owner,
+    2026-10-25: "a simple switch to turn an account's limit on and off").
+    Entries are stored by email: slot numbers differ between machines.
+    """
+    from claude_swap.settings import edit_reserves, load_settings, parse_reserves, set_setting, unset_setting
+
+    parser = argparse.ArgumentParser(
+        prog=f"{_prog_name()} limit",
+        description="Keep part of an account's week unused (a reserve), or lift that limit.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  cswap limit                          # list the limits
+  cswap limit greg@example.com 15      # use it only until 85% of its week
+  cswap limit greg@example.com off     # use it like any other account
+        """,
+    )
+    parser.add_argument("account", nargs="?", metavar="NUM|EMAIL|ALIAS")
+    parser.add_argument("pct", nargs="?", metavar="PCT|off", help="Percent of the week to keep, or off")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    args = parser.parse_args(argv)
+    root = paths.get_backup_root()
+    settings = load_settings(root)
+
+    if args.account is None:
+        reserves = parse_reserves(settings.reserve_account, settings.reserve_min_life_pct)
+        if not reserves:
+            print(dimmed("No account has a limit — every account is used to the threshold."))
+        for ident, floor in reserves:
+            print(f"  {ident}   keeps {floor:g}% of its week (used up to {100 - floor:g}%)")
+        return
+    if args.pct is None:
+        parser.error("give the percent to keep, or off")
+    floor: float | None = None
+    if args.pct.lower() != "off":
+        try:
+            floor = float(args.pct.rstrip("%"))
+        except ValueError:
+            parser.error(f"not a percent: {args.pct}")
+        if not 0.0 <= floor <= 100.0:
+            parser.error("the percent must be from 0 to 100")
+
+    try:
+        switcher = ClaudeAccountSwitcher(debug=args.debug)
+        num, email, _ = switcher.resolve_account(args.account)
+    except ClaudeSwitchError as e:
+        error(f"Error: {e}")
+        sys.exit(1)
+
+    def is_target(ident: str) -> bool:
+        if ident.lower() == email.lower():
+            return True
+        try:
+            return switcher.resolve_account(ident)[0] == num
+        except ClaudeSwitchError:
+            return False
+
+    entry = f"{email}:{floor:g}" if floor is not None else None
+    value = edit_reserves(settings.reserve_account, is_target, entry)
+    if value:
+        set_setting(root, "autoswitch.reserveAccount", value)
+    else:
+        unset_setting(root, "autoswitch.reserveAccount")
+    if floor is None:
+        print(f"{email}: no limit — used like any other account")
+    else:
+        print(f"{email}: keeps {floor:g}% of its week (used up to {100 - floor:g}%)")
+
+
 def _swap_command(argv: list[str]) -> None:
     """Handle `cswap swap NUM|EMAIL|ALIAS NUM|EMAIL|ALIAS`.
 
@@ -1248,8 +1320,16 @@ def _agy_command(argv: list[str]) -> None:
                     print(f"     └ {muted('no reading yet (read while it is the live login)')}")
                     continue
                 age = int((now - entry.get("at", now)) // 60)
-                print(f"     └ {100 - entry['life']:5.0f}% used   {entry.get('model') or ''}   "
+                windows = [w for w in entry.get("windows") or [] if isinstance(w, dict)]
+                print(f"     {'├' if windows else '└'} {100 - entry['life']:5.0f}% used   "
+                      f"{entry.get('model') or ''}   "
                       f"{in_time(entry.get('resetAt'))}   {muted(f'read {age} min ago')}")
+                for i, w in enumerate(windows):
+                    reset = w.get("resetAt")
+                    # A window whose reset passed since the reading is fresh again.
+                    used = 0.0 if isinstance(reset, (int, float)) and reset <= now else 100 - float(w.get("life") or 0)
+                    print(f"     {'└' if i == len(windows) - 1 else '├'} {used:5.0f}% used   "
+                          f"{w.get('group')} · {w.get('window')}   {in_time(reset)}")
             if current and current not in emails:
                 print()
                 warning(f"The live agy login {current} is not stored — run `cswap agy add`.")
@@ -1900,6 +1980,9 @@ def main() -> None:
     if argv and argv[0] == "swap":
         _swap_command(argv[1:])
         return
+    if argv and argv[0] == "limit":
+        _limit_command(argv[1:])
+        return
     if argv and argv[0] == "move":
         _move_command(argv[1:])
         return
@@ -1942,6 +2025,7 @@ Commands:
   %(prog)s remove <num|email>         remove an account
   %(prog)s disable <num|email>        hold an account out of auto-rotation
   %(prog)s enable <num|email>         return a disabled account to rotation
+  %(prog)s limit <num|email> <pct|off> keep part of its week unused, or lift it
   %(prog)s run <num|email> [-- ...]   run as an account, this terminal only
   %(prog)s run                        run the current dir's mapped account
   %(prog)s map <num|email> [path]     map a directory to an account

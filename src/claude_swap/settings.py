@@ -73,6 +73,28 @@ def parse_reserves(value: str | None, default_floor: float) -> list[tuple[str, f
     return out
 
 
+def edit_reserves(value: str | None, is_target, entry: str | None) -> str:
+    """``reserveAccount`` with the target's entry replaced by ``entry`` (in its
+    place, so the use order holds) or dropped when ``entry`` is None.
+    ``is_target(identifier)`` matches an entry; other entries stay verbatim."""
+    out: list[str] = []
+    placed = False
+    for part in (value or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        ident = part.rpartition(":")[0].strip() if ":" in part else part
+        if is_target(ident):
+            if entry and not placed:
+                out.append(entry)
+                placed = True
+            continue
+        out.append(part)
+    if entry and not placed:
+        out.append(entry)
+    return ", ".join(out)
+
+
 @dataclass(frozen=True)
 class AutoSwitchSettings:
     """Policy knobs for the auto-switch engine (``cswap auto``).

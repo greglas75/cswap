@@ -203,3 +203,17 @@ def test_an_aborted_login_restores_into_the_file_agy_read(env, monkeypatch):
     with pytest.raises(agy.AgyError):
         agy.login(env)
     assert agy.email_of(agy.read_file(jetski)) == "a@x.com"
+
+
+def test_the_summary_yields_each_groups_weekly_and_5h_window():
+    """Bug caught: the weekly limit (only in retrieveUserQuotaSummary) missing
+    from `cswap agy list`, or a malformed bucket breaking the reading."""
+    payload = {"groups": [{"displayName": "Claude and GPT models", "buckets": [
+        {"window": "weekly", "resetTime": "2026-11-01T10:14:16Z", "remainingFraction": 0.25},
+        {"window": "5h", "resetTime": "2026-10-25T15:14:16Z", "remainingFraction": 1},
+        {"window": "broken"},
+    ]}]}
+    windows = agy.parse_summary(payload)
+    assert [(w["window"], w["life"]) for w in windows] == [("weekly", 25.0), ("5h", 100.0)]
+    assert windows[0]["group"] == "Claude and GPT models"
+    assert agy.parse_summary({"groups": "nope"}) == ()

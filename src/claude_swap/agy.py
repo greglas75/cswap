@@ -32,7 +32,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -280,6 +280,9 @@ class Quota:
     model: str | None           # that model
     reset_at: float | None      # its reset (epoch)
     error: str | None = None
+    # Shared group windows (``retrieveUserQuotaSummary``): the weekly limit lives
+    # only there. Shown by `cswap agy list`; the switch still follows the models.
+    windows: tuple = ()
 
 
 def _ts(value) -> float | None:
@@ -349,7 +352,32 @@ def fetch_quota(data: dict, models: list[str], timeout: float = 20.0) -> Quota:
         return Quota(None, None, None, error=f"http-{e.code}")
     except (urllib.error.URLError, OSError, ValueError) as e:
         return Quota(None, None, None, error=type(e).__name__)
-    return parse_models(payload, models)
+    quota = parse_models(payload, models)
+    try:
+        summary = _post("retrieveUserQuotaSummary", token, {"project": project} if project else {}, timeout)
+    except (urllib.error.URLError, OSError, ValueError):
+        return quota   # the windows are display-only: never fail a reading over them
+    return replace(quota, windows=parse_summary(summary))
+
+
+def parse_summary(payload: dict) -> tuple:
+    """Each group's windows (weekly, 5h) as ``{group, window, life, resetAt}``."""
+    out = []
+    groups = payload.get("groups") if isinstance(payload, dict) else None
+    for group in groups if isinstance(groups, list) else []:
+        if not isinstance(group, dict):
+            continue
+        for bucket in group.get("buckets") or []:
+            fraction = bucket.get("remainingFraction") if isinstance(bucket, dict) else None
+            if not isinstance(fraction, (int, float)):
+                continue
+            out.append({
+                "group": str(group.get("displayName") or "?"),
+                "window": str(bucket.get("window") or bucket.get("bucketId") or "?"),
+                "life": max(0.0, min(100.0, float(fraction) * 100.0)),
+                "resetAt": _ts(bucket.get("resetTime")),
+            })
+    return tuple(out)
 
 
 def _state_path(backup_root: Path) -> Path:
@@ -367,6 +395,8 @@ def load_state(backup_root: Path) -> dict:
 def record(backup_root: Path, email: str, quota: Quota, now: float) -> None:
     state = load_state(backup_root)
     state[email] = {"life": quota.life, "model": quota.model, "resetAt": quota.reset_at, "at": now}
+    if quota.windows:
+        state[email]["windows"] = list(quota.windows)
     path = _state_path(backup_root)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".quota.")
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
