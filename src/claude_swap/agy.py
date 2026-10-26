@@ -353,11 +353,17 @@ def fetch_quota(data: dict, models: list[str], timeout: float = 20.0) -> Quota:
     except (urllib.error.URLError, OSError, ValueError) as e:
         return Quota(None, None, None, error=type(e).__name__)
     quota = parse_models(payload, models)
+    # The summary has no Gemini group, and the tightest model above hides it
+    # once Claude runs out: Gemini gets its own line from the models.
+    gemini = parse_models(payload, ["gemini"])
+    windows = () if gemini.life is None else ({
+        "group": "Gemini models", "window": gemini.model, "life": gemini.life, "resetAt": gemini.reset_at},)
     try:
         summary = _post("retrieveUserQuotaSummary", token, {"project": project} if project else {}, timeout)
+        windows += parse_summary(summary)
     except (urllib.error.URLError, OSError, ValueError):
-        return quota   # the windows are display-only: never fail a reading over them
-    return replace(quota, windows=parse_summary(summary))
+        pass   # the windows are display-only: never fail a reading over them
+    return replace(quota, windows=windows)
 
 
 def parse_summary(payload: dict) -> tuple:
