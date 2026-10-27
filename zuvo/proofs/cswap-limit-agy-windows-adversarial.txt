@@ -1,0 +1,388 @@
+artifact_kind=adversarial-review
+created_at=2026-10-27T11:40:43Z
+status=ok
+mode=code
+output_format=text
+providers_used=cursor-agent, openrouter-mini, byteplus-alt, byteplus-3, qwen
+provider_count=5
+providers_attempted=5
+provider_outcomes=cursor-agent:ok,openrouter-mini:ok,byteplus-alt:ok,byteplus-3:ok,qwen:ok
+adversarial_pass=1/3
+REVIEW BY: CURSOR-AGENT
+REVIEW BY: OPENROUTER-MINI
+REVIEW BY: BYTEPLUS-ALT
+REVIEW BY: BYTEPLUS-3
+REVIEW BY: QWEN
+reviewed_blob=7a8afa767adb6faec1e89ebcdb17422a6bf00b6f
+input_chars=12948
+input_chars_original=12948
+input_truncated=false
+total_findings=32
+critical=3
+warning=21
+info=8
+count_method=severity-records
+count_status=complete
+known_findings_supplied=0
+---
+===============================================================
+CROSS-PROVIDER ADVERSARIAL REVIEW
+===============================================================
+Providers: cursor-agent, openrouter-mini, byteplus-alt, byteplus-3, qwen (5 total)
+Mode: code
+Input size: 12948 chars
+Date: 2026-10-27T11:40:42Z
+===============================================================
+
+
+###############################################################
+###   PROVIDER: CURSOR-AGENT
+###############################################################
+
+Reviewing the diff and surrounding code for exception handling, `_post` behavior, and autoswitch reserve usage.
+
+
+Findings from the diff only (no repo access). Sorted by severity, then confidence.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** agy.py:362  
+**ID:** agy.py:362-sequential-timeout-doubling  
+**ISSUE:** `fetch_quota` runs a full models `_post` and then `retrieveUserQuotaSummary` with the same `timeout` each.  
+**ATTACK VECTOR:** Worst-case wall time is about **2×** the documented default (20s + 20s) on slow or hanging summary calls, stalling every quota read (e.g. autoswitch ticks) beyond what callers assume for one `timeout`.  
+**SUGGESTED FIX:** Use one deadline for the whole function (remaining time per call) or a shorter cap for the summary-only request.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** cli.py:1331  
+**ID:** cli.py:1331-reset-assumes-zero-used  
+**ISSUE:** Window rows set `used = 0.0` when `resetAt <= now`, with no new API data.  
+**ATTACK VECTOR:** After a window reset time passes, the CLI shows **0% used** while stored `life` is still from the old snapshot; operators may assume the weekly (or 5h) bucket is full and keep using the account when it is not.  
+**SUGGESTED FIX:** After reset, show stale/unknown (e.g. “needs re-read”) or derive display only from fresh `fetch_quota`; do not infer 0% used from clock alone.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** high  
+**FILE:** cli.py:1323  
+**ID:** cli.py:1323-model-line-stale-reset  
+**ISSUE:** The parent model line always uses `100 - entry['life']` from the snapshot; nested window lines apply the reset-time refresh rule (comment at ~1330).  
+**ATTACK VECTOR:** Same account shows **high usage on the model line** and **0% on a window line** after reset, which breaks trust in `cswap agy list` during limit/autoswitch debugging.  
+**SUGGESTED FIX:** Apply the same reset/staleness rules to the parent line, or mark both lines with read age and avoid implying live quota on windows only.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** agy.py:355  
+**ID:** agy.py:355-gemini-outside-try-block  
+**ISSUE:** Comment at 363–364 says window enrichment must not fail the reading, but `parse_models` for Gemini runs **outside** the `try` that wraps summary fetch.  
+**ATTACK VECTOR:** Any exception from the second `parse_models(payload, ["gemini"])` aborts `fetch_quota` after the primary `quota` was already computed, so a Gemini-side edge case drops the whole quota result instead of returning `quota` with empty/extra windows.  
+**SUGGESTED FIX:** Wrap gemini + summary + `parse_summary` in one block; on any failure, `return replace(quota, windows=())`.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** agy.py:361  
+**ID:** agy.py:361-narrow-except-summary-errors  
+**ISSUE:** Summary path catches only `URLError`, `OSError`, and `ValueError`; comment claims display-only enrichment must not fail the read.  
+**ATTACK VECTOR:** If `_post("retrieveUserQuotaSummary", …)` raises anything else (e.g. `KeyError`, custom errors from response handling), the entire `fetch_quota` fails even though model quota was already parsed—contradicting the “never fail a reading over them” claim at line 364.  
+**SUGGESTED FIX:** Catch `Exception` around summary (and parse), log at debug, fall back to `windows` built only from gemini or `()`.
+
+---
+
+**SEVERITY:** WARNING  
+**CONFIDENCE:** medium  
+**FILE:** cli.py:1330  
+**ID:** cli.py:1330-unclamped-negative-used  
+**ISSUE:** Window `used` is `100 - float(w.get("life") or 0)` with no clamp; `parse_summary` clamps `life` to [0, 100] but persisted `windows` in state are not re-validated on read.  
+**ATTACK VECTOR:** Tampered or legacy state with `life > 100` prints **negative “% used”**, which can skew manual decisions and scripts parsing CLI output.  
+**SUGGESTED FIX:** Clamp displayed `used` to [0, 100] (mirror `parse_summary`’s `min`/`max` on `life`).
+
+---
+
+**SEVERITY:** INFO  
+**CONFIDENCE:** high  
+**FILE:** agy.py:363  
+**ID:** agy.py:363-bare-except-pass-summary  
+**ISSUE:** Summary failures use bare `except …: pass` with no logging.  
+**ATTACK VECTOR:** Auth, network, or schema issues hide weekly/5h rows indefinitely; production looks like “no weekly windows” with no signal in debug logs.  
+**SUGGESTED FIX:** On failure, `logger.debug("quota summary failed", exc_info=True)` (or include error in debug mode only).
+
+---
+
+**Comment–code note (folded into finding 5):** Line 364 (“never fail a reading over them”) is only enforced for three exception types on the summary call, not for the gemini path (finding 4) or non-`ValueError`/`URLError`/`OSError` failures from `_post` (finding 5). `HTTPError` is covered as a `URLError` subclass in Python 3, so 401/5xx on summary alone are swallowed as intended.
+
+
+###############################################################
+###   PROVIDER: OPENROUTER-MINI
+###############################################################
+
+## Adversarial Review — `cswap` (agy quota windows + `limit` command)
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** high
+**FILE:** src/claude_swap/agy.py:402
+**ID:** agy.py:402:quota-windows-overwritten
+**ISSUE:** `record()` replaces the whole per-account state entry, so a reading that produced no `windows` silently deletes the previously recorded weekly window.
+**ATTACK VECTOR:** `fetch_quota` swallows every `retrieveUserQuotaSummary` failure (`except (...): pass`, agy.py:364) and returns `quota.windows == ()` (or Gemini-only). `record()` then does `state[email] = {...}` — a wholesale replacement — so the previously stored `windows` key (the weekly limit, the whole point of the feature) is dropped from `cswap agy list`. A single transient 500/timeout on the summary endpoint makes the weekly limit vanish from the UI with no error, no marker, and no way to tell it apart from "the account has no weekly limit". The comment at agy.py:283-285 claims the weekly limit "lives only there" and is "Shown by `cswap agy list`" — the code silently un-shows it.
+**SUGGESTED FIX:** Merge instead of replace: keep the old `windows` when the new reading has none (e.g. `state[email]["windows"] = list(quota.windows) or state[email].get("windows", [])`), or store the summary under its own key with its own timestamp so a failed fetch does not erase the last good value.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/agy.py:364
+**ID:** agy.py:364:summary-exception-not-caught
+**ISSUE:** The `except` clause around the summary call does not cover the module's own `AgyError`, so the comment's guarantee ("never fail a reading over them") is not enforced.
+**ATTACK VECTOR:** `agy.AgyError` is this module's exception type (raised by `agy.login`, asserted in `tests/test_agy.py`). If `_post` raises it for an unexpected payload shape, a missing token field, or a non-JSON body, the exception escapes `fetch_quota` entirely — the *whole* quota reading fails, not just the display-only windows. The switch decision (the safety-critical part of the reading) then dies because of a cosmetic summary request. `KeyError`/`TypeError` raised inside `_post` are equally uncaught.
+**SUGGESTED FIX:** Widen the guard to `except Exception:` (or at least `except (AgyError, urllib.error.URLError, OSError, ValueError, KeyError, TypeError):`) so the summary can never abort the reading, matching the comment.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/agy.py:358
+**ID:** agy.py:358:hardcoded-gemini-model-key
+**ISSUE:** The Gemini window is derived from a hardcoded model key `"gemini"` instead of from the `models` argument the caller passed in.
+**ATTACK VECTOR:** `parse_models(payload, models)` looks up the requested model names; `fetch_quota` receives the real model list from its caller. If the payload keys are full model names (`gemini-2.5-pro`, `gemini-3-pro`), `parse_models(payload, ["gemini"])` matches nothing, `gemini.life is None`, and the Gemini line is never emitted — the entire Gemini branch of the feature is dead code that silently no-ops. In the opposite case (the caller already passes `"gemini"` in `models`), the same quota is reported twice: once as the tightest-model line and once as a "Gemini models" window, so the display double-counts it.
+**SUGGESTED FIX:** Derive the Gemini entry from the requested models (e.g. filter `models` for names starting with `"gemini"`) instead of hardcoding the key, and skip the extra window when Gemini is already the reported tightest model.
+
+---
+
+**SEVERITY:** WARNING
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/cli.py:408
+**ID:** cli.py:408:off-keeps-global-floor
+**ISSUE:** `cswap limit <acct> off` deletes the per-account entry, which makes the account fall back to the global `reserve_min_life_pct` floor — but the CLI prints "no limit — used like any other account".
+**ATTACK VECTOR:** `parse_reserves(value, default_floor)` applies `settings.reserve_min_life_pct` to any account that has no explicit percentage. `edit_reserves(..., entry=None)` removes the entry entirely, so the account is *not* limit-free: it inherits the global floor. The printed confirmation (and the epilog "use it like any other account") asserts a guarantee the code does not make, so the operator believes the account is fully available while the engine still holds it back. The listing branch's own wording ("every account is used to the threshold") confirms a global threshold exists.
+**SUGGESTED FIX:** Write an explicit zero floor (`email:0`) instead of deleting the entry, or change the message to "reverts to the global limit (N%)".
+
+---
+
+**SEVERITY:** INFO
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/agy.py:362
+**ID:** agy.py:362:extra-summary-roundtrip-latency
+**ISSUE:** A second, unconditional API call with the full `timeout` (20 s default) is added to every quota reading for display-only data.
+**ATTACK VECTOR:** `fetch_quota` is on the hot path of the switch decision. Every reading now costs two round trips; if `retrieveUserQuotaSummary` hangs, the reading takes up to `2 × timeout` instead of `timeout`, and the extra request consumes the account's rate-limit budget on every poll. The comment itself concedes the data is "display-only", so the cost buys nothing for the switch logic.
+**SUGGESTED FIX:** Pass a short timeout (e.g. 3–5 s) for the summary call, or fetch it only when the caller actually needs display data (an explicit `include_windows` flag) rather than on every reading.
+
+---
+
+**SEVERITY:** INFO
+**CONFIDENCE:** medium
+**FILE:** src/claude_swap/cli.py:388
+**ID:** cli.py:388:stale-reserve-entry-unremovable
+**ISSUE:** A reserve entry whose account no longer exists can never be removed through the new `limit` command.
+**ATTACK VECTOR:** `switcher.resolve_account(args.account)` raises `ClaudeSwitchError` for an unknown account → the command exits 1 before reaching `edit_reserves`. And `is_target` (cli.py:397) also returns `False` for that identifier because resolution fails, so `edit_reserves` preserves the stale entry verbatim. The result is a permanently orphaned entry in `autoswitch.reserveAccount` that keeps reserving a slot for a nonexistent account, with no CLI path to clean it up (only hand-editing the settings file).
+**SUGGESTED FIX:** When the identifier looks like an email and resolution fails, fall back to matching the raw identifier against the stored entries so `off` can still delete it.
+
+
+###############################################################
+###   PROVIDER: BYTEPLUS-ALT
+###############################################################
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/cli.py:397
+ID: cli.py:397:is-target-uncaught-resolve-error
+ISSUE: `is_target` re-calls `switcher.resolve_account(ident)` for every stored reserve entry and only catches `ClaudeSwitchError`; any other failure aborts `cswap limit` mid-edit with a traceback.
+ATTACK VECTOR: `cswap limit` iterates all existing `autoswitch.reserveAccount` identifiers via `edit_reserves(...)` → `is_target`. If any identifier resolution raises something other than `ClaudeSwitchError` (e.g. an `OSError`/config-read error, or an unexpected exception from a stale/aliased identifier), it propagates out of `edit_reserves` (no try around the call at line ~402). The user sees a raw traceback and, worse, `set_setting`/`unset_setting` is never reached, so the operation silently no-ops. It also performs N redundant account resolutions per invocation.
+SUGGESTED FIX: Wrap the `edit_reserves(...)` call (and/or the body of `is_target`) in a broad `except Exception` that degrades to `False`, or pre-resolve the set of target identifiers once before iterating.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/agy.py:362
+ID: agy.py:362:fetch-quota-second-request-same-timeout
+ISSUE: `fetch_quota` now makes a second sequential HTTP request (`_post` for the summary) bounded by the same per-request `timeout`, so worst-case wall time roughly doubles.
+ATTACK VECTOR: Callers pass `timeout` as the request bound (and `agy list`/login-time reads iterate many accounts). Previously `fetch_quota` made one call ≤ `timeout`; now it makes `_get` (models) ≤ `timeout` then `_post` (summary) ≤ `timeout`. A slow/hanging summary endpoint adds up to another full `timeout` per account (default 20s → ~40s/account), delaying `cswap agy list` and any flow that reads quota while the account is the live login. Because the summary error is swallowed, the delay happens even when the summary ultimately fails.
+SUGGESTED FIX: Give the summary call its own short bound, e.g. `min(timeout, 5)`, or make the summary request optional/async, so it cannot double the quota-read worst case.
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/agy.py:364
+ID: agy.py:364:summary-errors-swallowed-no-log
+ISSUE: Summary-fetch failures are swallowed with `pass` and no logging, so a persistent failure (auth scope, API-shape change, invalid `project`) silently and permanently hides the weekly limit.
+ATTACK VECTOR: The comment states the weekly limit "lives only" in `retrieveUserQuotaSummary`. If that endpoint starts failing (e.g. `project` empty → 400, API rename, scope missing), every `fetch_quota` returns Gemini-only/empty `windows`; `cswap agy list` simply shows fewer lines with no error, log, or exit code. A real bug/broken credential is indistinguishable from "no weekly window." The broad `except […] ValueError` also masks genuine logic errors from `parse_summary`/`_post`.
+SUGGESTED FIX: Add a debug/warning log in the except (`log.debug("quota summary failed: %s", e)`) and narrow the caught exception types so parsing bugs are not silently discarded.
+
+SEVERITY: WARNING
+CONFIDENCE: low
+FILE: src/claude_swap/cli.py:1330
+ID: cli.py:1330:windows-life-float-crash
+ISSUE: The list renderer filters `windows` entries to `dict` but then calls `float(w.get("life") or 0)` without validating the `life` field's type, so a corrupted/older/partially-written state file crashes `cswap agy list`.
+ATTACK VECTOR: `entry.get("windows")` is deserialized from the quota state JSON. If `life` is not a numeric type (a list/dict/bool-adjacent payload from an older version, a manual edit, or a truncated/partial write), `float(...)` raises `TypeError`/`ValueError`, killing the whole `agy list` output for all accounts. Only `reset` is type-checked (`isinstance(reset, (int, float))`); `life` is not.
+SUGGESTED FIX: Guard the same way: `life = w.get("life"); life = life if isinstance(life, (int, float)) else 0` before formatting, and skip/blank malformed windows instead of crashing.
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/settings.py:79
+ID: settings.py:79:reserves-verbatim-claim-strips
+ISSUE: `edit_reserves` docstring claims "other entries stay verbatim," but the implementation strips whitespace and re-joins with `", "`, reformatting untouched entries.
+ATTACK VECTOR: The docstring asserts preservation of non-target entries; the code does `part = part.strip()` (line ~83) and `", ".join(out)` (line ~95). Any hand-formatted entry such as `a@x.com:15 ,  b@x.com:5` is rewritten to `a@x.com:15, b@x.com:5`. This is a comment/code mismatch that could mislead a future maintainer into trusting exact round-trip preservation.
+SUGGESTED FIX: Either keep original `part` text (store the untrimmed token) for non-target entries, or amend the docstring to say whitespace is normalized.
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/cli.py:402
+ID: cli.py:402:limit-read-modify-write-race
+ISSUE: `_limit_command` computes the new `reserveAccount` from `settings` loaded earlier, then writes it back, with no lock — a read-modify-write lost-update window.
+ATTACK VECTOR: Two concurrent `cswap limit` invocations (or a `limit` racing another settings writer) both load the same `settings.reserve_account`, each edits its own copy, and the last `set_setting` wins, silently discarding the other account's floor change. Settings file itself likely stays valid (atomic replace), but the logical update is lost.
+SUGGESTED FIX: Re-load `settings` immediately before computing `edit_reserves`, and/or perform the load-edit-write under a file lock so concurrent edits serialize.
+
+
+###############################################################
+###   PROVIDER: BYTEPLUS-3
+###############################################################
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/cli.py:1328
+ID: cli.py:1328:reset-check-ignores-reading-time
+ISSUE: Window used percentage incorrectly shows 0% when reset time is before reading time, due to missing check against reading timestamp
+ATTACK VECTOR: After a quota resets, a user reads the quota (capturing current life percentage). When viewing later, the code sees the reset time is in the past and incorrectly displays 0% used, regardless of the actual life value. This causes users to believe accounts have full quota remaining when they are partially or fully used, leading to unexpected API failures or incorrect auto-switching.
+SUGGESTED FIX: Modify the condition to only treat the window as fresh if the reset occurred after the reading was taken:
+  Change `reset <= now` to `isinstance(entry.get("at"), (int, float)) and reset > entry["at"] and reset <= now`
+  Update the comment to clarify the logic.
+
+---
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: src/claude_swap/agy.py:383
+ID: agy.py:383:non-iterable-buckets-typeerror
+ISSUE: parse_summary raises uncaught TypeError when a group's "buckets" field is non-iterable, breaking quota fetch
+ATTACK VECTOR: If the retrieveUserQuotaSummary API returns a group with "buckets" as a non-iterable (e.g., int, float, bool due to API changes, error responses, or malformed data), parse_summary attempts to iterate over it, raising TypeError. This exception is not caught in fetch_quota's try-except block (which only catches URLError, OSError, ValueError), causing the entire quota fetch to fail. This breaks core functionality like `cswap agy list` and auto-switching, even though windows are explicitly supposed to be display-only.
+SUGGESTED FIX: In parse_summary, validate that "buckets" is a list before iterating:
+  Change `for bucket in group.get("buckets") or []:` to `for bucket in (group.get("buckets") if isinstance(group.get("buckets"), list) else [])`
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/cli.py:1328
+ID: cli.py:1328:invalid-life-valueerror
+ISSUE: Uncaught ValueError when window life is non-numeric in state file
+ATTACK VECTOR: If the state file is corrupted or manually edited to have a non-numeric "life" value (e.g., string, invalid type), the line `100 - float(w.get("life") or 0)` raises ValueError, crashing `cswap agy list`. While the state file is normally written correctly, this is a brittle point for display-only data.
+SUGGESTED FIX: Validate the life value before conversion:
+  Change `float(w.get("life") or 0)` to `float(w.get("life")) if isinstance(w.get("life"), (int, float)) else 0.0`
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/settings.py:90
+ID: settings.py:90:duplicate-reserve-entries-removed
+ISSUE: edit_reserves silently removes duplicate entries for the same target account
+ATTACK VECTOR: If the reserve_account setting has duplicate entries for the same account (e.g., "greg:15, greg@example.com:20"), running `cswap limit greg 30` replaces the first entry and removes all other matching duplicates without warning. While this may clean up accidental duplicates, it masks configuration errors and is undocumented behavior.
+SUGGESTED FIX: Document this behavior in the docstring for edit_reserves, or add a warning when duplicates are detected during editing.
+
+---
+
+SEVERITY: INFO
+CONFIDENCE: low
+FILE: src/claude_swap/agy.py:360
+ID: agy.py:360:gemini-window-none-model
+ISSUE: Gemini window may display "None" as the window name if model is None
+ATTACK VECTOR: If parse_models returns a Quota for "gemini" with life set but model set to None (e.g., generic Gemini quota without a specific model name), the Gemini window's "window" field will be None, displaying as "None" in `cswap agy list` for poor UX.
+SUGGESTED FIX: Add a fallback for gemini.model when creating the Gemini window:
+  Change `"window": gemini.model` to `"window": gemini.model or "Gemini"`
+
+---
+
+SEVERITY: INFO
+CONFIDENCE: medium
+FILE: src/claude_swap/agy.py:365
+ID: agy.py:365:silent-summary-failure-no-feedback
+ISSUE: Failed retrieveUserQuotaSummary calls are completely silent with no logging
+ATTACK VECTOR: When the retrieveUserQuotaSummary API call fails (network error, permission issue), the exception is caught and ignored, so windows are simply missing from output. Users have no way to distinguish between "no windows exist" and "failed to fetch windows", making troubleshooting harder.
+SUGGESTED FIX: Add debug-level logging when the summary fetch fails, to aid troubleshooting without breaking functionality.
+
+
+###############################################################
+###   PROVIDER: QWEN
+###############################################################
+
+FIXED FINDINGS (adversarial review)
+
+---
+
+SEVERITY: CRITICAL
+CONFIDENCE: high
+FILE: tests/test_reserve_account.py:314
+ID: test_reserve_account:314:parametrize-decorator-indentation
+ISSUE: The new `@pytest.mark.parametrize(` line is indented one space at module scope, where every sibling statement sits at column 0 (`def test_edit_reserves(...)` on the next block has no indent) — Python raises `IndentationError: unexpected indent` at parse time.
+ATTACK VECTOR: The file cannot be imported, so the entire `test_reserve_account.py` module fails collection — not just the new `edit_reserves` test. The pre-existing `TestPoolReserve` cases that actually cover the switch engine's reserve behaviour also stop running. CI either turns globally red (visible) or, if the suite is invoked per-file/glob with errors tolerated, silently drops a whole coverage area while the new `edit_reserves` behaviour ships untested.
+SUGGESTED FIX: Remove the leading space so the decorator starts at column 0. Re-run `pytest tests/test_reserve_account.py` and confirm the five parametrized cases (not just "collected 0, no errors") execute.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/agy.py:358
+ID: agy:358:hardcoded-gemini-key-window-field-model-name
+ISSUE: `parse_models(payload, ["gemini"])` invents a model key that is not part of the caller-supplied `models` list, and stuffs it into the `window` slot of the window record (`"window": gemini.model`), while `parse_summary`'s own docstring defines `window` as `"weekly"`/`"5h"`.
+ATTACK VECTOR: Two failures. (a) The API's real identifier is almost certainly not the bare string `gemini` (it is `models/gemini-...` or similar), so `gemini.life` is `None` and the "Gemini gets its own line" feature that the comment advertises silently never appears — no error, no log, just a missing line that is indistinguishable from "no Gemini quota". (b) When it *does* match, `cswap agy list` renders `Gemini models · gemini` where every other row renders `Claude and GPT models · weekly`, so the user compares a per-model remaining reading against a per-group window reading without knowing they are different units. Nothing downstream (`_ts`, `record`, the renderer) distinguishes the two record shapes.
+SUGGESTED FIX: Derive the extra call from an explicit, documented key (or skip it entirely and let `parse_models(payload, models)` report the per-model line). If the Gemini row must live in `windows`, tag the record with a `kind` field (e.g. `"model"` vs `"group"`) so the renderer can label and order it honestly, and gate the extra parsing on `"gemini"` not already being in `models`.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: high
+FILE: src/claude_swap/agy.py:362
+ID: agy:362:summary-post-on-every-quota-read
+ISSUE: An unconditional second HTTP round-trip (`retrieveUserQuotaSummary`) is added to `fetch_quota`, with its own full `timeout`, for data the code itself calls "display-only".
+ATTACK VECTOR: `fetch_quota` is on the hot path (`return replace(quota, windows=...)` is the function's normal exit, and the `Quota` it returns feeds the switch). Worst-case wall time per read doubles to `2 * timeout` (default 40 s), and the request count against the quota endpoint doubles on every autoswitch tick and every `cswap agy list` over N accounts. Under provider rate-limiting the second call starts returning 429s, which the `except: pass` swallows, so windows degrade to nothing while the added latency and request cost remain. There is no cache, no flag, and no way for a caller that only needs the switch decision to opt out.
+SUGGESTED FIX: Make the summary read opt-in — a keyword arg on `fetch_quota` (default off) that only the `agy list` display path sets, or a separate `fetch_windows(...)` helper called from the renderer. Comment-code mismatch to note: the field comment at agy.py:283 promises "the switch still follows the models" while the switch now pays for the display data.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/cli.py:401
+ID: cli:401:is-target-swallows-resolve-error-duplicate-entry
+ISSUE: `is_target` returns `False` whenever `switcher.resolve_account(ident)` raises `ClaudeSwitchError`, so any stored reserve entry the switcher cannot currently resolve survives the edit untouched.
+ATTACK VECTOR: The config already holds `email`/`NUM`/`ALIAS` identifiers (the `_limit_command` docstring says entries are stored by email "because slot numbers differ between machines", so aliases/numbers demonstrably do occur). Run `cswap limit <acct> 15` on a machine where an older entry for the *same* account is written as a slot number or alias that does not resolve here (account disabled, different pool, alias only valid in the mapped dir): `is_target` returns `False`, the old entry is copied verbatim, the new `email:15` entry is appended, and `reserveAccount` now has two contradictory floors for one account. `edit_reserves`'s docstring claims the target's entry is "replaced", but replacement silently became duplication, and which floor wins is decided by `parse_reserves`'s order, not by the user's command. The CLI then prints the reassuring `keeps 15% of its week` with no hint that the effective limit is still 5%.
+SUGGESTED FIX: Make the failure path loud rather than permissive: track whether any part was skipped due to `ClaudeSwitchError` and print it (`ambiguous entry 'x' left as-is — resolve it manually`), or drop non-resolvable-but-suspicious entries. At minimum, refuse to append a second entry when the count of entries already keyed to this email is > 0.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/agy.py:364
+ID: agy:364:except-pass-hides-persistent-config-error
+ISSUE: `except (urllib.error.URLError, OSError, ValueError): pass` combined with `{"project": project} if project else {}` makes a permanent, deterministic misconfiguration look like a transient blip and be discarded with no signal.
+ATTACK VECTOR: `HTTPError` subclasses `URLError`, so a *400/401/403* from `retrieveUserQuotaSummary` — e.g. the endpoint requiring `project`, an expired scope, a changed request shape — is thrown away identically to a dropped packet. The result is that `cswap agy list` permanently shows no weekly windows for that account and there is no way to tell "this account has no shared windows" from "every summary call has been failing with 401 since the token rotated". Note also that the tuple is not wide enough to actually enforce its own promise ("never fail a reading over them"): a `TypeError`/`AttributeError` from a shape change in `_post`'s or `parse_summary`'s handling propagates and kills the reading anyway, so the guard provides no coverage against the failure mode that would most likely happen.
+SUGGESTED FIX: Keep the non-fatal behaviour but record it: on exception set a marker (`quota.error`-adjacent, or `windows` sentinel) so the list can print `windows unavailable (<exception type>)` instead of nothing, and log the code for `HTTPError` specifically rather than swallowing it.
+
+---
+
+SEVERITY: WARNING
+CONFIDENCE: medium
+FILE: src/claude_swap/cli.py:1329
+ID: cli:1329:reset-passed-window-rendered-zero-used
+ISSUE: `used = 0.0 if isinstance(reset, (int, float)) and reset <= now else 100 - float(w.get("life") or 0)` declares any window whose recorded reset is in the past as 0% used, regardless of how old the reading is or how many reset cycles elapsed.
+ATTACK VECTOR: The parent line prints `read N min ago`, but the child line's freshness inference ignores N entirely. A 3-day-old state entry (account not live, so never re-read) whose 5h windows all reset hours ago renders every window as `0% used`, i.e. "fully available", when the account may in fact be exhausted — the model-level reading right above it says the opposite. Because these windows are exactly the weekly limit the comment at agy.py:281 says "lives only there", the display can affirmatively tell a user to switch to an account that has nothing left. Secondary crash path: `life`/`resetAt` come from `json.load` on the state file with no validation (only `isinstance(w, dict)` is checked), so a `null`-vs-string drift or hand-edited/corrupt entry raises `ValueError` from `float(...)` inside the listing loop.
+SUGGESTED FIX: Apply the reset-based refresh only when the reading is still credible (e.g. `age` under the window length), and label the row `stale` otherwise; validate `w.get("life")` is numeric and skip the row instead of letting `float()` throw.
+
+---
+
+SEVERITY: INFO
+CONFIDENCE: high
+FILE: src/claude_swap/agy.py:378
+ID: agy:378:bool-and-nan-pass-numeric-fraction-check
+ISSUE: `isinstance(fraction, (int, float))` admits `bool` (JSON `true` → `1.0`), and `max(0.0, min(100.0, nan))` collapses NaN to `100.0` because the comparison `nan < 100.0` is False.
+ATTACK VECTOR: A malformed upstream field reads as the *most favourable* state: `remainingFraction: true` or a NaN from a non-strict JSON body both become `life = 100.0`, rendered as `0% used`. The clamp's argument order makes corruption fail "quota wide open" rather than "unknown", which is the one direction that can mislead a switch decision if these windows are ever reused beyond display. `float(fraction)` also never rejects `Decimal`-style strings, so `"0.25"` would raise `TypeError` outside the guard's intent (strings are excluded, fine) — but no `math.isfinite` check exists.
+SUGGESTED FIX: Exclude bools explicitly (`isinstance(fraction, (int, float)) and not isinstance(fraction, bool)`) and use `math.isfinite(...)` before the clamp, emitting the record with `life = None` (or skipping it) for non-finite values.
+
+===============================================================
+END OF CROSS-PROVIDER REVIEW
+===============================================================
