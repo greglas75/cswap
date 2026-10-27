@@ -1320,15 +1320,22 @@ def _agy_command(argv: list[str]) -> None:
                     print(f"     └ {muted('no reading yet (read while it is the live login)')}")
                     continue
                 age = int((now - entry.get("at", now)) // 60)
-                windows = [w for w in entry.get("windows") or [] if isinstance(w, dict)]
-                print(f"     {'├' if windows else '└'} {100 - entry['life']:5.0f}% used   "
+                windows = [w for w in entry.get("windows") or []
+                           if isinstance(w, dict) and isinstance(w.get("life"), (int, float))]
+                # A window whose reset passed since the reading is fresh again
+                # (the rule agy.known_life ranks by).
+                def used_pct(life, reset) -> float:
+                    if isinstance(reset, (int, float)) and reset <= now:
+                        return 0.0
+                    return 100 - max(0.0, min(100.0, float(life)))
+                print(f"     {'├' if windows else '└'} "
+                      f"{used_pct(entry['life'], entry.get('resetAt')):5.0f}% used   "
                       f"{entry.get('model') or ''}   "
                       f"{in_time(entry.get('resetAt'))}   {muted(f'read {age} min ago')}")
                 for i, w in enumerate(windows):
                     reset = w.get("resetAt")
-                    # A window whose reset passed since the reading is fresh again.
-                    used = 0.0 if isinstance(reset, (int, float)) and reset <= now else 100 - float(w.get("life") or 0)
-                    print(f"     {'└' if i == len(windows) - 1 else '├'} {used:5.0f}% used   "
+                    print(f"     {'└' if i == len(windows) - 1 else '├'} "
+                          f"{used_pct(w['life'], reset):5.0f}% used   "
                           f"{w.get('group')} · {w.get('window')}   {in_time(reset)}")
             if current and current not in emails:
                 print()

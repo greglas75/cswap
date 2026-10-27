@@ -217,3 +217,4 @@ def test_the_summary_yields_each_groups_weekly_and_5h_window():
     assert [(w["window"], w["life"]) for w in windows] == [("weekly", 25.0), ("5h", 100.0)]
     assert windows[0]["group"] == "Claude and GPT models"
     assert agy.parse_summary({"groups": "nope"}) == ()
+    assert agy.parse_summary({"groups": [{"buckets": 5}]}) == ()   # was a TypeError
